@@ -1,0 +1,44 @@
+:root {
+  --bg: #070b14;
+  --card: rgba(15, 20, 34, 0.8);
+  --line: rgba(255, 255, 255, 0.1);
+  --text: #f5f7ff;
+  --muted: #9fb0d9;
+  --accent: #7cf0c6;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: "Outfit", sans-serif;
+  background: radial-gradient(circle at 20% 20%, #202d57, var(--bg));
+  color: var(--text);
+}
+.bg-orb { position: fixed; border-radius: 50%; filter: blur(60px); opacity: .35; z-index: -1; }
+.orb-1 { width: 260px; height: 260px; background: #60f7d4; top: 6%; left: 8%; }
+.orb-2 { width: 300px; height: 300px; background: #b57cff; bottom: 8%; right: 10%; }
+.app-shell { padding: 2rem; max-width: 1100px; margin: 0 auto; }
+.card { backdrop-filter: blur(16px); border: 1px solid var(--line); border-radius: 24px; background: var(--card); padding: 2rem; box-shadow: 0 20px 70px rgba(0,0,0,.35); }
+.hidden { display: none; }
+.eyebrow { text-transform: uppercase; letter-spacing: .12em; color: var(--muted); font-size: .72rem; margin-bottom: .3rem; }
+h1, h2, h3 { margin: .2rem 0 .6rem; }
+.auth-form { display: grid; gap: 1rem; max-width: 400px; margin-top: 1rem; }
+label { display: grid; gap: .5rem; color: var(--muted); }
+input, select, button { border-radius: 12px; border: 1px solid var(--line); padding: .8rem .95rem; font: inherit; }
+input, select { background: rgba(255,255,255,.06); color: var(--text); }
+button { background: linear-gradient(90deg,#6df0c4,#4bb7ff); color: #031423; font-weight: 700; cursor: pointer; border: none; }
+button.ghost { background: transparent; border: 1px solid var(--line); color: var(--text); }
+.grid { display: grid; grid-template-columns: repeat(2,1fr); gap: 1rem; }
+.panel { border: 1px solid var(--line); border-radius: 16px; padding: 1rem; background: rgba(255,255,255,.03); }
+.full { grid-column: 1 / -1; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit,minmax(160px,1fr)); gap: .8rem; }
+.poke-card { border: 1px solid var(--line); border-radius: 14px; padding: .8rem; background: rgba(255,255,255,.04); }
+.poke-card button { width: 100%; margin-top: .5rem; }
+.feed { list-style: none; margin: .5rem 0 0; padding: 0; display: grid; gap: .45rem; max-height: 220px; overflow: auto; }
+.feed li { padding: .55rem .7rem; border-radius: 10px; background: rgba(255,255,255,.05); color: #dce4ff; font-size: .92rem; }
+.stats { display: flex; gap: 1rem; margin: 1rem 0; }
+.stats div { background: rgba(255,255,255,.04); border: 1px solid var(--line); border-radius: 12px; padding: .7rem 1rem; }
+.stats span { font-size: 1.7rem; font-weight: 800; display: block; }
+.collection { display: flex; flex-wrap: wrap; gap: .5rem; }
+.chip { padding: .45rem .7rem; border-radius: 999px; background: rgba(118,223,210,.18); border: 1px solid rgba(121,240,198,.4); }
+@media (max-width: 850px) { .grid { grid-template-columns: 1fr; } }
