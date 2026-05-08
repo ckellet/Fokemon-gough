@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FokéMap — Catch Fokemon</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="bg-orb orb-1"></div>
+    <div class="bg-orb orb-2"></div>
+
+    <main class="app-shell">
+      <section class="card auth-card" id="authCard">
+        <div class="brand">
+          <p class="eyebrow">Fokemon Trainer Net</p>
+          <h1>Start your local FokéGo adventure</h1>
+          <p>Create a quick trainer profile and instantly sync with everyone online.</p>
+        </div>
+
+        <form id="signupForm" class="auth-form">
+          <label>
+            Trainer name
+            <input id="trainerName" type="text" minlength="2" maxlength="20" placeholder="e.g. NovaSpark" required />
+          </label>
+          <label>
+            Team color
+            <select id="teamColor">
+              <option value="mint">Mint</option>
+              <option value="violet">Violet</option>
+              <option value="sun">Sun</option>
+            </select>
+          </label>
+          <button type="submit">Enter world</button>
+        </form>
+      </section>
+
+      <section class="card game-card hidden" id="gameCard">
+        <header>
+          <div>
+            <p class="eyebrow">Live sync online</p>
+            <h2 id="welcome"></h2>
+          </div>
+          <button id="resetProfile" class="ghost">Switch trainer</button>
+        </header>
+
+        <div class="grid">
+          <article class="panel">
+            <h3>Nearby Fokemon cards</h3>
+            <p>Tap to catch. Catches sync globally in real-time.</p>
+            <div class="cards" id="cardsList"></div>
+          </article>
+
+          <article class="panel">
+            <h3>World feed</h3>
+            <p>Fresh catches from all trainers.</p>
+            <ul id="feedList" class="feed"></ul>
+          </article>
+
+          <article class="panel full">
+            <h3>Your collection</h3>
+            <div class="stats">
+              <div>
+                <span id="caughtCount">0</span>
+                <small>Total caught</small>
+              </div>
+              <div>
+                <span id="uniqueCount">0</span>
+                <small>Unique cards</small>
+              </div>
+            </div>
+            <div id="collection" class="collection"></div>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/gun/gun.js"></script>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
