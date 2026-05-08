@@ -1,7 +1,22 @@
-import Gun from "https://cdn.jsdelivr.net/npm/gun/gun.js";
+const FALLBACK_EVENTS_NODE = {
+  set() {},
+  map() {
+    return { on() {} };
+  },
+};
 
-const gun = Gun(["https://gun-manhattan.herokuapp.com/gun"]);
-const eventsNode = gun.get("fokemon").get("events");
+let eventsNode = FALLBACK_EVENTS_NODE;
+
+import("https://cdn.jsdelivr.net/npm/gun/gun.js")
+  .then(({ default: Gun }) => {
+    const gun = Gun(["https://gun-manhattan.herokuapp.com/gun"]);
+    eventsNode = gun.get("fokemon").get("events");
+    connectFeed();
+  })
+  .catch(() => {
+    // Keep local gameplay working even when the public sync peer or CDN is unavailable.
+    eventsNode = FALLBACK_EVENTS_NODE;
+  });
 
 const cards = [
   { id: "voltlynx", name: "VoltLynx", type: "Electric" },
@@ -29,6 +44,7 @@ const el = {
 let profile = JSON.parse(localStorage.getItem("fokemon_profile") || "null");
 let caught = JSON.parse(localStorage.getItem("fokemon_caught") || "[]");
 const recentEvents = [];
+let feedConnected = false;
 
 function saveLocal() {
   localStorage.setItem("fokemon_profile", JSON.stringify(profile));
@@ -46,9 +62,7 @@ function renderCollection() {
 
 function renderFeed() {
   const ordered = [...recentEvents].sort((a, b) => b.ts - a.ts).slice(0, 20);
-  el.feedList.innerHTML = ordered
-    .map((e) => `<li><strong>${e.trainer}</strong> caught ${e.card}</li>`)
-    .join("");
+  el.feedList.innerHTML = ordered.map((e) => `<li><strong>${e.trainer}</strong> caught ${e.card}</li>`).join("");
 }
 
 function catchCard(card) {
@@ -86,6 +100,9 @@ function renderCards() {
 }
 
 function connectFeed() {
+  if (feedConnected) return;
+  feedConnected = true;
+
   eventsNode.map().on((event) => {
     if (!event || !event.ts || !event.trainer || !event.card) return;
     const alreadyThere = recentEvents.some((e) => e.ts === event.ts && e.trainer === event.trainer && e.card === event.card);
