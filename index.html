@@ -49,8 +49,13 @@
 
         <div class="grid">
           <article class="panel">
-            <h3>Nearby Fokemon cards</h3>
-            <p>Tap to catch. Catches sync globally in real-time.</p>
+            <h3>Nearby Fokemon map</h3>
+            <p>Enable location to see nearby Fokemon and other trainers. Move close to a pulse, then start the catch challenge.</p>
+            <div class="location-row">
+              <button id="enableLocation" class="ghost">Enable location</button>
+              <small id="locationStatus">Location off</small>
+            </div>
+            <div class="map" id="nearbyMap" aria-label="Nearby map"></div>
             <div class="cards" id="cardsList"></div>
           </article>
 
