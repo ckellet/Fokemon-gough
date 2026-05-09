@@ -278,6 +278,7 @@ function enterGame() {
   renderMap();
   renderCollection();
   connectFeed();
+  if (!playerLocation) startLocationTracking();
 }
 
 el.form.addEventListener("submit", (e) => {
