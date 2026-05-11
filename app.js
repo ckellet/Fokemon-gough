@@ -31,11 +31,11 @@ async function initGun() {
 initGun();
 
 const cards = [
-  { id: "voltlynx", name: "VoltLynx", type: "Electric" },
-  { id: "mossaur", name: "Mossaur", type: "Leaf" },
-  { id: "aquaphin", name: "AquaPhin", type: "Water" },
-  { id: "emberoo", name: "Emberoo", type: "Fire" },
-  { id: "cryptowl", name: "CryptOwl", type: "Shadow" },
+  { id: "voltlynx", name: "VoltLynx", type: "Electric", latOffset: 0.001, lngOffset: -0.0002 },
+  { id: "mossaur", name: "Mossaur", type: "Leaf", latOffset: -0.0006, lngOffset: 0.0008 },
+  { id: "aquaphin", name: "AquaPhin", type: "Water", latOffset: 0.0004, lngOffset: 0.0011 },
+  { id: "emberoo", name: "Emberoo", type: "Fire", latOffset: -0.001, lngOffset: -0.0007 },
+  { id: "cryptowl", name: "CryptOwl", type: "Shadow", latOffset: 0.0002, lngOffset: -0.0012 },
 ];
 
 const el = {
@@ -46,6 +46,9 @@ const el = {
   team: document.getElementById("teamColor"),
   welcome: document.getElementById("welcome"),
   cardsList: document.getElementById("cardsList"),
+  nearbyMap: document.getElementById("nearbyMap"),
+  enableLocation: document.getElementById("enableLocation"),
+  locationStatus: document.getElementById("locationStatus"),
   feedList: document.getElementById("feedList"),
   caughtCount: document.getElementById("caughtCount"),
   uniqueCount: document.getElementById("uniqueCount"),
@@ -92,6 +95,8 @@ function catchCard(card) {
     trainer: profile.name,
     card: card.name,
     ts: Date.now(),
+    lat: playerLocation?.lat ?? null,
+    lng: playerLocation?.lng ?? null,
   };
 
   caught.push({ id: card.id, ts: event.ts });
@@ -219,6 +224,58 @@ function renderCards() {
   });
 }
 
+function renderMap() {
+  const availableCards = cards.filter((card) => isSpawnAvailable(card));
+  const points = availableCards
+    .map((card) => {
+      const meters = playerLocation ? Math.round(distanceMeters(playerLocation, getCardLocation(card))) : null;
+      return `<div class="map-point ${meters !== null && meters <= catchRangeMeters ? "near" : ""}" style="left:${Math.min(92, Math.max(8, 50 + card.lngOffset * 22000))}%;top:${Math.min(90, Math.max(10, 50 - card.latOffset * 22000))}%">
+          <span>${card.name}</span>
+          <small>${meters === null ? "distance unknown" : `${meters}m`}</small>
+        </div>`;
+    })
+    .join("");
+
+  const playerMarkers = playerLocation
+    ? [...trainerLocations.entries()]
+    .filter(([name, pos]) => name !== profile?.name && Date.now() - pos.ts < 30 * 60 * 1000)
+    .map(([name, pos]) => {
+      const deltaLng = pos.lng - playerLocation.lng;
+      const deltaLat = pos.lat - playerLocation.lat;
+      const left = Math.min(95, Math.max(5, 50 + deltaLng * 22000));
+      const top = Math.min(95, Math.max(5, 50 - deltaLat * 22000));
+      return `<div class="trainer-dot" style="left:${left}%;top:${top}%">${name.slice(0, 2).toUpperCase()}</div>`;
+    })
+    .join("")
+    : "";
+
+  el.nearbyMap.innerHTML = `${playerLocation ? `<div class="player-dot">You</div>` : `<div class="map-hint">Enable location for live distance + proximity catching.</div>`}${playerMarkers}${points}`;
+}
+
+function updateLocationStatus(text) {
+  el.locationStatus.textContent = text;
+}
+
+function startLocationTracking() {
+  if (!navigator.geolocation) {
+    updateLocationStatus("Geolocation unavailable in this browser.");
+    return;
+  }
+  updateLocationStatus("Requesting location…");
+
+  if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+  watchId = navigator.geolocation.watchPosition(
+    (pos) => {
+      playerLocation = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+      updateLocationStatus(`Live • ${playerLocation.lat.toFixed(4)}, ${playerLocation.lng.toFixed(4)}`);
+      renderMap();
+      renderCards();
+    },
+    () => updateLocationStatus("Location permission denied or unavailable."),
+    { enableHighAccuracy: true, maximumAge: 10000, timeout: 12000 }
+  );
+}
+
 function connectFeed() {
   if (feedConnected) return;
   feedConnected = true;
@@ -228,8 +285,12 @@ function connectFeed() {
     const alreadyThere = recentEvents.some((e) => e.ts === event.ts && e.trainer === event.trainer && e.card === event.card);
     if (alreadyThere) return;
     recentEvents.push(event);
+    if (event.lat && event.lng) {
+      trainerLocations.set(event.trainer, { lat: event.lat, lng: event.lng, ts: event.ts });
+    }
     if (recentEvents.length > 100) recentEvents.shift();
     renderFeed();
+    renderMap();
   });
 }
 
@@ -272,8 +333,11 @@ function enterGame() {
     profile.team === "violet" ? "#ca90ff" : profile.team === "sun" ? "#ffd173" : "#7cf0c6"
   );
   refreshCoordsAndCards();
+  renderCards();
+  renderMap();
   renderCollection();
   connectFeed();
+  if (!playerLocation) startLocationTracking();
 }
 
 el.form.addEventListener("submit", (e) => {
@@ -288,5 +352,10 @@ el.reset.addEventListener("click", () => {
   localStorage.removeItem("fokemon_profile");
   location.reload();
 });
+el.enableLocation.addEventListener("click", startLocationTracking);
 
 if (profile?.name) enterGame();
+setInterval(() => {
+  renderCards();
+  renderMap();
+}, 1000);
