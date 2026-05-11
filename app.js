@@ -10,19 +10,25 @@ const FALLBACK_EVENTS_NODE = {
 let eventsNode = FALLBACK_EVENTS_NODE;
 let gridCaughtNode = null;
 
-import("https://cdn.jsdelivr.net/npm/gun/gun.js")
-  .then(({ default: Gun }) => {
-    const gun = Gun(["https://gun-manhattan.herokuapp.com/gun"]);
+async function initGun() {
+  try {
+    const { default: Gun } = await import("https://cdn.jsdelivr.net/npm/gun/gun.js");
+    const gun = Gun({
+      peers: ["https://relay.peer.ooo/gun", "https://gun.o8.is/gun"],
+      localStorage: true,
+    });
     const root = gun.get("fokemon");
     eventsNode = root.get("events");
     gridCaughtNode = root.get("caughtByGrid");
     connectFeed();
     connectGridCaught();
-  })
-  .catch(() => {
-    // Keep local gameplay working even when the public sync peer or CDN is unavailable.
+  } catch {
+    // Keep local gameplay working even when public peers or CDN are unavailable.
     eventsNode = FALLBACK_EVENTS_NODE;
-  });
+  }
+}
+
+initGun();
 
 const cards = [
   { id: "voltlynx", name: "VoltLynx", type: "Electric" },
