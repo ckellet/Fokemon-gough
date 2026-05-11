@@ -406,6 +406,14 @@ function catchCard(card, placement) {
   publishGridCatch(card, event.ts);
 }
 
+const TYPE_COLORS = {
+  Electric: { light: "#fff48a", dark: "#c98a14" },
+  Leaf: { light: "#9cf6a8", dark: "#1f7a3a" },
+  Water: { light: "#9fdaff", dark: "#1d63b8" },
+  Fire: { light: "#ffb185", dark: "#c43a18" },
+  Shadow: { light: "#b9a2ff", dark: "#3d2778" },
+};
+
 function launchCatchChallenge(card, placement) {
   if (activeChallenge) return;
 
@@ -415,83 +423,433 @@ function launchCatchChallenge(card, placement) {
     <div class="challenge-card" role="dialog" aria-modal="true" aria-label="Catch ${escapeHtml(card.name)}">
       <p class="eyebrow">Catch challenge</p>
       <h3>Snare ${escapeHtml(card.name)}</h3>
-      <p>Click the glowing core while it moves. You need 3 hits in 6 seconds.</p>
+      <p>Pull back the foke-net, aim with the dotted path, and release to fling it.</p>
       <div class="arena">
-        <button class="target" aria-label="Catch target"></button>
+        <canvas class="catch-canvas" aria-label="Foke-net slingshot arena"></canvas>
       </div>
-      <p class="status" aria-live="polite">Hits: <strong>0/3</strong> &bull; Time left: <strong>6.0s</strong></p>
+      <p class="status" aria-live="polite">Nets left: <strong>3</strong> &bull; Drag the net to aim</p>
       <button class="ghost cancel">Run away</button>
     </div>
   `;
   document.body.appendChild(challenge);
   activeChallenge = challenge;
 
-  const target = challenge.querySelector(".target");
+  const canvas = challenge.querySelector(".catch-canvas");
   const status = challenge.querySelector(".status");
   const cancel = challenge.querySelector(".cancel");
+  const arena = challenge.querySelector(".arena");
 
-  let hits = 0;
-  const totalHits = 3;
-  const duration = 6000;
-  const started = performance.now();
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const rect = arena.getBoundingClientRect();
+  const W = Math.max(320, Math.floor(rect.width));
+  const H = Math.max(240, Math.floor(rect.height));
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = `${W}px`;
+  canvas.style.height = `${H}px`;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
 
-  function moveTarget() {
-    target.style.left = `${Math.random() * 75 + 5}%`;
-    target.style.top = `${Math.random() * 70 + 8}%`;
+  const ANCHOR = { x: W * 0.18, y: H * 0.72 };
+  const NET_RADIUS = 18;
+  const GRAVITY = 950;
+  const FLOOR_Y = H - 14;
+  const MAX_PULL = Math.min(120, FLOOR_Y - ANCHOR.y - NET_RADIUS - 4);
+  const POWER = 14;
+  const REST_OFFSET = { x: 0, y: -(NET_RADIUS + 8) };
+  const RESTING = { x: ANCHOR.x + REST_OFFSET.x, y: ANCHOR.y + REST_OFFSET.y };
+  const colors = TYPE_COLORS[card.type] || { light: "#cfd8ff", dark: "#3d4d8a" };
+
+  const fokemon = {
+    x: W * 0.74,
+    y: H * 0.45,
+    r: 30,
+    bobPhase: Math.random() * Math.PI * 2,
+    hopCooldown: 3.2,
+    caught: false,
+    captureScale: 1,
+    dodgeVx: 0,
+    dodgeTime: 0,
+  };
+
+  const DODGE_CHANCE = 0.45;
+  const DODGE_RANGE = 95;
+  const DODGE_SPEED = 360;
+  const DODGE_DURATION = 0.26;
+
+  let nets = 3;
+  let aiming = null;
+  let projectile = null;
+  let finished = false;
+  let outcome = null;
+  let netSpin = 0;
+  let dodgeArmed = false;
+  let dodgeTriggered = false;
+
+  function statusText() {
+    if (finished && outcome === "caught") return `<span class="success">Captured!</span> ${escapeHtml(card.name)} joined your collection.`;
+    if (finished && outcome === "escaped") return `<span class="fail">Escaped!</span> ${escapeHtml(card.name)} got away.`;
+    if (aiming) return `Nets left: <strong>${nets}</strong> &bull; Release to fire!`;
+    if (projectile) return `Nets left: <strong>${nets}</strong> &bull; Net in flight…`;
+    return `Nets left: <strong>${nets}</strong> &bull; Drag the net to aim`;
+  }
+
+  function setStatus() {
+    status.innerHTML = statusText();
+  }
+
+  function getPointer(e) {
+    const r = canvas.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+
+  function netRestPosition() {
+    if (aiming) return aiming;
+    return RESTING;
+  }
+
+  function onDown(e) {
+    if (finished || projectile || nets <= 0) return;
+    const p = getPointer(e);
+    const dx = p.x - RESTING.x;
+    const dy = p.y - RESTING.y;
+    if (dx * dx + dy * dy > 70 * 70) return;
+    e.preventDefault();
+    canvas.setPointerCapture?.(e.pointerId);
+    aiming = { x: RESTING.x, y: RESTING.y };
+    setStatus();
+  }
+
+  function onMove(e) {
+    if (!aiming) return;
+    e.preventDefault();
+    const p = getPointer(e);
+    let dx = p.x - ANCHOR.x;
+    let dy = p.y - ANCHOR.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist > MAX_PULL) {
+      dx = (dx / dist) * MAX_PULL;
+      dy = (dy / dist) * MAX_PULL;
+    }
+    let aimX = ANCHOR.x + dx;
+    let aimY = ANCHOR.y + dy;
+    aimX = Math.max(NET_RADIUS, Math.min(W - NET_RADIUS, aimX));
+    aimY = Math.max(NET_RADIUS, Math.min(FLOOR_Y - NET_RADIUS, aimY));
+    aiming = { x: aimX, y: aimY };
+  }
+
+  function onUp(e) {
+    if (!aiming) return;
+    e.preventDefault();
+    const pullDx = ANCHOR.x - aiming.x;
+    const pullDy = ANCHOR.y - aiming.y;
+    const pullMag = Math.hypot(pullDx, pullDy);
+    if (pullMag < 10) {
+      aiming = null;
+      setStatus();
+      return;
+    }
+    projectile = {
+      x: aiming.x,
+      y: aiming.y,
+      vx: pullDx * POWER,
+      vy: pullDy * POWER,
+    };
+    aiming = null;
+    nets -= 1;
+    dodgeArmed = !fokemon.caught && Math.random() < DODGE_CHANCE;
+    dodgeTriggered = false;
+    setStatus();
+  }
+
+  canvas.addEventListener("pointerdown", onDown);
+  canvas.addEventListener("pointermove", onMove);
+  canvas.addEventListener("pointerup", onUp);
+  canvas.addEventListener("pointercancel", onUp);
+
+  function hopFokemon() {
+    fokemon.x = W * (0.55 + Math.random() * 0.32);
+    fokemon.y = H * (0.28 + Math.random() * 0.42);
+  }
+
+  function step(dt) {
+    fokemon.bobPhase += dt * 2.4;
+    if (!fokemon.caught) {
+      fokemon.hopCooldown -= dt;
+      if (fokemon.hopCooldown <= 0) {
+        hopFokemon();
+        fokemon.hopCooldown = 2.4 + Math.random() * 1.6;
+      }
+    } else {
+      fokemon.captureScale = Math.max(0, fokemon.captureScale - dt * 2.4);
+    }
+
+    if (fokemon.dodgeTime > 0) {
+      fokemon.x += fokemon.dodgeVx * dt;
+      fokemon.dodgeTime -= dt;
+      if (fokemon.dodgeTime <= 0) {
+        fokemon.dodgeVx = 0;
+      }
+      fokemon.x = Math.max(fokemon.r + 4, Math.min(W - fokemon.r - 4, fokemon.x));
+    }
+
+    if (projectile) {
+      netSpin += dt * 8;
+      projectile.vy += GRAVITY * dt;
+      projectile.x += projectile.vx * dt;
+      projectile.y += projectile.vy * dt;
+
+      const bobY = fokemon.y + Math.sin(fokemon.bobPhase) * 5;
+
+      if (!fokemon.caught && dodgeArmed && !dodgeTriggered) {
+        const adx = projectile.x - fokemon.x;
+        const ady = projectile.y - bobY;
+        if (Math.hypot(adx, ady) < DODGE_RANGE) {
+          let direction = adx > 0 ? -1 : 1;
+          if (fokemon.x < fokemon.r * 2) direction = 1;
+          else if (fokemon.x > W - fokemon.r * 2) direction = -1;
+          fokemon.dodgeVx = direction * DODGE_SPEED;
+          fokemon.dodgeTime = DODGE_DURATION;
+          dodgeTriggered = true;
+        }
+      }
+
+      if (!fokemon.caught) {
+        const ddx = projectile.x - fokemon.x;
+        const ddy = projectile.y - bobY;
+        if (Math.hypot(ddx, ddy) < fokemon.r + NET_RADIUS - 4) {
+          fokemon.caught = true;
+          finished = true;
+          outcome = "caught";
+          projectile = null;
+          cancel.textContent = "Awesome!";
+          setStatus();
+          setTimeout(() => {
+            catchCard(card, placement);
+            setTimeout(closeChallenge, 700);
+          }, 700);
+          return;
+        }
+      }
+
+      const offscreen = projectile.x < -40 || projectile.x > W + 40 || projectile.y > FLOOR_Y + NET_RADIUS;
+      if (offscreen) {
+        projectile = null;
+        if (!fokemon.caught) {
+          hopFokemon();
+          fokemon.hopCooldown = 2.6;
+        }
+        if (nets <= 0) {
+          finished = true;
+          outcome = "escaped";
+          cancel.textContent = "Close";
+          setStatus();
+          setTimeout(closeChallenge, 1500);
+        } else {
+          setStatus();
+        }
+      }
+    }
+  }
+
+  function drawBackground() {
+    ctx.clearRect(0, 0, W, H);
+    const grad = ctx.createLinearGradient(0, FLOOR_Y - 20, 0, H);
+    grad.addColorStop(0, "rgba(124, 240, 198, 0.05)");
+    grad.addColorStop(1, "rgba(124, 240, 198, 0.18)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, FLOOR_Y - 4, W, H - FLOOR_Y + 4);
+
+    ctx.strokeStyle = "rgba(143, 171, 255, 0.25)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, FLOOR_Y);
+    ctx.lineTo(W, FLOOR_Y);
+    ctx.stroke();
+  }
+
+  function drawSlingshot(netPos, inFlight) {
+    ctx.fillStyle = "#5a3a22";
+    ctx.beginPath();
+    ctx.moveTo(ANCHOR.x - 7, ANCHOR.y + 28);
+    ctx.lineTo(ANCHOR.x + 7, ANCHOR.y + 28);
+    ctx.lineTo(ANCHOR.x + 3, ANCHOR.y - 6);
+    ctx.lineTo(ANCHOR.x - 3, ANCHOR.y - 6);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = "#7a5230";
+    ctx.beginPath();
+    ctx.moveTo(ANCHOR.x - 4, ANCHOR.y - 6);
+    ctx.quadraticCurveTo(ANCHOR.x - 22, ANCHOR.y - 18, ANCHOR.x - 18, ANCHOR.y - 30);
+    ctx.lineTo(ANCHOR.x - 13, ANCHOR.y - 30);
+    ctx.quadraticCurveTo(ANCHOR.x - 16, ANCHOR.y - 20, ANCHOR.x - 4, ANCHOR.y - 12);
+    ctx.closePath();
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(ANCHOR.x + 4, ANCHOR.y - 6);
+    ctx.quadraticCurveTo(ANCHOR.x + 22, ANCHOR.y - 18, ANCHOR.x + 18, ANCHOR.y - 30);
+    ctx.lineTo(ANCHOR.x + 13, ANCHOR.y - 30);
+    ctx.quadraticCurveTo(ANCHOR.x + 16, ANCHOR.y - 20, ANCHOR.x + 4, ANCHOR.y - 12);
+    ctx.closePath();
+    ctx.fill();
+
+    const leftTop = { x: ANCHOR.x - 16, y: ANCHOR.y - 26 };
+    const rightTop = { x: ANCHOR.x + 16, y: ANCHOR.y - 26 };
+    ctx.strokeStyle = "#d3a36b";
+    ctx.lineCap = "round";
+
+    if (inFlight) {
+      ctx.lineWidth = 3.5;
+      ctx.beginPath();
+      ctx.moveTo(leftTop.x, leftTop.y);
+      ctx.quadraticCurveTo(ANCHOR.x, ANCHOR.y - 8, rightTop.x, rightTop.y);
+      ctx.stroke();
+    } else {
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.moveTo(leftTop.x, leftTop.y);
+      ctx.lineTo(netPos.x - 2, netPos.y);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(rightTop.x, rightTop.y);
+      ctx.lineTo(netPos.x + 2, netPos.y);
+      ctx.stroke();
+    }
+  }
+
+  function drawTrajectory() {
+    if (!aiming) return;
+    const vx = (ANCHOR.x - aiming.x) * POWER;
+    const vy = (ANCHOR.y - aiming.y) * POWER;
+    const pullMag = Math.hypot(ANCHOR.x - aiming.x, ANCHOR.y - aiming.y);
+    const tints = pullMag / MAX_PULL;
+    ctx.fillStyle = `rgba(124, 240, 198, ${0.35 + tints * 0.5})`;
+    let crossedFloor = false;
+    for (let t = 0.04; t < 2.4; t += 0.06) {
+      const px = aiming.x + vx * t;
+      const py = aiming.y + vy * t + 0.5 * GRAVITY * t * t;
+      if (px < -20 || px > W + 20) break;
+      if (py > FLOOR_Y) {
+        if (crossedFloor) break;
+        continue;
+      }
+      if (py < 0) continue;
+      crossedFloor = true;
+      const size = 2.2 + (1 - t / 2.4) * 1.8;
+      ctx.beginPath();
+      ctx.arc(px, py, size, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function drawFokemon() {
+    if (fokemon.caught && fokemon.captureScale <= 0) return;
+    const scale = fokemon.caught ? fokemon.captureScale : 1;
+    const bobY = fokemon.y + Math.sin(fokemon.bobPhase) * 5;
+    const r = fokemon.r * scale;
+
+    ctx.fillStyle = "rgba(0,0,0,0.35)";
+    ctx.beginPath();
+    ctx.ellipse(fokemon.x, FLOOR_Y - 2, r * 0.75, 5, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    const grad = ctx.createRadialGradient(fokemon.x - r * 0.3, bobY - r * 0.4, r * 0.15, fokemon.x, bobY, r);
+    grad.addColorStop(0, colors.light);
+    grad.addColorStop(1, colors.dark);
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(fokemon.x, bobY, r, 0, Math.PI * 2);
+    ctx.fill();
+
+    if (!fokemon.caught) {
+      ctx.fillStyle = "#0b1226";
+      ctx.beginPath();
+      ctx.arc(fokemon.x - r * 0.28, bobY - r * 0.12, r * 0.11, 0, Math.PI * 2);
+      ctx.arc(fokemon.x + r * 0.28, bobY - r * 0.12, r * 0.11, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#fff";
+      ctx.beginPath();
+      ctx.arc(fokemon.x - r * 0.24, bobY - r * 0.16, r * 0.04, 0, Math.PI * 2);
+      ctx.arc(fokemon.x + r * 0.32, bobY - r * 0.16, r * 0.04, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.font = "600 12px Outfit, sans-serif";
+      ctx.fillStyle = "rgba(245, 247, 255, 0.9)";
+      ctx.textAlign = "center";
+      ctx.fillText(card.name, fokemon.x, bobY - r - 8);
+    }
+  }
+
+  function drawNet(pos, rotate) {
+    ctx.save();
+    ctx.translate(pos.x, pos.y);
+    if (rotate) ctx.rotate(netSpin);
+
+    ctx.fillStyle = "rgba(124, 240, 198, 0.18)";
+    ctx.beginPath();
+    ctx.arc(0, 0, NET_RADIUS, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = "#7cf0c6";
+    ctx.lineWidth = 2.4;
+    ctx.beginPath();
+    ctx.arc(0, 0, NET_RADIUS, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = "rgba(124, 240, 198, 0.65)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = -2; i <= 2; i++) {
+      const off = i * (NET_RADIUS / 2.6);
+      const w = Math.sqrt(Math.max(0, NET_RADIUS * NET_RADIUS - off * off));
+      ctx.moveTo(-w, off);
+      ctx.lineTo(w, off);
+      ctx.moveTo(off, -w);
+      ctx.lineTo(off, w);
+    }
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  function draw() {
+    drawBackground();
+    drawFokemon();
+
+    const netPos = projectile ? projectile : netRestPosition();
+    drawSlingshot(netPos, !!projectile);
+    drawTrajectory();
+    drawNet(netPos, !!projectile);
+  }
+
+  let lastTime = performance.now();
+  let rafId = 0;
+  function loop(now) {
+    if (!document.body.contains(challenge)) return;
+    const dt = Math.min(0.033, (now - lastTime) / 1000);
+    lastTime = now;
+    if (!finished || (fokemon.caught && fokemon.captureScale > 0)) step(dt);
+    draw();
+    rafId = requestAnimationFrame(loop);
   }
 
   function closeChallenge() {
+    cancelAnimationFrame(rafId);
     challenge.remove();
     activeChallenge = null;
     document.removeEventListener("keydown", onKey);
   }
 
   function onKey(ev) {
-    if (ev.key === "Escape") {
-      clearInterval(mover);
-      closeChallenge();
-    }
+    if (ev.key === "Escape") closeChallenge();
   }
   document.addEventListener("keydown", onKey);
 
-  function updateStatus(timeLeftMs) {
-    status.innerHTML = `Hits: <strong>${hits}/${totalHits}</strong> &bull; Time left: <strong>${(timeLeftMs / 1000).toFixed(1)}s</strong>`;
-  }
+  cancel.addEventListener("click", closeChallenge);
 
-  function tick() {
-    const elapsed = performance.now() - started;
-    const left = Math.max(0, duration - elapsed);
-    updateStatus(left);
-    if (left <= 0) {
-      status.innerHTML = `<span class="fail">escaped!</span> ${escapeHtml(card.name)} slipped away.`;
-      setTimeout(closeChallenge, 900);
-      return;
-    }
-    requestAnimationFrame(tick);
-  }
-
-  const mover = setInterval(moveTarget, 500);
-  moveTarget();
-  tick();
-
-  target.addEventListener("click", () => {
-    hits += 1;
-    target.classList.add("hit");
-    setTimeout(() => target.classList.remove("hit"), 140);
-    if (hits >= totalHits) {
-      clearInterval(mover);
-      status.innerHTML = `<span class="success">Captured!</span> ${escapeHtml(card.name)} joined your collection.`;
-      catchCard(card, placement);
-      setTimeout(closeChallenge, 800);
-      return;
-    }
-    moveTarget();
-  });
-
-  cancel.addEventListener("click", () => {
-    clearInterval(mover);
-    closeChallenge();
-  });
+  setStatus();
+  rafId = requestAnimationFrame(loop);
 }
 
 function updateLocationStatus(text) {
