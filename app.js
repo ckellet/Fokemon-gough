@@ -1,4 +1,14 @@
-import { computeSpawnSlots, filterUncaughtSpawns, getGridKey } from './app.logic.js';
+import {
+  computeSpawnPlacements,
+  filterUncaughtSpawns,
+  getGridKey,
+  SPAWN_CELL_DEGREES,
+} from "./app.logic.js";
+
+const SPAWN_INTERVAL_MS = 3 * 60 * 1000;
+const MAX_SPAWNS = 4;
+const CATCH_RANGE_METERS = 80;
+const GUN_PEERS = ["https://relay.peer.ooo/gun", "https://gun.o8.is/gun"];
 
 const FALLBACK_EVENTS_NODE = {
   set() {},
@@ -9,101 +19,389 @@ const FALLBACK_EVENTS_NODE = {
 
 let eventsNode = FALLBACK_EVENTS_NODE;
 let gridCaughtNode = null;
+let lastGridKey = null;
 
-async function initGun() {
+const cards = [
+  { id: "voltlynx", name: "VoltLynx", type: "Electric" },
+  { id: "mossaur", name: "Mossaur", type: "Leaf" },
+  { id: "aquaphin", name: "AquaPhin", type: "Water" },
+  { id: "emberoo", name: "Emberoo", type: "Fire" },
+  { id: "cryptowl", name: "CryptOwl", type: "Shadow" },
+];
+const cardsById = new Map(cards.map((c) => [c.id, c]));
+
+function $(id) {
+  return typeof document === "undefined" ? null : document.getElementById(id);
+}
+
+const el = {
+  auth: $("authCard"),
+  game: $("gameCard"),
+  form: $("signupForm"),
+  name: $("trainerName"),
+  team: $("teamColor"),
+  welcome: $("welcome"),
+  cardsList: $("cardsList"),
+  nearbyMap: $("nearbyMap"),
+  mapHint: $("mapHint"),
+  mapBucket: $("mapBucket"),
+  enableLocation: $("enableLocation"),
+  locationStatus: $("locationStatus"),
+  feedList: $("feedList"),
+  caughtCount: $("caughtCount"),
+  uniqueCount: $("uniqueCount"),
+  collection: $("collection"),
+  reset: $("resetProfile"),
+};
+
+function safeStorageGet(key, fallback) {
   try {
-    const { default: Gun } = await import("https://cdn.jsdelivr.net/npm/gun/gun.js");
-    const gun = Gun({
-      peers: ["https://relay.peer.ooo/gun", "https://gun.o8.is/gun"],
-      localStorage: true,
-    });
-    const root = gun.get("fokemon");
-    eventsNode = root.get("events");
-    gridCaughtNode = root.get("caughtByGrid");
-    connectFeed();
-    connectGridCaught();
+    const raw = localStorage.getItem(key);
+    return raw === null ? fallback : JSON.parse(raw);
   } catch {
-    // Keep local gameplay working even when public peers or CDN are unavailable.
-    eventsNode = FALLBACK_EVENTS_NODE;
+    return fallback;
   }
 }
 
-initGun();
-
-const cards = [
-  { id: "voltlynx", name: "VoltLynx", type: "Electric", latOffset: 0.001, lngOffset: -0.0002 },
-  { id: "mossaur", name: "Mossaur", type: "Leaf", latOffset: -0.0006, lngOffset: 0.0008 },
-  { id: "aquaphin", name: "AquaPhin", type: "Water", latOffset: 0.0004, lngOffset: 0.0011 },
-  { id: "emberoo", name: "Emberoo", type: "Fire", latOffset: -0.001, lngOffset: -0.0007 },
-  { id: "cryptowl", name: "CryptOwl", type: "Shadow", latOffset: 0.0002, lngOffset: -0.0012 },
-];
-
-const el = {
-  auth: document.getElementById("authCard"),
-  game: document.getElementById("gameCard"),
-  form: document.getElementById("signupForm"),
-  name: document.getElementById("trainerName"),
-  team: document.getElementById("teamColor"),
-  welcome: document.getElementById("welcome"),
-  cardsList: document.getElementById("cardsList"),
-  nearbyMap: document.getElementById("nearbyMap"),
-  enableLocation: document.getElementById("enableLocation"),
-  locationStatus: document.getElementById("locationStatus"),
-  feedList: document.getElementById("feedList"),
-  caughtCount: document.getElementById("caughtCount"),
-  uniqueCount: document.getElementById("uniqueCount"),
-  collection: document.getElementById("collection"),
-  reset: document.getElementById("resetProfile"),
-};
-
-let profile = JSON.parse(localStorage.getItem("fokemon_profile") || "null");
-let caught = JSON.parse(localStorage.getItem("fokemon_caught") || "[]");
+let profile = safeStorageGet("fokemon_profile", null);
+let caught = safeStorageGet("fokemon_caught", []);
 const recentEvents = [];
 const caughtIds = new Set(caught.map((c) => c.id));
+const gridCaughtIds = new Set();
+const trainerLocations = new Map();
+let playerLocation = null;
+let watchId = null;
 let feedConnected = false;
 let activeChallenge = null;
-let currentCoords = { lat: 0, lon: 0 };
+let currentPlacements = [];
+let currentPlacementsKey = null;
+
+let leafletMap = null;
+let playerMarker = null;
+let catchCircle = null;
+const spawnMarkers = new Map();
+const trainerMarkers = new Map();
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
+  );
+}
+
+function distanceMeters(a, b) {
+  if (!a || !b) return Infinity;
+  const R = 6371000;
+  const toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad((b.lng ?? b.lon) - (a.lng ?? a.lon));
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+  const x = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(x));
+}
 
 function saveLocal() {
-  localStorage.setItem("fokemon_profile", JSON.stringify(profile));
-  localStorage.setItem("fokemon_caught", JSON.stringify(caught));
+  try {
+    localStorage.setItem("fokemon_profile", JSON.stringify(profile));
+    localStorage.setItem("fokemon_caught", JSON.stringify(caught));
+  } catch {
+    /* private browsing — in-memory only */
+  }
+}
+
+function leafletReady() {
+  return typeof window !== "undefined" && typeof window.L !== "undefined";
+}
+
+function ensureMap() {
+  if (leafletMap || !leafletReady() || !el.nearbyMap) return leafletMap;
+  const L = window.L;
+  leafletMap = L.map(el.nearbyMap, {
+    zoomControl: true,
+    attributionControl: true,
+    worldCopyJump: true,
+  }).setView([0, 0], 2);
+
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: "&copy; OpenStreetMap contributors",
+  }).addTo(leafletMap);
+
+  el.nearbyMap.classList.add("leaflet-active");
+  return leafletMap;
+}
+
+function placementsKey(lat, lon, bucket) {
+  return `${getGridKey(lat, lon)}|${bucket}`;
+}
+
+function ensureFreshPlacements() {
+  if (!playerLocation) {
+    currentPlacements = [];
+    currentPlacementsKey = null;
+    return;
+  }
+  const bucket = Math.floor(Date.now() / SPAWN_INTERVAL_MS);
+  const key = placementsKey(playerLocation.lat, playerLocation.lng, bucket);
+  if (key === currentPlacementsKey) return;
+
+  currentPlacements = computeSpawnPlacements(cards, {
+    timeMs: Date.now(),
+    lat: playerLocation.lat,
+    lon: playerLocation.lng,
+    intervalMs: SPAWN_INTERVAL_MS,
+    maxSpawns: MAX_SPAWNS,
+  });
+  currentPlacementsKey = key;
+}
+
+function placementCatchable(p) {
+  if (!playerLocation || !p) return false;
+  return distanceMeters(playerLocation, { lat: p.lat, lng: p.lng }) <= CATCH_RANGE_METERS;
+}
+
+function placementStatus(p) {
+  if (caughtIds.has(p.card.id)) return "owned";
+  if (gridCaughtIds.has(p.card.id)) return "taken";
+  return "available";
+}
+
+function updateBucketLabel() {
+  if (!el.mapBucket) return;
+  if (!playerLocation || !currentPlacements.length) {
+    el.mapBucket.textContent = "";
+    return;
+  }
+  const expires = (Math.floor(Date.now() / SPAWN_INTERVAL_MS) + 1) * SPAWN_INTERVAL_MS;
+  const remainingMs = Math.max(0, expires - Date.now());
+  const mm = Math.floor(remainingMs / 60000);
+  const ss = Math.floor((remainingMs % 60000) / 1000)
+    .toString()
+    .padStart(2, "0");
+  el.mapBucket.textContent = `Refresh in ${mm}:${ss}`;
 }
 
 function renderCollection() {
+  if (!el.caughtCount) return;
   el.caughtCount.textContent = caught.length;
   const unique = [...new Set(caught.map((c) => c.id))];
   el.uniqueCount.textContent = unique.length;
   el.collection.innerHTML = unique
-    .map((id) => `<span class="chip">${cards.find((c) => c.id === id)?.name || id}</span>`)
+    .map((id) => `<span class="chip">${escapeHtml(cardsById.get(id)?.name || id)}</span>`)
     .join("");
 }
 
 function renderFeed() {
+  if (!el.feedList) return;
   const ordered = [...recentEvents].sort((a, b) => b.ts - a.ts).slice(0, 20);
-  el.feedList.innerHTML = ordered.map((e) => `<li><strong>${e.trainer}</strong> caught ${e.card}</li>`).join("");
+  el.feedList.innerHTML = ordered
+    .map((e) => `<li><strong>${escapeHtml(e.trainer)}</strong> caught ${escapeHtml(e.card)}</li>`)
+    .join("");
+}
+
+function renderCards() {
+  if (!el.cardsList) return;
+  ensureFreshPlacements();
+  const availablePlacements = currentPlacements.filter(
+    (p) => !caughtIds.has(p.card.id) && !gridCaughtIds.has(p.card.id)
+  );
+
+  if (!availablePlacements.length) {
+    el.cardsList.innerHTML = `<p class="empty-state">No Fokemon nearby right now. Walk around or wait for the next spawn cycle.</p>`;
+    return;
+  }
+
+  el.cardsList.innerHTML = availablePlacements
+    .map((p) => {
+      const meters = playerLocation
+        ? Math.round(distanceMeters(playerLocation, { lat: p.lat, lng: p.lng }))
+        : null;
+      const inRange = meters !== null && meters <= CATCH_RANGE_METERS;
+      const distLabel = meters === null
+        ? "Enable location to see distance"
+        : inRange
+          ? `In range • ${meters}m`
+          : `${meters}m away — walk closer`;
+      return `
+        <article class="poke-card">
+          <strong>${escapeHtml(p.card.name)}</strong>
+          <div>${escapeHtml(p.card.type)}</div>
+          <small>${distLabel}</small>
+          <button data-id="${p.card.id}" ${inRange ? "" : "disabled"}>${inRange ? "Start catch challenge" : "Out of range"}</button>
+        </article>
+      `;
+    })
+    .join("");
+
+  el.cardsList.querySelectorAll("button").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const card = cardsById.get(btn.dataset.id);
+      const placement = currentPlacements.find((p) => p.card.id === btn.dataset.id);
+      if (!card || !placement || !placementCatchable(placement)) return;
+      launchCatchChallenge(card, placement);
+    });
+  });
+}
+
+function makeSpawnIcon(p) {
+  const L = window.L;
+  const status = placementStatus(p);
+  const meters = playerLocation
+    ? Math.round(distanceMeters(playerLocation, { lat: p.lat, lng: p.lng }))
+    : null;
+  const near = meters !== null && meters <= CATCH_RANGE_METERS ? "near" : "";
+  const taken = status === "taken" ? "taken" : "";
+  return L.divIcon({
+    className: "",
+    html: `<div class="spawn-marker ${near} ${taken}"><span>${escapeHtml(p.card.name)}</span>${meters === null ? "" : `<small>${meters}m</small>`}</div>`,
+    iconSize: [56, 56],
+    iconAnchor: [28, 28],
+  });
+}
+
+function makePlayerIcon(label) {
+  const L = window.L;
+  return L.divIcon({
+    className: "",
+    html: `<div class="player-marker">${escapeHtml(label)}</div>`,
+    iconSize: [38, 38],
+    iconAnchor: [19, 19],
+  });
+}
+
+function makeTrainerIcon(name) {
+  const L = window.L;
+  return L.divIcon({
+    className: "",
+    html: `<div class="trainer-marker">${escapeHtml(String(name).slice(0, 2).toUpperCase())}</div>`,
+    iconSize: [30, 30],
+    iconAnchor: [15, 15],
+  });
+}
+
+function renderMap() {
+  if (!el.mapHint) return;
+
+  if (el.mapHint) el.mapHint.classList.toggle("hidden", Boolean(playerLocation));
+
+  if (!playerLocation) {
+    spawnMarkers.forEach((m) => m.remove());
+    spawnMarkers.clear();
+    trainerMarkers.forEach((m) => m.remove());
+    trainerMarkers.clear();
+    if (playerMarker) {
+      playerMarker.remove();
+      playerMarker = null;
+    }
+    if (catchCircle) {
+      catchCircle.remove();
+      catchCircle = null;
+    }
+    return;
+  }
+
+  const L = window.L;
+  if (!L) return;
+
+  const map = ensureMap();
+  if (!map) return;
+  ensureFreshPlacements();
+
+  const center = [playerLocation.lat, playerLocation.lng];
+  if (!playerMarker) {
+    playerMarker = L.marker(center, { icon: makePlayerIcon("YOU"), zIndexOffset: 1000 }).addTo(map);
+    map.setView(center, 18);
+  } else {
+    playerMarker.setLatLng(center);
+  }
+
+  if (!catchCircle) {
+    catchCircle = L.circle(center, {
+      radius: CATCH_RANGE_METERS,
+      className: "catch-ring",
+      color: "#7cf0c6",
+      weight: 1,
+      opacity: 0.65,
+      fillColor: "#7cf0c6",
+      fillOpacity: 0.08,
+    }).addTo(map);
+  } else {
+    catchCircle.setLatLng(center);
+  }
+
+  const wantedKeys = new Set();
+  currentPlacements.forEach((p) => {
+    const key = `${currentPlacementsKey}|${p.card.id}`;
+    wantedKeys.add(key);
+    let marker = spawnMarkers.get(key);
+    const icon = makeSpawnIcon(p);
+    if (!marker) {
+      marker = L.marker([p.lat, p.lng], { icon }).addTo(map);
+      marker.on("click", () => {
+        if (caughtIds.has(p.card.id) || gridCaughtIds.has(p.card.id)) return;
+        if (!placementCatchable(p)) {
+          map.flyTo([p.lat, p.lng], 19, { duration: 0.8 });
+          return;
+        }
+        launchCatchChallenge(p.card, p);
+      });
+      spawnMarkers.set(key, marker);
+    } else {
+      marker.setIcon(icon);
+      marker.setLatLng([p.lat, p.lng]);
+    }
+  });
+  for (const [key, marker] of spawnMarkers) {
+    if (!wantedKeys.has(key)) {
+      marker.remove();
+      spawnMarkers.delete(key);
+    }
+  }
+
+  const seenTrainers = new Set();
+  for (const [name, pos] of trainerLocations) {
+    if (name === profile?.name) continue;
+    if (Date.now() - pos.ts > 30 * 60 * 1000) continue;
+    seenTrainers.add(name);
+    let marker = trainerMarkers.get(name);
+    if (!marker) {
+      marker = L.marker([pos.lat, pos.lng], { icon: makeTrainerIcon(name) }).addTo(map);
+      trainerMarkers.set(name, marker);
+    } else {
+      marker.setLatLng([pos.lat, pos.lng]);
+    }
+  }
+  for (const [name, marker] of trainerMarkers) {
+    if (!seenTrainers.has(name)) {
+      marker.remove();
+      trainerMarkers.delete(name);
+    }
+  }
 }
 
 function publishGridCatch(card, ts) {
-  if (!gridCaughtNode) return;
-  const key = getGridKey(currentCoords.lat, currentCoords.lon);
+  if (!gridCaughtNode || !playerLocation) return;
+  const key = getGridKey(playerLocation.lat, playerLocation.lng);
   if (!key) return;
   gridCaughtNode.get(key).get(card.id).put({ cardId: card.id, ts });
 }
 
-function catchCard(card) {
+function catchCard(card, placement) {
   const event = {
     trainer: profile.name,
     card: card.name,
     ts: Date.now(),
-    lat: playerLocation?.lat ?? null,
-    lng: playerLocation?.lng ?? null,
+    lat: placement?.lat ?? playerLocation?.lat ?? null,
+    lng: placement?.lng ?? playerLocation?.lng ?? null,
   };
 
   caught.push({ id: card.id, ts: event.ts });
   caughtIds.add(card.id);
+  gridCaughtIds.add(card.id);
   saveLocal();
   renderCollection();
-  refreshCoordsAndCards();
+  renderCards();
+  renderMap();
   eventsNode.set(event);
   publishGridCatch(card, event.ts);
 }
@@ -116,20 +414,20 @@ const TYPE_COLORS = {
   Shadow: { light: "#b9a2ff", dark: "#3d2778" },
 };
 
-function launchCatchChallenge(card) {
+function launchCatchChallenge(card, placement) {
   if (activeChallenge) return;
 
   const challenge = document.createElement("div");
   challenge.className = "catch-challenge";
   challenge.innerHTML = `
-    <div class="challenge-card">
+    <div class="challenge-card" role="dialog" aria-modal="true" aria-label="Catch ${escapeHtml(card.name)}">
       <p class="eyebrow">Catch challenge</p>
-      <h3>Snare ${card.name}</h3>
+      <h3>Snare ${escapeHtml(card.name)}</h3>
       <p>Pull back the foke-net, aim with the dotted path, and release to fling it.</p>
       <div class="arena">
         <canvas class="catch-canvas" aria-label="Foke-net slingshot arena"></canvas>
       </div>
-      <p class="status">Nets left: <strong>3</strong> • Drag the net to aim</p>
+      <p class="status" aria-live="polite">Nets left: <strong>3</strong> &bull; Drag the net to aim</p>
       <button class="ghost cancel">Run away</button>
     </div>
   `;
@@ -189,11 +487,11 @@ function launchCatchChallenge(card) {
   let dodgeTriggered = false;
 
   function statusText() {
-    if (finished && outcome === "caught") return `<span class="success">Captured!</span> ${card.name} joined your collection.`;
-    if (finished && outcome === "escaped") return `<span class="fail">Escaped!</span> ${card.name} got away.`;
-    if (aiming) return `Nets left: <strong>${nets}</strong> • Release to fire!`;
-    if (projectile) return `Nets left: <strong>${nets}</strong> • Net in flight…`;
-    return `Nets left: <strong>${nets}</strong> • Drag the net to aim`;
+    if (finished && outcome === "caught") return `<span class="success">Captured!</span> ${escapeHtml(card.name)} joined your collection.`;
+    if (finished && outcome === "escaped") return `<span class="fail">Escaped!</span> ${escapeHtml(card.name)} got away.`;
+    if (aiming) return `Nets left: <strong>${nets}</strong> &bull; Release to fire!`;
+    if (projectile) return `Nets left: <strong>${nets}</strong> &bull; Net in flight…`;
+    return `Nets left: <strong>${nets}</strong> &bull; Drag the net to aim`;
   }
 
   function setStatus() {
@@ -233,7 +531,6 @@ function launchCatchChallenge(card) {
       dx = (dx / dist) * MAX_PULL;
       dy = (dy / dist) * MAX_PULL;
     }
-    // Keep the aim point onscreen so the net + trajectory stay visible.
     let aimX = ANCHOR.x + dx;
     let aimY = ANCHOR.y + dy;
     aimX = Math.max(NET_RADIUS, Math.min(W - NET_RADIUS, aimX));
@@ -308,7 +605,6 @@ function launchCatchChallenge(card) {
         const adx = projectile.x - fokemon.x;
         const ady = projectile.y - bobY;
         if (Math.hypot(adx, ady) < DODGE_RANGE) {
-          // Slide away from incoming net horizontally, biased so we slide off-screen-safe
           let direction = adx > 0 ? -1 : 1;
           if (fokemon.x < fokemon.r * 2) direction = 1;
           else if (fokemon.x > W - fokemon.r * 2) direction = -1;
@@ -329,7 +625,7 @@ function launchCatchChallenge(card) {
           cancel.textContent = "Awesome!";
           setStatus();
           setTimeout(() => {
-            catchCard(card);
+            catchCard(card, placement);
             setTimeout(closeChallenge, 700);
           }, 700);
           return;
@@ -339,7 +635,6 @@ function launchCatchChallenge(card) {
       const offscreen = projectile.x < -40 || projectile.x > W + 40 || projectile.y > FLOOR_Y + NET_RADIUS;
       if (offscreen) {
         projectile = null;
-        // Make the Fokemon dart after a near miss for extra challenge
         if (!fokemon.caught) {
           hopFokemon();
           fokemon.hopCooldown = 2.6;
@@ -359,8 +654,6 @@ function launchCatchChallenge(card) {
 
   function drawBackground() {
     ctx.clearRect(0, 0, W, H);
-
-    // ground band
     const grad = ctx.createLinearGradient(0, FLOOR_Y - 20, 0, H);
     grad.addColorStop(0, "rgba(124, 240, 198, 0.05)");
     grad.addColorStop(1, "rgba(124, 240, 198, 0.18)");
@@ -376,7 +669,6 @@ function launchCatchChallenge(card) {
   }
 
   function drawSlingshot(netPos, inFlight) {
-    // Y posts
     ctx.fillStyle = "#5a3a22";
     ctx.beginPath();
     ctx.moveTo(ANCHOR.x - 7, ANCHOR.y + 28);
@@ -408,14 +700,12 @@ function launchCatchChallenge(card) {
     ctx.lineCap = "round";
 
     if (inFlight) {
-      // Bands snap back across the fork while a net is in flight.
       ctx.lineWidth = 3.5;
       ctx.beginPath();
       ctx.moveTo(leftTop.x, leftTop.y);
       ctx.quadraticCurveTo(ANCHOR.x, ANCHOR.y - 8, rightTop.x, rightTop.y);
       ctx.stroke();
     } else {
-      // Bands stretched to wherever the net currently sits.
       ctx.lineWidth = 4;
       ctx.beginPath();
       ctx.moveTo(leftTop.x, leftTop.y);
@@ -459,13 +749,11 @@ function launchCatchChallenge(card) {
     const bobY = fokemon.y + Math.sin(fokemon.bobPhase) * 5;
     const r = fokemon.r * scale;
 
-    // shadow
     ctx.fillStyle = "rgba(0,0,0,0.35)";
     ctx.beginPath();
     ctx.ellipse(fokemon.x, FLOOR_Y - 2, r * 0.75, 5, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    // body
     const grad = ctx.createRadialGradient(fokemon.x - r * 0.3, bobY - r * 0.4, r * 0.15, fokemon.x, bobY, r);
     grad.addColorStop(0, colors.light);
     grad.addColorStop(1, colors.dark);
@@ -475,7 +763,6 @@ function launchCatchChallenge(card) {
     ctx.fill();
 
     if (!fokemon.caught) {
-      // eyes
       ctx.fillStyle = "#0b1226";
       ctx.beginPath();
       ctx.arc(fokemon.x - r * 0.28, bobY - r * 0.12, r * 0.11, 0, Math.PI * 2);
@@ -487,7 +774,6 @@ function launchCatchChallenge(card) {
       ctx.arc(fokemon.x + r * 0.32, bobY - r * 0.16, r * 0.04, 0, Math.PI * 2);
       ctx.fill();
 
-      // name label above
       ctx.font = "600 12px Outfit, sans-serif";
       ctx.fillStyle = "rgba(245, 247, 255, 0.9)";
       ctx.textAlign = "center";
@@ -552,7 +838,13 @@ function launchCatchChallenge(card) {
     cancelAnimationFrame(rafId);
     challenge.remove();
     activeChallenge = null;
+    document.removeEventListener("keydown", onKey);
   }
+
+  function onKey(ev) {
+    if (ev.key === "Escape") closeChallenge();
+  }
+  document.addEventListener("keydown", onKey);
 
   cancel.addEventListener("click", closeChallenge);
 
@@ -560,75 +852,22 @@ function launchCatchChallenge(card) {
   rafId = requestAnimationFrame(loop);
 }
 
-function renderCards() {
-  const spawns = computeSpawnSlots(cards, {
-    timeMs: Date.now(),
-    lat: currentCoords.lat,
-    lon: currentCoords.lon,
-    intervalMs: 3 * 60 * 1000,
-    maxSpawns: 3,
-  });
-  const availableCards = filterUncaughtSpawns(spawns, caughtIds);
-
-  if (!availableCards.length) {
-    el.cardsList.innerHTML = `<p class="empty-state">You caught every nearby Fokemon. Check back later for new spawns.</p>`;
-    return;
-  }
-
-  el.cardsList.innerHTML = availableCards
-    .map(
-      (card) => `
-    <article class="poke-card">
-      <strong>${card.name}</strong>
-      <div>${card.type}</div>
-      <button data-id="${card.id}">Start catch challenge</button>
-    </article>
-  `
-    )
-    .join("");
-
-  el.cardsList.querySelectorAll("button").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const card = cards.find((c) => c.id === btn.dataset.id);
-      launchCatchChallenge(card);
-    });
-  });
-}
-
-function renderMap() {
-  const availableCards = cards.filter((card) => isSpawnAvailable(card));
-  const points = availableCards
-    .map((card) => {
-      const meters = playerLocation ? Math.round(distanceMeters(playerLocation, getCardLocation(card))) : null;
-      return `<div class="map-point ${meters !== null && meters <= catchRangeMeters ? "near" : ""}" style="left:${Math.min(92, Math.max(8, 50 + card.lngOffset * 22000))}%;top:${Math.min(90, Math.max(10, 50 - card.latOffset * 22000))}%">
-          <span>${card.name}</span>
-          <small>${meters === null ? "distance unknown" : `${meters}m`}</small>
-        </div>`;
-    })
-    .join("");
-
-  const playerMarkers = playerLocation
-    ? [...trainerLocations.entries()]
-    .filter(([name, pos]) => name !== profile?.name && Date.now() - pos.ts < 30 * 60 * 1000)
-    .map(([name, pos]) => {
-      const deltaLng = pos.lng - playerLocation.lng;
-      const deltaLat = pos.lat - playerLocation.lat;
-      const left = Math.min(95, Math.max(5, 50 + deltaLng * 22000));
-      const top = Math.min(95, Math.max(5, 50 - deltaLat * 22000));
-      return `<div class="trainer-dot" style="left:${left}%;top:${top}%">${name.slice(0, 2).toUpperCase()}</div>`;
-    })
-    .join("")
-    : "";
-
-  el.nearbyMap.innerHTML = `${playerLocation ? `<div class="player-dot">You</div>` : `<div class="map-hint">Enable location for live distance + proximity catching.</div>`}${playerMarkers}${points}`;
-}
-
 function updateLocationStatus(text) {
-  el.locationStatus.textContent = text;
+  if (el.locationStatus) el.locationStatus.textContent = text;
+}
+
+function onPositionUpdate(pos) {
+  playerLocation = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+  updateLocationStatus(`Live • ${playerLocation.lat.toFixed(5)}, ${playerLocation.lng.toFixed(5)}`);
+  connectGridCaught();
+  ensureFreshPlacements();
+  renderMap();
+  renderCards();
+  updateBucketLabel();
 }
 
 function startLocationTracking() {
-  if (!navigator.geolocation) {
+  if (typeof navigator === "undefined" || !navigator.geolocation) {
     updateLocationStatus("Geolocation unavailable in this browser.");
     return;
   }
@@ -636,14 +875,15 @@ function startLocationTracking() {
 
   if (watchId !== null) navigator.geolocation.clearWatch(watchId);
   watchId = navigator.geolocation.watchPosition(
-    (pos) => {
-      playerLocation = { lat: pos.coords.latitude, lng: pos.coords.longitude };
-      updateLocationStatus(`Live • ${playerLocation.lat.toFixed(4)}, ${playerLocation.lng.toFixed(4)}`);
-      renderMap();
-      renderCards();
+    onPositionUpdate,
+    (err) => {
+      if (err && err.code === 1) {
+        updateLocationStatus("Location permission denied. Enable it in browser settings.");
+      } else {
+        updateLocationStatus("Location unavailable. Try again outdoors.");
+      }
     },
-    () => updateLocationStatus("Location permission denied or unavailable."),
-    { enableHighAccuracy: true, maximumAge: 10000, timeout: 12000 }
+    { enableHighAccuracy: true, maximumAge: 10000, timeout: 15000 }
   );
 }
 
@@ -653,10 +893,12 @@ function connectFeed() {
 
   eventsNode.map().on((event) => {
     if (!event || !event.ts || !event.trainer || !event.card) return;
-    const alreadyThere = recentEvents.some((e) => e.ts === event.ts && e.trainer === event.trainer && e.card === event.card);
+    const alreadyThere = recentEvents.some(
+      (e) => e.ts === event.ts && e.trainer === event.trainer && e.card === event.card
+    );
     if (alreadyThere) return;
     recentEvents.push(event);
-    if (event.lat && event.lng) {
+    if (event.lat && event.lng && event.trainer !== profile?.name) {
       trainerLocations.set(event.trainer, { lat: event.lat, lng: event.lng, ts: event.ts });
     }
     if (recentEvents.length > 100) recentEvents.shift();
@@ -666,36 +908,42 @@ function connectFeed() {
 }
 
 function connectGridCaught() {
-  if (!gridCaughtNode) return;
-  const key = getGridKey(currentCoords.lat, currentCoords.lon);
+  if (!gridCaughtNode || !playerLocation) return;
+  const key = getGridKey(playerLocation.lat, playerLocation.lng);
   if (!key) return;
+  if (key === lastGridKey) return;
+  if (lastGridKey) {
+    try { gridCaughtNode.get(lastGridKey).off(); } catch {}
+  }
+  gridCaughtIds.clear();
+  lastGridKey = key;
   gridCaughtNode.get(key).map().on((entry) => {
     if (!entry?.cardId) return;
-    if (!caughtIds.has(entry.cardId)) {
-      caughtIds.add(entry.cardId);
-      refreshCoordsAndCards();
+    if (caughtIds.has(entry.cardId)) return;
+    if (!gridCaughtIds.has(entry.cardId)) {
+      gridCaughtIds.add(entry.cardId);
+      renderCards();
+      renderMap();
     }
   });
 }
 
-function refreshCoordsAndCards() {
-  if (!navigator.geolocation) {
-    renderCards();
-    return;
+function initGun() {
+  if (typeof window === "undefined" || typeof window.Gun !== "function") return;
+  try {
+    const gun = window.Gun({ peers: GUN_PEERS, localStorage: true });
+    const root = gun.get("fokemon");
+    eventsNode = root.get("events");
+    gridCaughtNode = root.get("caughtByGrid");
+    connectFeed();
+    connectGridCaught();
+  } catch {
+    eventsNode = FALLBACK_EVENTS_NODE;
   }
-
-  navigator.geolocation.getCurrentPosition(
-    (pos) => {
-      currentCoords = { lat: pos.coords.latitude, lon: pos.coords.longitude };
-      connectGridCaught();
-      renderCards();
-    },
-    () => renderCards(),
-    { maximumAge: 120000, timeout: 3000 }
-  );
 }
 
 function enterGame() {
+  if (!el.auth || !el.game) return;
   el.auth.classList.add("hidden");
   el.game.classList.remove("hidden");
   el.welcome.textContent = `Welcome, ${profile.name}`;
@@ -703,30 +951,51 @@ function enterGame() {
     "--accent",
     profile.team === "violet" ? "#ca90ff" : profile.team === "sun" ? "#ffd173" : "#7cf0c6"
   );
-  refreshCoordsAndCards();
+  ensureMap();
+  ensureFreshPlacements();
   renderCards();
   renderMap();
   renderCollection();
   connectFeed();
-  if (!playerLocation) startLocationTracking();
+  updateBucketLabel();
 }
 
-el.form.addEventListener("submit", (e) => {
-  e.preventDefault();
-  profile = { name: el.name.value.trim(), team: el.team.value };
-  if (!profile.name) return;
-  saveLocal();
-  enterGame();
-});
+if (el.form) {
+  el.form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const name = el.name.value.trim();
+    if (!name) return;
+    profile = { name, team: el.team.value };
+    saveLocal();
+    enterGame();
+    startLocationTracking();
+  });
+}
 
-el.reset.addEventListener("click", () => {
-  localStorage.removeItem("fokemon_profile");
-  location.reload();
-});
-el.enableLocation.addEventListener("click", startLocationTracking);
+if (el.reset) {
+  el.reset.addEventListener("click", () => {
+    try { localStorage.removeItem("fokemon_profile"); } catch {}
+    location.reload();
+  });
+}
+
+if (el.enableLocation) {
+  el.enableLocation.addEventListener("click", startLocationTracking);
+}
+
+initGun();
 
 if (profile?.name) enterGame();
-setInterval(() => {
-  renderCards();
-  renderMap();
-}, 1000);
+
+if (typeof setInterval === "function") {
+  setInterval(() => {
+    const prevKey = currentPlacementsKey;
+    ensureFreshPlacements();
+    if (prevKey !== currentPlacementsKey) {
+      gridCaughtIds.clear();
+      renderCards();
+      renderMap();
+    }
+    updateBucketLabel();
+  }, 1000);
+}

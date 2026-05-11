@@ -4,10 +4,30 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>FokéMap — Catch Fokemon</title>
+    <link rel="icon" href="data:," />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="preconnect" href="https://unpkg.com" crossorigin />
+    <link rel="preconnect" href="https://tile.openstreetmap.org" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700;800&display=swap" rel="stylesheet" />
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H"
+      crossorigin=""
+    />
     <link rel="stylesheet" href="styles.css" />
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH"
+      crossorigin=""
+      defer
+    ></script>
+    <script
+      src="./vendor/gun.min.js"
+      integrity="sha384-Q6iTkZFORwQTf0QlZBIeD2NordnpArvcqAOeUL16ziLkpdViNPsz1k2TDYbu5uY9"
+      defer
+    ></script>
   </head>
   <body>
     <div class="bg-orb orb-1"></div>
@@ -55,7 +75,11 @@
               <button id="enableLocation" class="ghost">Enable location</button>
               <small id="locationStatus">Location off</small>
             </div>
-            <div class="map" id="nearbyMap" aria-label="Nearby map"></div>
+            <div class="map-wrap">
+              <div id="nearbyMap" class="map" aria-label="Nearby map"></div>
+              <p id="mapHint" class="map-hint">Enable location for live distance + proximity catching.</p>
+              <p id="mapBucket" class="map-bucket" aria-live="polite"></p>
+            </div>
             <div class="cards" id="cardsList"></div>
           </article>
 
