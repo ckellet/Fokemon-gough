@@ -47,45 +47,9 @@ const el = {
 let profile = JSON.parse(localStorage.getItem("fokemon_profile") || "null");
 let caught = JSON.parse(localStorage.getItem("fokemon_caught") || "[]");
 const recentEvents = [];
-const trainerLocations = new Map();
 const caughtIds = new Set(caught.map((c) => c.id));
 let feedConnected = false;
 let activeChallenge = null;
-let playerLocation = null;
-let watchId = null;
-const catchRangeMeters = 150;
-const respawnMs = 120000;
-const lastCaughtAtById = new Map();
-for (const entry of caught) {
-  const existing = lastCaughtAtById.get(entry.id) || 0;
-  if (entry.ts > existing) lastCaughtAtById.set(entry.id, entry.ts);
-}
-
-function getCardLocation(card) {
-  if (!playerLocation) return null;
-  return {
-    lat: playerLocation.lat + card.latOffset,
-    lng: playerLocation.lng + card.lngOffset,
-  };
-}
-
-function distanceMeters(a, b) {
-  const R = 6371e3;
-  const lat1 = (a.lat * Math.PI) / 180;
-  const lat2 = (b.lat * Math.PI) / 180;
-  const deltaLat = ((b.lat - a.lat) * Math.PI) / 180;
-  const deltaLng = ((b.lng - a.lng) * Math.PI) / 180;
-  const sinLat = Math.sin(deltaLat / 2);
-  const sinLng = Math.sin(deltaLng / 2);
-  const c = 2 * Math.atan2(Math.sqrt(sinLat * sinLat + Math.cos(lat1) * Math.cos(lat2) * sinLng * sinLng), Math.sqrt(1 - (sinLat * sinLat + Math.cos(lat1) * Math.cos(lat2) * sinLng * sinLng)));
-  return R * c;
-}
-
-function isInRange(card) {
-  if (!playerLocation) return false;
-  const cardPos = getCardLocation(card);
-  return distanceMeters(playerLocation, cardPos) <= catchRangeMeters;
-}
 
 function saveLocal() {
   localStorage.setItem("fokemon_profile", JSON.stringify(profile));
@@ -116,18 +80,11 @@ function catchCard(card) {
   };
 
   caught.push({ id: card.id, ts: event.ts });
-  lastCaughtAtById.set(card.id, event.ts);
   caughtIds.add(card.id);
   saveLocal();
   renderCollection();
   renderCards();
   eventsNode.set(event);
-}
-
-function isSpawnAvailable(card) {
-  const lastCaught = lastCaughtAtById.get(card.id);
-  if (!lastCaught) return true;
-  return Date.now() - lastCaught >= respawnMs;
 }
 
 function launchCatchChallenge(card) {
@@ -212,12 +169,10 @@ function launchCatchChallenge(card) {
 }
 
 function renderCards() {
-  const availableCards = cards.filter((card) => isSpawnAvailable(card));
+  const availableCards = cards.filter((card) => !caughtIds.has(card.id));
 
   if (!availableCards.length) {
-    const nextRespawn = Math.min(...cards.map((card) => respawnMs - (Date.now() - (lastCaughtAtById.get(card.id) || 0))));
-    const secs = Math.max(1, Math.ceil(nextRespawn / 1000));
-    el.cardsList.innerHTML = `<p class="empty-state">Area is temporarily clear. New wild Fokemon spawn in about ${secs}s.</p>`;
+    el.cardsList.innerHTML = `<p class="empty-state">You caught every nearby Fokemon. Check back later for new spawns.</p>`;
     return;
   }
 
@@ -227,8 +182,7 @@ function renderCards() {
     <article class="poke-card">
       <strong>${card.name}</strong>
       <div>${card.type}</div>
-      <small>${playerLocation ? `${Math.round(distanceMeters(playerLocation, getCardLocation(card)))}m away` : "Enable location to scan distance"}</small>
-      <button data-id="${card.id}" ${!isInRange(card) ? "disabled" : ""}>${isInRange(card) ? "Start catch challenge" : `Move within ${catchRangeMeters}m`}</button>
+      <button data-id="${card.id}">Start catch challenge</button>
     </article>
   `
     )
@@ -324,6 +278,7 @@ function enterGame() {
   renderMap();
   renderCollection();
   connectFeed();
+  if (!playerLocation) startLocationTracking();
 }
 
 el.form.addEventListener("submit", (e) => {
