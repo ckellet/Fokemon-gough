@@ -1,3 +1,5 @@
+import { computeSpawnSlots, filterUncaughtSpawns, getGridKey } from './app.logic.js';
+
 const FALLBACK_EVENTS_NODE = {
   set() {},
   map() {
@@ -6,12 +8,16 @@ const FALLBACK_EVENTS_NODE = {
 };
 
 let eventsNode = FALLBACK_EVENTS_NODE;
+let gridCaughtNode = null;
 
 import("https://cdn.jsdelivr.net/npm/gun/gun.js")
   .then(({ default: Gun }) => {
     const gun = Gun(["https://gun-manhattan.herokuapp.com/gun"]);
-    eventsNode = gun.get("fokemon").get("events");
+    const root = gun.get("fokemon");
+    eventsNode = root.get("events");
+    gridCaughtNode = root.get("caughtByGrid");
     connectFeed();
+    connectGridCaught();
   })
   .catch(() => {
     // Keep local gameplay working even when the public sync peer or CDN is unavailable.
@@ -47,6 +53,7 @@ const recentEvents = [];
 const caughtIds = new Set(caught.map((c) => c.id));
 let feedConnected = false;
 let activeChallenge = null;
+let currentCoords = { lat: 0, lon: 0 };
 
 function saveLocal() {
   localStorage.setItem("fokemon_profile", JSON.stringify(profile));
@@ -67,6 +74,13 @@ function renderFeed() {
   el.feedList.innerHTML = ordered.map((e) => `<li><strong>${e.trainer}</strong> caught ${e.card}</li>`).join("");
 }
 
+function publishGridCatch(card, ts) {
+  if (!gridCaughtNode) return;
+  const key = getGridKey(currentCoords.lat, currentCoords.lon);
+  if (!key) return;
+  gridCaughtNode.get(key).get(card.id).put({ cardId: card.id, ts });
+}
+
 function catchCard(card) {
   const event = {
     trainer: profile.name,
@@ -78,8 +92,9 @@ function catchCard(card) {
   caughtIds.add(card.id);
   saveLocal();
   renderCollection();
-  renderCards();
+  refreshCoordsAndCards();
   eventsNode.set(event);
+  publishGridCatch(card, event.ts);
 }
 
 function launchCatchChallenge(card) {
@@ -164,7 +179,14 @@ function launchCatchChallenge(card) {
 }
 
 function renderCards() {
-  const availableCards = cards.filter((card) => !caughtIds.has(card.id));
+  const spawns = computeSpawnSlots(cards, {
+    timeMs: Date.now(),
+    lat: currentCoords.lat,
+    lon: currentCoords.lon,
+    intervalMs: 3 * 60 * 1000,
+    maxSpawns: 3,
+  });
+  const availableCards = filterUncaughtSpawns(spawns, caughtIds);
 
   if (!availableCards.length) {
     el.cardsList.innerHTML = `<p class="empty-state">You caught every nearby Fokemon. Check back later for new spawns.</p>`;
@@ -205,6 +227,36 @@ function connectFeed() {
   });
 }
 
+function connectGridCaught() {
+  if (!gridCaughtNode) return;
+  const key = getGridKey(currentCoords.lat, currentCoords.lon);
+  if (!key) return;
+  gridCaughtNode.get(key).map().on((entry) => {
+    if (!entry?.cardId) return;
+    if (!caughtIds.has(entry.cardId)) {
+      caughtIds.add(entry.cardId);
+      refreshCoordsAndCards();
+    }
+  });
+}
+
+function refreshCoordsAndCards() {
+  if (!navigator.geolocation) {
+    renderCards();
+    return;
+  }
+
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      currentCoords = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+      connectGridCaught();
+      renderCards();
+    },
+    () => renderCards(),
+    { maximumAge: 120000, timeout: 3000 }
+  );
+}
+
 function enterGame() {
   el.auth.classList.add("hidden");
   el.game.classList.remove("hidden");
@@ -213,7 +265,7 @@ function enterGame() {
     "--accent",
     profile.team === "violet" ? "#ca90ff" : profile.team === "sun" ? "#ffd173" : "#7cf0c6"
   );
-  renderCards();
+  refreshCoordsAndCards();
   renderCollection();
   connectFeed();
 }
