@@ -2,10 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   computeCollectionStats,
+  computeSpawnPlacements,
   computeSpawnSlots,
   filterUncaughtSpawns,
   getGridKey,
   mergeRecentEvents,
+  SPAWN_CELL_DEGREES,
 } from './app.logic.js';
 
 test('computeCollectionStats returns total and unique counts', () => {
@@ -30,8 +32,39 @@ test('mergeRecentEvents enforces max items', () => {
   assert.deepEqual(events.map((e) => e.card), ['2', '3', '4']);
 });
 
-test('getGridKey returns stable geographic bucket', () => {
-  assert.equal(getGridKey(37.77, -122.41), '511:230');
+test('getGridKey returns stable geographic bucket at coarse cell', () => {
+  assert.equal(getGridKey(37.77, -122.41, 0.25), '511:230');
+});
+
+test('getGridKey defaults to fine ~100m cell', () => {
+  assert.equal(SPAWN_CELL_DEGREES, 0.001);
+  assert.equal(getGridKey(37.7700, -122.4100), getGridKey(37.7701, -122.4099));
+  assert.notEqual(getGridKey(37.7700, -122.4100), getGridKey(37.7720, -122.4100));
+});
+
+test('computeSpawnPlacements places spawns inside the active grid cell', () => {
+  const cards = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
+  const placements = computeSpawnPlacements(cards, {
+    timeMs: 1_700_000_000_000,
+    lat: 37.7700,
+    lon: -122.4100,
+    maxSpawns: 3,
+    intervalMs: 60_000,
+  });
+  assert.equal(placements.length, 3);
+  for (const p of placements) {
+    assert.ok(p.lat >= 37.77 && p.lat < 37.771, `lat ${p.lat} outside cell`);
+    assert.ok(p.lng >= -122.41 && p.lng < -122.409, `lng ${p.lng} outside cell`);
+    assert.ok(Number.isFinite(p.expiresAt));
+  }
+});
+
+test('computeSpawnPlacements is deterministic per grid + bucket', () => {
+  const cards = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
+  const opts = { timeMs: 1_700_000_000_000, lat: 10, lon: 20, maxSpawns: 2, intervalMs: 60_000 };
+  const a = computeSpawnPlacements(cards, opts);
+  const b = computeSpawnPlacements(cards, opts);
+  assert.deepEqual(a, b);
 });
 
 test('computeSpawnSlots is deterministic per grid and time bucket', () => {
