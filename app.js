@@ -79,6 +79,93 @@ const cards = [
 ];
 const cardsById = new Map(cards.map((c) => [c.id, c]));
 
+const MOVEMENT_BY_TYPE = {
+  Electric: "jump",
+  Fire: "jump",
+  Bug: "jump",
+  Water: "glide",
+  Ice: "glide",
+  Wind: "fly",
+  Cosmic: "fly",
+  Spirit: "fly",
+  Shadow: "fly",
+  Leaf: "walk",
+  Rock: "walk",
+  Metal: "walk",
+};
+
+const MOVEMENT_PROFILES = {
+  walk: {
+    label: "Walking",
+    bandY: [0.6, 0.78],
+    speed: [22, 42],
+    bobAmp: 3,
+    turnInterval: [1.2, 2.2],
+    dodgeChance: 0.55,
+  },
+  glide: {
+    label: "Gliding",
+    bandY: [0.38, 0.62],
+    speed: [55, 95],
+    bobAmp: 7,
+    turnInterval: [1.4, 2.4],
+    weaveAmp: 9,
+    weaveSpeed: 1.8,
+    dodgeChance: 0.35,
+  },
+  fly: {
+    label: "Flying",
+    bandY: [0.2, 0.55],
+    speed: [80, 130],
+    bobAmp: 4,
+    turnInterval: [0.9, 1.7],
+    weaveAmp: 18,
+    weaveSpeed: 2.6,
+    dodgeChance: 0.3,
+  },
+  jump: {
+    label: "Jumping",
+    bandY: [0.5, 0.66],
+    bobAmp: 2,
+    restMin: 0.32,
+    restMax: 0.78,
+    jumpDur: [0.42, 0.62],
+    jumpDist: [60, 140],
+    jumpHeight: [55, 115],
+    dodgeChance: 0.25,
+  },
+};
+
+function movementFor(card) {
+  return MOVEMENT_BY_TYPE[card?.type] || "walk";
+}
+
+function hitsRequired(card) {
+  if (card?.rarity === "epic") return 3;
+  if (card?.rarity === "rare") return 2;
+  return 1;
+}
+
+function powerScore(card) {
+  if (!card) return 0;
+  return (card.hp || 0) + (card.atk || 0) + (card.def || 0) + (card.spd || 0);
+}
+
+function powerTier(score) {
+  if (score >= 270) return "elite";
+  if (score >= 240) return "strong";
+  if (score >= 210) return "steady";
+  return "rookie";
+}
+
+function hitsDotsHtml(total, remaining) {
+  let html = "";
+  for (let i = 0; i < total; i++) {
+    html += `<span class="hit-dot${i < remaining ? "" : " spent"}"></span>`;
+  }
+  return html;
+}
+
 function $(id) {
   return typeof document === "undefined" ? null : document.getElementById(id);
 }
@@ -357,6 +444,8 @@ function renderCollection() {
       const card = cardsById.get(id);
       if (!card) return "";
       const colors = colorsFor(card);
+      const power = powerScore(card);
+      const tier = powerTier(power);
       return `
         <div class="gallery-card" data-id="${escapeHtml(id)}" tabindex="0" role="button" aria-label="Flip ${escapeHtml(card.name)} card">
           <div class="flipper">
@@ -366,6 +455,7 @@ function renderCollection() {
               <div class="gallery-meta">
                 <strong>${escapeHtml(card.name)}</strong>
                 <span class="type-pill" style="background:${colors.accent};color:#061226;">${escapeHtml(card.type)}</span>
+                <span class="power-chip ${tier}" title="Power level">⚡ ${power}</span>
               </div>
               <span class="flip-hint">Tap for stats</span>
             </div>
@@ -437,10 +527,21 @@ function renderCards() {
         : !hasBalls
           ? "Need FokéBalls"
           : "Start catch challenge";
+      const power = powerScore(p.card);
+      const tier = powerTier(power);
+      const motion = MOVEMENT_PROFILES[movementFor(p.card)].label;
+      const colors = colorsFor(p.card);
+      const typeStyle = `background:${colors.accent};color:#061226;`;
       return `
         <article class="poke-card">
-          <strong>${escapeHtml(p.card.name)}</strong>
-          <div>${escapeHtml(p.card.type)}</div>
+          <div class="poke-card-top">
+            <strong>${escapeHtml(p.card.name)}</strong>
+            <span class="power-chip ${tier}" title="Power level">⚡ ${power}</span>
+          </div>
+          <div class="poke-card-mid">
+            <span class="type-pill" style="${typeStyle}">${escapeHtml(p.card.type)}</span>
+            <span class="motion-tag">${motion}</span>
+          </div>
           <small>${distLabel}</small>
           <button data-id="${p.card.id}" ${canCatch ? "" : "disabled"}>${buttonLabel}</button>
         </article>
@@ -1004,12 +1105,21 @@ function launchCatchChallenge(card, placement) {
     return;
   }
 
+  const initialHits = hitsRequired(card);
+  const power = powerScore(card);
+  const tier = powerTier(power);
+  const motionLabel = MOVEMENT_PROFILES[movementFor(card)].label;
+
   const challenge = document.createElement("div");
   challenge.className = "catch-challenge";
   challenge.innerHTML = `
     <div class="challenge-card" role="dialog" aria-modal="true" aria-label="Catch ${escapeHtml(card.name)}">
       <p class="eyebrow">Catch challenge</p>
       <h3>Snare ${escapeHtml(card.name)}</h3>
+      <div class="challenge-meta">
+        <span class="power-chip ${tier}" title="Power level">⚡ Power ${power}</span>
+        <span class="motion-tag">${motionLabel}</span>
+      </div>
       <p>Pull back the FokéBall, aim with the dotted path, and release to fling it.</p>
       <div class="arena">
         <canvas class="catch-canvas" aria-label="FokéBall slingshot arena"></canvas>
@@ -1046,22 +1156,234 @@ function launchCatchChallenge(card, placement) {
   const REST_OFFSET = { x: 0, y: -(NET_RADIUS + 8) };
   const RESTING = { x: ANCHOR.x + REST_OFFSET.x, y: ANCHOR.y + REST_OFFSET.y };
 
+  const movementMode = movementFor(card);
+  const movementProfile = MOVEMENT_PROFILES[movementMode];
+  const startBand = movementProfile.bandY || [0.4, 0.55];
+  const startY = H * (startBand[0] + (startBand[1] - startBand[0]) * 0.5);
+
   const fokemon = {
-    x: W * 0.74,
-    y: H * 0.45,
+    x: W * (0.55 + Math.random() * 0.3),
+    y: startY,
     r: 30,
     bobPhase: Math.random() * Math.PI * 2,
-    hopCooldown: 3.2,
+    bobAmp: movementProfile.bobAmp ?? 4,
     caught: false,
     captureScale: 1,
+    mode: movementMode,
+    profile: movementProfile,
+    vx: 0,
+    turnCd: 0,
+    targetY: startY,
+    weavePhase: Math.random() * Math.PI * 2,
+    jumpState: "rest",
+    restTime: 0.25 + Math.random() * 0.4,
+    jumpTime: 0,
+    jumpDur: 0,
+    jumpFromX: 0,
+    jumpToX: 0,
+    jumpFromY: 0,
+    jumpToY: 0,
+    jumpPeakY: 0,
     dodgeVx: 0,
     dodgeTime: 0,
+    hitsLeft: initialHits,
+    hitsTotal: initialHits,
+    flashTime: 0,
   };
 
-  const DODGE_CHANCE = 0.45;
+  const DODGE_CHANCE = movementProfile.dodgeChance ?? 0.4;
   const DODGE_RANGE = 95;
   const DODGE_SPEED = 360;
   const DODGE_DURATION = 0.26;
+  const FOKEMON_MIN_X = Math.max(ANCHOR.x + 120, W * 0.4);
+
+  const OBSTACLE_COUNT_BY_RARITY = { common: 1, rare: 2, epic: 2 };
+  const OBSTACLE_HP_BY_RARITY = { common: [1, 1], rare: [1, 1], epic: [1, 2] };
+
+  function makeObstacles() {
+    const rarity = card?.rarity || "common";
+    const count = OBSTACLE_COUNT_BY_RARITY[rarity] ?? 1;
+    const [hpMin, hpMax] = OBSTACLE_HP_BY_RARITY[rarity] ?? [1, 1];
+    const arr = [];
+    for (let i = 0; i < count; i++) {
+      const slotFrac = count === 1 ? 0.5 : i / (count - 1);
+      const baseX = W * (0.36 + slotFrac * 0.2);
+      const jitterX = (Math.random() - 0.5) * Math.min(36, W * 0.08);
+      const w = 34 + Math.random() * 14;
+      const h = 36 + Math.random() * 16;
+      const hp = hpMin + Math.floor(Math.random() * (hpMax - hpMin + 1));
+      arr.push({
+        x: baseX + jitterX,
+        y: H * (0.38 + Math.random() * 0.32),
+        w,
+        h,
+        hp,
+        maxHp: hp,
+        broken: false,
+        breakTime: 0,
+        shakeTime: 0,
+      });
+    }
+    return arr;
+  }
+  const obstacles = makeObstacles();
+
+  const HIT_WORDS = ["POW!", "BAM!", "WHACK!", "KAPOW!", "BOOM!", "ZAP!", "THWACK!"];
+  const FINAL_WORDS = ["GOTCHA!", "K.O.!", "SNARE!", "CAUGHT!"];
+  const SMASH_WORDS = ["SMASH!", "CRACK!", "SHATTER!", "KRAKK!"];
+  const BLOCK_WORDS = ["THUD!", "BONK!", "KLANG!", "CLUNK!"];
+  const COMIC_COLORS = { hit: "#ffe27a", final: "#7cf0c6", smash: "#ff9c70", block: "#cdd6f0" };
+  function pickWord(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+
+  const comicTexts = [];
+  function popComic(text, x, y, kind = "hit") {
+    comicTexts.push({
+      text,
+      x,
+      y,
+      vy: -55 - Math.random() * 25,
+      life: 0.95,
+      maxLife: 0.95,
+      color: COMIC_COLORS[kind] ?? "#ffffff",
+      rotation: (Math.random() - 0.5) * 0.5,
+    });
+    if (comicTexts.length > 6) comicTexts.shift();
+  }
+  function updateComicTexts(dt) {
+    for (const t of comicTexts) {
+      t.life -= dt;
+      t.y += t.vy * dt;
+      t.vy *= 0.93;
+    }
+    for (let i = comicTexts.length - 1; i >= 0; i--) {
+      if (comicTexts[i].life <= 0) comicTexts.splice(i, 1);
+    }
+  }
+  function drawComicTexts() {
+    for (const t of comicTexts) {
+      const lifeT = t.life / t.maxLife;
+      let s = 1;
+      let alpha = 1;
+      if (lifeT > 0.85) {
+        const k = (1 - lifeT) / 0.15;
+        s = 0.45 + k * 0.85;
+        alpha = k;
+      } else if (lifeT < 0.3) {
+        const k = lifeT / 0.3;
+        s = 1.05;
+        alpha = k;
+      } else {
+        s = 1.1;
+      }
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, Math.min(1, alpha));
+      ctx.translate(t.x, t.y);
+      ctx.rotate(t.rotation);
+      ctx.scale(s, s);
+      ctx.font = "900 24px 'Outfit', sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.lineJoin = "round";
+      ctx.lineWidth = 6;
+      ctx.strokeStyle = "rgba(7, 13, 28, 0.95)";
+      ctx.strokeText(t.text, 0, 0);
+      ctx.fillStyle = t.color;
+      ctx.fillText(t.text, 0, 0);
+      ctx.restore();
+    }
+  }
+
+  function obstacleHit(o, px, py, r) {
+    const left = o.x - o.w / 2;
+    const right = o.x + o.w / 2;
+    const top = o.y - o.h / 2;
+    const bottom = o.y + o.h / 2;
+    const cx = Math.max(left, Math.min(px, right));
+    const cy = Math.max(top, Math.min(py, bottom));
+    const dx = px - cx;
+    const dy = py - cy;
+    return dx * dx + dy * dy < r * r;
+  }
+  function applyObstacleDamage(o) {
+    o.hp -= 1;
+    o.shakeTime = 0.25;
+    if (o.hp <= 0) {
+      o.broken = true;
+      o.breakTime = 0.55;
+      popComic(pickWord(SMASH_WORDS), o.x, o.y - o.h / 2 - 6, "smash");
+    } else {
+      popComic(pickWord(BLOCK_WORDS), o.x, o.y - o.h / 2 - 6, "block");
+    }
+  }
+  function updateObstacles(dt) {
+    for (const o of obstacles) {
+      if (o.broken && o.breakTime > 0) o.breakTime = Math.max(0, o.breakTime - dt);
+      if (o.shakeTime > 0) o.shakeTime = Math.max(0, o.shakeTime - dt);
+    }
+  }
+  function drawObstacles() {
+    for (const o of obstacles) {
+      if (o.broken && o.breakTime <= 0) continue;
+      drawObstacle(o);
+    }
+  }
+  function drawObstacle(o) {
+    const fade = o.broken ? Math.max(0, o.breakTime / 0.55) : 1;
+    const rot = o.broken ? (1 - fade) * 0.6 : 0;
+    const shakeX = o.shakeTime > 0 ? (Math.random() - 0.5) * 4 * (o.shakeTime / 0.25) : 0;
+    ctx.save();
+    ctx.globalAlpha = fade;
+    ctx.translate(o.x + shakeX, o.y);
+    ctx.rotate(rot);
+    const grad = ctx.createLinearGradient(0, -o.h / 2, 0, o.h / 2);
+    grad.addColorStop(0, "#b08148");
+    grad.addColorStop(1, "#6b4a23");
+    ctx.fillStyle = grad;
+    ctx.fillRect(-o.w / 2, -o.h / 2, o.w, o.h);
+    ctx.strokeStyle = "rgba(0, 0, 0, 0.7)";
+    ctx.lineWidth = 1.6;
+    ctx.strokeRect(-o.w / 2, -o.h / 2, o.w, o.h);
+    ctx.strokeStyle = "rgba(0, 0, 0, 0.35)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(-o.w / 2, 0);
+    ctx.lineTo(o.w / 2, 0);
+    ctx.stroke();
+    ctx.strokeStyle = "rgba(0, 0, 0, 0.5)";
+    ctx.beginPath();
+    ctx.moveTo(-o.w / 2 + 4, -o.h / 2 + 4);
+    ctx.lineTo(o.w / 2 - 4, o.h / 2 - 4);
+    ctx.moveTo(o.w / 2 - 4, -o.h / 2 + 4);
+    ctx.lineTo(-o.w / 2 + 4, o.h / 2 - 4);
+    ctx.stroke();
+    const damage = 1 - o.hp / o.maxHp;
+    if (damage > 0 && !o.broken) {
+      ctx.strokeStyle = "rgba(255, 240, 200, 0.7)";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(-o.w / 4, -o.h / 3);
+      ctx.lineTo(-o.w / 10, -o.h / 12);
+      ctx.lineTo(o.w / 5, -o.h / 6);
+      if (damage > 0.55) {
+        ctx.moveTo(o.w / 8, -o.h / 8);
+        ctx.lineTo(0, o.h / 6);
+        ctx.lineTo(-o.w / 5, o.h / 4);
+      }
+      ctx.stroke();
+    }
+    if (o.maxHp > 1 && !o.broken) {
+      const pipR = 2.2;
+      const gap = 6;
+      const totalW = (o.maxHp - 1) * gap;
+      for (let i = 0; i < o.maxHp; i++) {
+        ctx.fillStyle = i < o.hp ? "#ffe080" : "rgba(0, 0, 0, 0.55)";
+        ctx.beginPath();
+        ctx.arc(-totalW / 2 + i * gap, -o.h / 2 - 8, pipR, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
 
   let aiming = null;
   let projectile = null;
@@ -1158,30 +1480,105 @@ function launchCatchChallenge(card, placement) {
   canvas.addEventListener("pointerup", onUp);
   canvas.addEventListener("pointercancel", onUp);
 
-  function hopFokemon() {
-    fokemon.x = W * (0.55 + Math.random() * 0.32);
-    fokemon.y = H * (0.28 + Math.random() * 0.42);
+  function clampX(x) {
+    return Math.max(FOKEMON_MIN_X, Math.min(W - fokemon.r - 6, x));
+  }
+
+  function pickTargetY() {
+    const [lo, hi] = movementProfile.bandY;
+    return H * (lo + Math.random() * (hi - lo));
+  }
+
+  function pickSpeed() {
+    const [lo, hi] = movementProfile.speed;
+    return lo + Math.random() * (hi - lo);
+  }
+
+  function updateContinuousMotion(dt) {
+    fokemon.turnCd -= dt;
+    if (fokemon.turnCd <= 0) {
+      fokemon.vx = (Math.random() < 0.5 ? -1 : 1) * pickSpeed();
+      fokemon.targetY = pickTargetY();
+      const [lo, hi] = movementProfile.turnInterval;
+      fokemon.turnCd = lo + Math.random() * (hi - lo);
+    }
+    fokemon.x += fokemon.vx * dt;
+    if (fokemon.x < FOKEMON_MIN_X) {
+      fokemon.x = FOKEMON_MIN_X;
+      fokemon.vx = Math.abs(fokemon.vx);
+    } else if (fokemon.x > W - fokemon.r - 6) {
+      fokemon.x = W - fokemon.r - 6;
+      fokemon.vx = -Math.abs(fokemon.vx);
+    }
+    let yTarget = fokemon.targetY;
+    if (movementProfile.weaveAmp) {
+      fokemon.weavePhase += dt * movementProfile.weaveSpeed;
+      yTarget += Math.sin(fokemon.weavePhase) * movementProfile.weaveAmp;
+    }
+    fokemon.y += (yTarget - fokemon.y) * Math.min(1, dt * 2.4);
+  }
+
+  function updateJumpMotion(dt) {
+    const p = movementProfile;
+    if (fokemon.jumpState === "rest") {
+      fokemon.restTime -= dt;
+      if (fokemon.restTime <= 0) {
+        const dist = p.jumpDist[0] + Math.random() * (p.jumpDist[1] - p.jumpDist[0]);
+        let dir = Math.random() < 0.5 ? -1 : 1;
+        if (fokemon.x < FOKEMON_MIN_X + 40) dir = 1;
+        else if (fokemon.x > W * 0.82) dir = -1;
+        const dur = p.jumpDur[0] + Math.random() * (p.jumpDur[1] - p.jumpDur[0]);
+        const height = p.jumpHeight[0] + Math.random() * (p.jumpHeight[1] - p.jumpHeight[0]);
+        fokemon.jumpFromX = fokemon.x;
+        fokemon.jumpFromY = fokemon.y;
+        fokemon.jumpToX = clampX(fokemon.x + dir * dist);
+        fokemon.jumpToY = H * (p.bandY[0] + Math.random() * (p.bandY[1] - p.bandY[0]));
+        fokemon.jumpPeakY = Math.min(fokemon.jumpFromY, fokemon.jumpToY) - height;
+        fokemon.jumpDur = dur;
+        fokemon.jumpTime = 0;
+        fokemon.jumpState = "air";
+      }
+    } else {
+      fokemon.jumpTime += dt;
+      const t = Math.min(1, fokemon.jumpTime / fokemon.jumpDur);
+      const t1 = 1 - t;
+      fokemon.x = fokemon.jumpFromX + (fokemon.jumpToX - fokemon.jumpFromX) * t;
+      fokemon.y = t1 * t1 * fokemon.jumpFromY + 2 * t1 * t * fokemon.jumpPeakY + t * t * fokemon.jumpToY;
+      if (t >= 1) {
+        fokemon.jumpState = "rest";
+        fokemon.restTime = p.restMin + Math.random() * (p.restMax - p.restMin);
+      }
+    }
+  }
+
+  function updateMovement(dt) {
+    if (fokemon.mode === "jump") updateJumpMotion(dt);
+    else updateContinuousMotion(dt);
+  }
+
+  function relocateAfterHit() {
+    const dashDir = (Math.random() < 0.5 ? -1 : 1);
+    fokemon.dodgeVx = dashDir * (220 + Math.random() * 80);
+    fokemon.dodgeTime = 0.22;
+    fokemon.jumpState = "rest";
+    fokemon.restTime = 0.18 + Math.random() * 0.2;
+    fokemon.turnCd = 0;
   }
 
   function step(dt) {
     fokemon.bobPhase += dt * 2.4;
+    if (fokemon.flashTime > 0) fokemon.flashTime = Math.max(0, fokemon.flashTime - dt);
+
     if (!fokemon.caught) {
-      fokemon.hopCooldown -= dt;
-      if (fokemon.hopCooldown <= 0) {
-        hopFokemon();
-        fokemon.hopCooldown = 2.4 + Math.random() * 1.6;
+      if (fokemon.dodgeTime > 0) {
+        fokemon.x = clampX(fokemon.x + fokemon.dodgeVx * dt);
+        fokemon.dodgeTime -= dt;
+        if (fokemon.dodgeTime <= 0) fokemon.dodgeVx = 0;
+      } else {
+        updateMovement(dt);
       }
     } else {
       fokemon.captureScale = Math.max(0, fokemon.captureScale - dt * 2.4);
-    }
-
-    if (fokemon.dodgeTime > 0) {
-      fokemon.x += fokemon.dodgeVx * dt;
-      fokemon.dodgeTime -= dt;
-      if (fokemon.dodgeTime <= 0) {
-        fokemon.dodgeVx = 0;
-      }
-      fokemon.x = Math.max(fokemon.r + 4, Math.min(W - fokemon.r - 4, fokemon.x));
     }
 
     if (projectile) {
@@ -1190,9 +1587,27 @@ function launchCatchChallenge(card, placement) {
       projectile.x += projectile.vx * dt;
       projectile.y += projectile.vy * dt;
 
-      const bobY = fokemon.y + Math.sin(fokemon.bobPhase) * 5;
+      const bobY = fokemon.y + Math.sin(fokemon.bobPhase) * fokemon.bobAmp;
 
-      if (!fokemon.caught && dodgeArmed && !dodgeTriggered) {
+      for (const o of obstacles) {
+        if (o.broken) continue;
+        if (obstacleHit(o, projectile.x, projectile.y, NET_RADIUS - 2)) {
+          applyObstacleDamage(o);
+          projectile = null;
+          if (fokeBalls <= 0) {
+            finished = true;
+            outcome = "escaped";
+            cancel.textContent = "Close";
+            setStatus();
+            setTimeout(closeChallenge, 1500);
+          } else {
+            setStatus();
+          }
+          return;
+        }
+      }
+
+      if (!fokemon.caught && dodgeArmed && !dodgeTriggered && fokemon.dodgeTime <= 0) {
         const adx = projectile.x - fokemon.x;
         const ady = projectile.y - bobY;
         if (Math.hypot(adx, ady) < DODGE_RANGE) {
@@ -1209,16 +1624,35 @@ function launchCatchChallenge(card, placement) {
         const ddx = projectile.x - fokemon.x;
         const ddy = projectile.y - bobY;
         if (Math.hypot(ddx, ddy) < fokemon.r + NET_RADIUS - 4) {
-          fokemon.caught = true;
-          finished = true;
-          outcome = "caught";
+          fokemon.hitsLeft -= 1;
+          fokemon.flashTime = 0.45;
+
+          if (fokemon.hitsLeft <= 0) {
+            popComic(pickWord(FINAL_WORDS), fokemon.x, bobY - fokemon.r - 6, "final");
+            fokemon.caught = true;
+            finished = true;
+            outcome = "caught";
+            projectile = null;
+            cancel.textContent = "Awesome!";
+            setStatus();
+            setTimeout(() => {
+              catchCard(card, placement);
+              setTimeout(closeChallenge, 700);
+            }, 700);
+            return;
+          }
+          popComic(pickWord(HIT_WORDS), fokemon.x, bobY - fokemon.r - 6, "hit");
           projectile = null;
-          cancel.textContent = "Awesome!";
-          setStatus();
-          setTimeout(() => {
-            catchCard(card, placement);
-            setTimeout(closeChallenge, 700);
-          }, 700);
+          relocateAfterHit();
+          if (fokeBalls <= 0) {
+            finished = true;
+            outcome = "escaped";
+            cancel.textContent = "Close";
+            setStatus();
+            setTimeout(closeChallenge, 1500);
+          } else {
+            setStatus();
+          }
           return;
         }
       }
@@ -1226,10 +1660,6 @@ function launchCatchChallenge(card, placement) {
       const offscreen = projectile.x < -40 || projectile.x > W + 40 || projectile.y > FLOOR_Y + NET_RADIUS;
       if (offscreen) {
         projectile = null;
-        if (!fokemon.caught) {
-          hopFokemon();
-          fokemon.hopCooldown = 2.6;
-        }
         if (fokeBalls <= 0) {
           finished = true;
           outcome = "escaped";
@@ -1337,21 +1767,36 @@ function launchCatchChallenge(card, placement) {
   function drawFokemon() {
     if (fokemon.caught && fokemon.captureScale <= 0) return;
     const scale = fokemon.caught ? fokemon.captureScale : 1;
-    const bobY = fokemon.y + Math.sin(fokemon.bobPhase) * 5;
+    const bobY = fokemon.y + Math.sin(fokemon.bobPhase) * fokemon.bobAmp;
     const r = fokemon.r * scale;
 
-    ctx.fillStyle = "rgba(0,0,0,0.35)";
+    const shadowY = Math.min(FLOOR_Y - 2, bobY + r * 1.4);
+    const shadowScale = Math.max(0.25, Math.min(1, 1 - (shadowY - FLOOR_Y) * 0.01));
+    ctx.fillStyle = `rgba(0,0,0,${0.18 + 0.22 * shadowScale})`;
     ctx.beginPath();
-    ctx.ellipse(fokemon.x, FLOOR_Y - 2, r * 0.78, 6, 0, 0, Math.PI * 2);
+    ctx.ellipse(fokemon.x, FLOOR_Y - 2, r * 0.78 * shadowScale, 6 * shadowScale, 0, 0, Math.PI * 2);
     ctx.fill();
 
     drawCreature(ctx, card, fokemon.x, bobY, r);
+
+    if (fokemon.flashTime > 0) {
+      const alpha = Math.min(1, fokemon.flashTime / 0.45) * 0.6;
+      const prev = ctx.globalCompositeOperation;
+      ctx.globalCompositeOperation = "lighter";
+      ctx.fillStyle = `rgba(255, 245, 200, ${alpha})`;
+      ctx.beginPath();
+      ctx.arc(fokemon.x, bobY, r * 1.05, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalCompositeOperation = prev;
+    }
 
     if (!fokemon.caught) {
       ctx.font = "600 12px Outfit, sans-serif";
       ctx.fillStyle = "rgba(245, 247, 255, 0.9)";
       ctx.textAlign = "center";
-      ctx.fillText(card.name, fokemon.x, bobY - r - 14);
+      const labelWidth = ctx.measureText(card.name).width;
+      const labelX = Math.max(labelWidth / 2 + 6, Math.min(W - labelWidth / 2 - 6, fokemon.x));
+      ctx.fillText(card.name, labelX, bobY - r - 14);
     }
   }
 
@@ -1406,12 +1851,14 @@ function launchCatchChallenge(card, placement) {
 
   function draw() {
     drawBackground();
+    drawObstacles();
     drawFokemon();
 
     const netPos = projectile ? projectile : netRestPosition();
     drawSlingshot(netPos, !!projectile);
     drawTrajectory();
     drawNet(netPos, !!projectile);
+    drawComicTexts();
   }
 
   let lastTime = performance.now();
@@ -1420,6 +1867,8 @@ function launchCatchChallenge(card, placement) {
     if (!document.body.contains(challenge)) return;
     const dt = Math.min(0.033, (now - lastTime) / 1000);
     lastTime = now;
+    updateObstacles(dt);
+    updateComicTexts(dt);
     if (!finished || (fokemon.caught && fokemon.captureScale > 0)) step(dt);
     draw();
     rafId = requestAnimationFrame(loop);
