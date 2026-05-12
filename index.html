@@ -71,7 +71,13 @@
           <article class="panel map-panel">
             <header class="panel-head">
               <h3>Nearby Fokemon map</h3>
-              <small id="locationStatus" class="loc-pill" aria-live="polite">Locating…</small>
+              <div class="panel-head-meta">
+                <span class="ball-chip" id="ballChip" aria-live="polite" title="FokéBalls in your bag">
+                  <span class="ball-icon" aria-hidden="true"></span>
+                  <span><strong id="ballCount">0</strong><span class="ball-chip-label"> FokéBalls</span></span>
+                </span>
+                <small id="locationStatus" class="loc-pill" aria-live="polite">Locating…</small>
+              </div>
             </header>
             <div class="map-wrap">
               <div class="map-stage">

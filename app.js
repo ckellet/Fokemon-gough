@@ -1,13 +1,19 @@
 import {
+  computePoiPlacements,
   computeSpawnPlacements,
   filterUncaughtSpawns,
   getGridKey,
+  isPoiAvailable,
+  POI_COOLDOWN_MS,
   SPAWN_CELL_DEGREES,
 } from "./app.logic.js";
 
 const SPAWN_INTERVAL_MS = 3 * 60 * 1000;
 const MAX_SPAWNS = 4;
 const CATCH_RANGE_METERS = 80;
+const POI_RANGE_METERS = CATCH_RANGE_METERS;
+const STARTING_FOKEBALLS = 5;
+const MAX_POI_REWARD = 8;
 const GUN_PEERS = ["https://relay.peer.ooo/gun", "https://gun.o8.is/gun"];
 
 const FALLBACK_EVENTS_NODE = {
@@ -101,6 +107,8 @@ const el = {
   recenterBtn: $("recenterBtn"),
   zoomInBtn: $("zoomInBtn"),
   zoomOutBtn: $("zoomOutBtn"),
+  ballChip: $("ballChip"),
+  ballCount: $("ballCount"),
 };
 
 let heading = 0;
@@ -122,6 +130,9 @@ function safeStorageGet(key, fallback) {
 
 let profile = safeStorageGet("fokemon_profile", null);
 let caught = safeStorageGet("fokemon_caught", []);
+let fokeBalls = safeStorageGet("fokemon_balls", STARTING_FOKEBALLS);
+if (!Number.isFinite(fokeBalls) || fokeBalls < 0) fokeBalls = STARTING_FOKEBALLS;
+const poiSpent = safeStorageGet("fokemon_poi_spent", {}) || {};
 const recentEvents = [];
 const caughtIds = new Set(caught.map((c) => c.id));
 const gridCaughtIds = new Set();
@@ -132,12 +143,15 @@ let feedConnected = false;
 let activeChallenge = null;
 let currentPlacements = [];
 let currentPlacementsKey = null;
+let currentPois = [];
+let currentPoisCellKey = null;
 
 let leafletMap = null;
 let playerMarker = null;
 let catchCircle = null;
 const spawnMarkers = new Map();
 const trainerMarkers = new Map();
+const poiMarkers = new Map();
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (c) =>
@@ -161,9 +175,32 @@ function saveLocal() {
   try {
     localStorage.setItem("fokemon_profile", JSON.stringify(profile));
     localStorage.setItem("fokemon_caught", JSON.stringify(caught));
+    localStorage.setItem("fokemon_balls", JSON.stringify(fokeBalls));
+    localStorage.setItem("fokemon_poi_spent", JSON.stringify(poiSpent));
   } catch {
     /* private browsing — in-memory only */
   }
+}
+
+function renderBallCount() {
+  if (el.ballCount) el.ballCount.textContent = fokeBalls;
+  if (el.ballChip) el.ballChip.classList.toggle("empty", fokeBalls <= 0);
+}
+
+function addFokeBalls(n) {
+  fokeBalls = Math.max(0, fokeBalls + n);
+  saveLocal();
+  renderBallCount();
+  renderCards();
+}
+
+function consumeFokeBall() {
+  if (fokeBalls <= 0) return false;
+  fokeBalls -= 1;
+  saveLocal();
+  renderBallCount();
+  renderCards();
+  return true;
 }
 
 function leafletReady() {
@@ -318,20 +355,70 @@ function ensureFreshPlacements() {
   if (!playerLocation) {
     currentPlacements = [];
     currentPlacementsKey = null;
+    currentPois = [];
+    currentPoisCellKey = null;
     return;
   }
   const bucket = Math.floor(Date.now() / SPAWN_INTERVAL_MS);
   const key = placementsKey(playerLocation.lat, playerLocation.lng, bucket);
-  if (key === currentPlacementsKey) return;
+  if (key !== currentPlacementsKey) {
+    currentPlacements = computeSpawnPlacements(cards, {
+      timeMs: Date.now(),
+      lat: playerLocation.lat,
+      lon: playerLocation.lng,
+      intervalMs: SPAWN_INTERVAL_MS,
+      maxSpawns: MAX_SPAWNS,
+    });
+    currentPlacementsKey = key;
+  }
 
-  currentPlacements = computeSpawnPlacements(cards, {
-    timeMs: Date.now(),
-    lat: playerLocation.lat,
-    lon: playerLocation.lng,
-    intervalMs: SPAWN_INTERVAL_MS,
-    maxSpawns: MAX_SPAWNS,
+  const gridKey = getGridKey(playerLocation.lat, playerLocation.lng);
+  if (gridKey !== currentPoisCellKey) {
+    currentPois = computePoiPlacements(playerLocation.lat, playerLocation.lng, {
+      neighborhoodCells: 1,
+    });
+    currentPoisCellKey = gridKey;
+  }
+}
+
+function poiCatchable(poi) {
+  if (!playerLocation || !poi) return false;
+  if (!isPoiAvailable(poi, poiSpent)) return false;
+  return distanceMeters(playerLocation, { lat: poi.lat, lng: poi.lng }) <= POI_RANGE_METERS;
+}
+
+function poiCooldownRemaining(poi) {
+  const spent = poiSpent[poi.id];
+  if (!spent) return 0;
+  return Math.max(0, POI_COOLDOWN_MS - (Date.now() - spent));
+}
+
+function poiIconSignature(poi) {
+  const available = isPoiAvailable(poi, poiSpent);
+  const meters = playerLocation
+    ? Math.round(distanceMeters(playerLocation, { lat: poi.lat, lng: poi.lng }))
+    : null;
+  const near = available && meters !== null && meters <= POI_RANGE_METERS;
+  let label = "FokéCache";
+  if (!available) {
+    const remainingMs = poiCooldownRemaining(poi);
+    const mm = Math.floor(remainingMs / 60000);
+    const ss = Math.floor((remainingMs % 60000) / 1000).toString().padStart(2, "0");
+    label = `Refilling ${mm}:${ss}`;
+  }
+  return { available, near, label, sig: `${available ? "ok" : "cd"}|${near ? "near" : "far"}|${label}` };
+}
+
+function makePoiIcon(info) {
+  const L = window.L;
+  const state = info.available ? "" : "cooldown";
+  const near = info.near ? "near" : "";
+  return L.divIcon({
+    className: "",
+    html: `<div class="poi-marker ${state} ${near}"><span class="poi-ball" aria-hidden="true"></span><small>${escapeHtml(info.label)}</small></div>`,
+    iconSize: [54, 64],
+    iconAnchor: [27, 64],
   });
-  currentPlacementsKey = key;
 }
 
 function placementCatchable(p) {
@@ -462,6 +549,7 @@ function renderCards() {
     return;
   }
 
+  const hasBalls = fokeBalls > 0;
   el.cardsList.innerHTML = availablePlacements
     .map((p) => {
       const meters = playerLocation
@@ -473,12 +561,18 @@ function renderCards() {
         : inRange
           ? `In range • ${meters}m`
           : `${meters}m away — walk closer`;
+      const canCatch = inRange && hasBalls;
+      const buttonLabel = !inRange
+        ? "Out of range"
+        : !hasBalls
+          ? "Need FokéBalls"
+          : "Start catch challenge";
       return `
         <article class="poke-card">
           <strong>${escapeHtml(p.card.name)}</strong>
           <div>${escapeHtml(p.card.type)}</div>
           <small>${distLabel}</small>
-          <button data-id="${p.card.id}" ${inRange ? "" : "disabled"}>${inRange ? "Start catch challenge" : "Out of range"}</button>
+          <button data-id="${p.card.id}" ${canCatch ? "" : "disabled"}>${buttonLabel}</button>
         </article>
       `;
     })
@@ -492,6 +586,14 @@ function renderCards() {
       launchCatchChallenge(card, placement);
     });
   });
+}
+
+function flashEmptyInventory() {
+  if (!el.ballChip) return;
+  el.ballChip.classList.remove("flash");
+  void el.ballChip.offsetWidth;
+  el.ballChip.classList.add("flash");
+  setTimeout(() => el.ballChip && el.ballChip.classList.remove("flash"), 700);
 }
 
 function makeSpawnIcon(p) {
@@ -540,6 +642,8 @@ function renderMap() {
     spawnMarkers.clear();
     trainerMarkers.forEach((m) => m.remove());
     trainerMarkers.clear();
+    poiMarkers.forEach((m) => m.remove());
+    poiMarkers.clear();
     if (playerMarker) {
       playerMarker.remove();
       playerMarker = null;
@@ -618,6 +722,45 @@ function renderMap() {
     if (!wantedKeys.has(key)) {
       marker.remove();
       spawnMarkers.delete(key);
+    }
+  }
+
+  const wantedPoiKeys = new Set();
+  currentPois.forEach((poi) => {
+    wantedPoiKeys.add(poi.id);
+    const info = poiIconSignature(poi);
+    let marker = poiMarkers.get(poi.id);
+    const onPoiClick = () => {
+      if (!isPoiAvailable(poi, poiSpent)) {
+        cameraForward = 0;
+        cameraLateral = 0;
+        map.setView([poi.lat, poi.lng], Math.max(map.getZoom(), 19), { animate: true });
+        return;
+      }
+      if (!poiCatchable(poi)) {
+        cameraForward = 0;
+        cameraLateral = 0;
+        map.setView([poi.lat, poi.lng], Math.max(map.getZoom(), 19), { animate: true });
+        return;
+      }
+      launchPoiSpinner(poi);
+    };
+    if (!marker) {
+      marker = L.marker([poi.lat, poi.lng], { icon: makePoiIcon(info) }).addTo(map);
+      marker._poiSig = info.sig;
+      marker.on("click", onPoiClick);
+      poiMarkers.set(poi.id, marker);
+    } else if (marker._poiSig !== info.sig) {
+      marker.setIcon(makePoiIcon(info));
+      marker._poiSig = info.sig;
+    }
+    const iconEl = marker.getElement();
+    if (iconEl) iconEl._fokeMarkerClick = onPoiClick;
+  });
+  for (const [key, marker] of poiMarkers) {
+    if (!wantedPoiKeys.has(key)) {
+      marker.remove();
+      poiMarkers.delete(key);
     }
   }
 
@@ -1003,6 +1146,10 @@ function hexInt(hex, channel) {
 
 function launchCatchChallenge(card, placement) {
   if (activeChallenge) return;
+  if (fokeBalls <= 0) {
+    flashEmptyInventory();
+    return;
+  }
 
   const challenge = document.createElement("div");
   challenge.className = "catch-challenge";
@@ -1010,11 +1157,11 @@ function launchCatchChallenge(card, placement) {
     <div class="challenge-card" role="dialog" aria-modal="true" aria-label="Catch ${escapeHtml(card.name)}">
       <p class="eyebrow">Catch challenge</p>
       <h3>Snare ${escapeHtml(card.name)}</h3>
-      <p>Pull back the foke-net, aim with the dotted path, and release to fling it.</p>
+      <p>Pull back the FokéBall, aim with the dotted path, and release to fling it.</p>
       <div class="arena">
-        <canvas class="catch-canvas" aria-label="Foke-net slingshot arena"></canvas>
+        <canvas class="catch-canvas" aria-label="FokéBall slingshot arena"></canvas>
       </div>
-      <p class="status" aria-live="polite">Nets left: <strong>3</strong> &bull; Drag the net to aim</p>
+      <p class="status" aria-live="polite">FokéBalls: <strong>${fokeBalls}</strong> &bull; Drag the ball to aim</p>
       <button class="ghost cancel">Run away</button>
     </div>
   `;
@@ -1063,7 +1210,6 @@ function launchCatchChallenge(card, placement) {
   const DODGE_SPEED = 360;
   const DODGE_DURATION = 0.26;
 
-  let nets = 3;
   let aiming = null;
   let projectile = null;
   let finished = false;
@@ -1074,10 +1220,12 @@ function launchCatchChallenge(card, placement) {
 
   function statusText() {
     if (finished && outcome === "caught") return `<span class="success">Captured!</span> ${escapeHtml(card.name)} joined your collection.`;
-    if (finished && outcome === "escaped") return `<span class="fail">Escaped!</span> ${escapeHtml(card.name)} got away.`;
-    if (aiming) return `Nets left: <strong>${nets}</strong> &bull; Release to fire!`;
-    if (projectile) return `Nets left: <strong>${nets}</strong> &bull; Net in flight…`;
-    return `Nets left: <strong>${nets}</strong> &bull; Drag the net to aim`;
+    if (finished && outcome === "escaped") return `<span class="fail">Out of FokéBalls!</span> ${escapeHtml(card.name)} got away.`;
+    if (finished && outcome === "fled") return `<span class="fail">Escaped!</span> ${escapeHtml(card.name)} bolted off.`;
+    if (aiming) return `FokéBalls: <strong>${fokeBalls}</strong> &bull; Release to fire!`;
+    if (projectile) return `FokéBalls: <strong>${fokeBalls}</strong> &bull; Ball in flight…`;
+    if (fokeBalls <= 0) return `<span class="fail">Out of FokéBalls!</span> Spin a FokéCache to refill.`;
+    return `FokéBalls: <strong>${fokeBalls}</strong> &bull; Drag the ball to aim`;
   }
 
   function setStatus() {
@@ -1095,7 +1243,7 @@ function launchCatchChallenge(card, placement) {
   }
 
   function onDown(e) {
-    if (finished || projectile || nets <= 0) return;
+    if (finished || projectile || fokeBalls <= 0) return;
     const p = getPointer(e);
     const dx = p.x - RESTING.x;
     const dy = p.y - RESTING.y;
@@ -1135,6 +1283,11 @@ function launchCatchChallenge(card, placement) {
       setStatus();
       return;
     }
+    if (!consumeFokeBall()) {
+      aiming = null;
+      setStatus();
+      return;
+    }
     projectile = {
       x: aiming.x,
       y: aiming.y,
@@ -1142,7 +1295,6 @@ function launchCatchChallenge(card, placement) {
       vy: pullDy * POWER,
     };
     aiming = null;
-    nets -= 1;
     dodgeArmed = !fokemon.caught && Math.random() < DODGE_CHANCE;
     dodgeTriggered = false;
     setStatus();
@@ -1225,7 +1377,7 @@ function launchCatchChallenge(card, placement) {
           hopFokemon();
           fokemon.hopCooldown = 2.6;
         }
-        if (nets <= 0) {
+        if (fokeBalls <= 0) {
           finished = true;
           outcome = "escaped";
           cancel.textContent = "Close";
@@ -1355,29 +1507,46 @@ function launchCatchChallenge(card, placement) {
     ctx.translate(pos.x, pos.y);
     if (rotate) ctx.rotate(netSpin);
 
-    ctx.fillStyle = "rgba(124, 240, 198, 0.18)";
+    const r = NET_RADIUS;
+    const topGrad = ctx.createRadialGradient(-r * 0.3, -r * 0.35, r * 0.15, 0, -r * 0.1, r);
+    topGrad.addColorStop(0, "#ff8d9e");
+    topGrad.addColorStop(1, "#c93650");
+    ctx.fillStyle = topGrad;
     ctx.beginPath();
-    ctx.arc(0, 0, NET_RADIUS, 0, Math.PI * 2);
+    ctx.arc(0, 0, r, Math.PI, 0, false);
+    ctx.closePath();
     ctx.fill();
 
-    ctx.strokeStyle = "#7cf0c6";
-    ctx.lineWidth = 2.4;
+    const botGrad = ctx.createRadialGradient(-r * 0.3, r * 0.3, r * 0.15, 0, r * 0.1, r);
+    botGrad.addColorStop(0, "#ffffff");
+    botGrad.addColorStop(1, "#cdd3e2");
+    ctx.fillStyle = botGrad;
     ctx.beginPath();
-    ctx.arc(0, 0, NET_RADIUS, 0, Math.PI * 2);
+    ctx.arc(0, 0, r, 0, Math.PI, false);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.strokeStyle = "#0b1226";
+    ctx.lineWidth = 2.2;
+    ctx.beginPath();
+    ctx.moveTo(-r, 0);
+    ctx.lineTo(r, 0);
     ctx.stroke();
 
-    ctx.strokeStyle = "rgba(124, 240, 198, 0.65)";
-    ctx.lineWidth = 1;
     ctx.beginPath();
-    for (let i = -2; i <= 2; i++) {
-      const off = i * (NET_RADIUS / 2.6);
-      const w = Math.sqrt(Math.max(0, NET_RADIUS * NET_RADIUS - off * off));
-      ctx.moveTo(-w, off);
-      ctx.lineTo(w, off);
-      ctx.moveTo(off, -w);
-      ctx.lineTo(off, w);
-    }
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
     ctx.stroke();
+
+    ctx.fillStyle = "#f5f7ff";
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 0.34, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = "#0b1226";
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 0.15, 0, Math.PI * 2);
+    ctx.fill();
 
     ctx.restore();
   }
@@ -1419,6 +1588,380 @@ function launchCatchChallenge(card, placement) {
 
   setStatus();
   rafId = requestAnimationFrame(loop);
+}
+
+function launchPoiSpinner(poi) {
+  if (activeChallenge) return;
+
+  const challenge = document.createElement("div");
+  challenge.className = "catch-challenge spin-challenge";
+  challenge.innerHTML = `
+    <div class="challenge-card" role="dialog" aria-modal="true" aria-label="Spin the FokéCache">
+      <p class="eyebrow">FokéCache</p>
+      <h3>Spin to collect FokéBalls</h3>
+      <p>Flick the dial — drag tangentially or click the rim to push. Keep it spinning above the speed line; each full rotation drops a FokéBall.</p>
+      <div class="arena spin-arena">
+        <canvas class="spin-canvas" aria-label="FokéCache spinner"></canvas>
+        <div class="spin-readout">
+          <div class="readout-row"><span class="readout-label">Picked up</span><span class="readout-balls">0</span></div>
+          <div class="readout-row small"><span class="readout-label">Bag</span><span class="readout-bag">${fokeBalls}</span></div>
+        </div>
+      </div>
+      <p class="status" aria-live="polite">Drag tangent to spin. Get it above the speed line to collect.</p>
+      <button class="ghost cancel">Done</button>
+    </div>
+  `;
+  document.body.appendChild(challenge);
+  activeChallenge = challenge;
+
+  const canvas = challenge.querySelector(".spin-canvas");
+  const arena = challenge.querySelector(".spin-arena");
+  const status = challenge.querySelector(".status");
+  const cancel = challenge.querySelector(".cancel");
+  const readoutBalls = challenge.querySelector(".readout-balls");
+  const readoutBag = challenge.querySelector(".readout-bag");
+
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const rect = arena.getBoundingClientRect();
+  const W = Math.max(320, Math.floor(rect.width));
+  const H = Math.max(280, Math.floor(rect.height));
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = `${W}px`;
+  canvas.style.height = `${H}px`;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+
+  const CX = W / 2;
+  const CY = H / 2;
+  const R = Math.min(W, H) * 0.42;
+  const HANDLE_R = R * 0.18;
+  const HANDLE_DIST = R * 0.74;
+
+  const THRESHOLD = 7.2;
+  const MAX_OMEGA = 28;
+  const DAMPING = 0.65;
+  const TAP_IMPULSE = 1.6;
+
+  let theta = 0;
+  let omega = 0;
+  let dragging = false;
+  let lastAngle = 0;
+  let lastTime = 0;
+  let strokeTangentialAccum = 0;
+  let collected = 0;
+  let revAccum = 0;
+  let aboveSince = 0;
+  let lastPointerMoved = false;
+  let bursts = [];
+  let stopped = false;
+
+  function setStatus(html) {
+    if (html !== undefined) status.innerHTML = html;
+    else {
+      const speed = Math.abs(omega);
+      const pct = Math.min(1, speed / THRESHOLD);
+      if (collected >= MAX_POI_REWARD) {
+        status.innerHTML = `<span class="success">Cache emptied!</span> +${collected} FokéBalls — nice spin.`;
+      } else if (speed >= THRESHOLD) {
+        status.innerHTML = `<strong>Locked in!</strong> Keep her spinning…`;
+      } else if (collected > 0) {
+        status.innerHTML = `Speed ${(pct * 100).toFixed(0)}% — back up to the line.`;
+      } else {
+        status.innerHTML = `Flick tangentially. Get above the speed line.`;
+      }
+    }
+  }
+
+  function getPointer(e) {
+    const r = canvas.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+
+  function pushBurst() {
+    bursts.push({ t: 0, life: 0.8 });
+  }
+
+  function awardBall() {
+    if (collected >= MAX_POI_REWARD) return;
+    collected += 1;
+    addFokeBalls(1);
+    pushBurst();
+    if (readoutBalls) readoutBalls.textContent = String(collected);
+    if (readoutBag) readoutBag.textContent = String(fokeBalls);
+    if (collected >= MAX_POI_REWARD) {
+      // Cache fully drained — mark spent now.
+      finalizeSpent();
+      setStatus();
+    }
+  }
+
+  function finalizeSpent() {
+    if (stopped) return;
+    stopped = true;
+    poiSpent[poi.id] = Date.now();
+    saveLocal();
+    renderMap();
+  }
+
+  function onDown(e) {
+    if (stopped) return;
+    const p = getPointer(e);
+    const dx = p.x - CX;
+    const dy = p.y - CY;
+    const dist = Math.hypot(dx, dy);
+    if (dist > R + 12) return;
+    e.preventDefault();
+    canvas.setPointerCapture?.(e.pointerId);
+    dragging = true;
+    lastAngle = Math.atan2(dy, dx);
+    lastTime = performance.now();
+    strokeTangentialAccum = 0;
+    lastPointerMoved = false;
+  }
+
+  function onMove(e) {
+    if (!dragging || stopped) return;
+    const p = getPointer(e);
+    const dx = p.x - CX;
+    const dy = p.y - CY;
+    const dist = Math.hypot(dx, dy);
+    if (dist < R * 0.18) {
+      lastAngle = Math.atan2(dy, dx);
+      return;
+    }
+    e.preventDefault();
+    const angle = Math.atan2(dy, dx);
+    let delta = angle - lastAngle;
+    if (delta > Math.PI) delta -= Math.PI * 2;
+    else if (delta < -Math.PI) delta += Math.PI * 2;
+    const now = performance.now();
+    const dt = Math.max(0.004, (now - lastTime) / 1000);
+    const instantOmega = delta / dt;
+    // Inertial transfer — wheel feels heavy, doesn't snap to cursor instantly.
+    const blend = Math.min(1, dt * 5.2);
+    omega += (instantOmega - omega) * blend;
+    omega = Math.max(-MAX_OMEGA, Math.min(MAX_OMEGA, omega));
+    strokeTangentialAccum += Math.abs(delta);
+    lastAngle = angle;
+    lastTime = now;
+    lastPointerMoved = true;
+  }
+
+  function onUp(e) {
+    if (!dragging) return;
+    dragging = false;
+    // Tap (no drag) → small directional impulse, helps clicky cadence.
+    if (!lastPointerMoved && !stopped) {
+      const p = getPointer(e);
+      const dx = p.x - CX;
+      const dy = p.y - CY;
+      const r = Math.hypot(dx, dy);
+      if (r > R * 0.2 && r < R + 12) {
+        // Tangent CCW direction
+        const tx = -dy / r;
+        const ty = dx / r;
+        // Push in current spin direction if any, else default CCW.
+        const sign = Math.abs(omega) > 0.2 ? Math.sign(omega) : 1;
+        // Visual cue + impulse magnitude
+        const impulse = TAP_IMPULSE;
+        omega += sign * impulse;
+        omega = Math.max(-MAX_OMEGA, Math.min(MAX_OMEGA, omega));
+        // Ignore tx/ty—just sign-based scalar impulse keeps things simple.
+        void tx; void ty;
+      }
+    }
+  }
+
+  canvas.addEventListener("pointerdown", onDown);
+  canvas.addEventListener("pointermove", onMove);
+  canvas.addEventListener("pointerup", onUp);
+  canvas.addEventListener("pointercancel", onUp);
+
+  let last = performance.now();
+  let raf = 0;
+  function loop(now) {
+    if (!document.body.contains(challenge)) return;
+    const dt = Math.min(0.04, (now - last) / 1000);
+    last = now;
+    step(dt);
+    draw();
+    raf = requestAnimationFrame(loop);
+  }
+
+  function step(dt) {
+    if (!dragging) {
+      theta += omega * dt;
+      omega -= omega * DAMPING * dt;
+      if (Math.abs(omega) < 0.04) omega = 0;
+    } else {
+      theta += omega * dt;
+    }
+    const absO = Math.abs(omega);
+    if (absO >= THRESHOLD && collected < MAX_POI_REWARD) {
+      revAccum += absO * dt;
+      aboveSince += dt;
+      while (revAccum >= Math.PI * 2 && collected < MAX_POI_REWARD) {
+        revAccum -= Math.PI * 2;
+        awardBall();
+      }
+    } else {
+      revAccum = Math.max(0, revAccum - dt * Math.PI);
+      aboveSince = 0;
+    }
+
+    bursts = bursts.filter((b) => {
+      b.t += dt;
+      return b.t < b.life;
+    });
+
+    setStatus();
+  }
+
+  function drawWheel() {
+    ctx.clearRect(0, 0, W, H);
+
+    // Speed-line indicator ring outside the wheel
+    const speedPct = Math.min(1, Math.abs(omega) / (THRESHOLD * 1.6));
+    const ringR = R + 14;
+    ctx.strokeStyle = "rgba(180, 200, 255, 0.18)";
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.arc(CX, CY, ringR, 0, Math.PI * 2);
+    ctx.stroke();
+    if (Math.abs(omega) > 0.01) {
+      const arcSweep = speedPct * Math.PI * 2;
+      ctx.strokeStyle = Math.abs(omega) >= THRESHOLD ? "#7cf0c6" : "#7c8dff";
+      ctx.lineWidth = 6;
+      ctx.beginPath();
+      ctx.arc(CX, CY, ringR, -Math.PI / 2, -Math.PI / 2 + arcSweep, false);
+      ctx.stroke();
+    }
+
+    // Threshold mark on the speed ring
+    const thresholdPct = THRESHOLD / (THRESHOLD * 1.6);
+    const ang = -Math.PI / 2 + thresholdPct * Math.PI * 2;
+    ctx.strokeStyle = "rgba(124, 240, 198, 0.85)";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(CX + Math.cos(ang) * (ringR - 9), CY + Math.sin(ang) * (ringR - 9));
+    ctx.lineTo(CX + Math.cos(ang) * (ringR + 9), CY + Math.sin(ang) * (ringR + 9));
+    ctx.stroke();
+
+    // Bursts (rewards anim)
+    bursts.forEach((b) => {
+      const p = b.t / b.life;
+      const rad = R * (1.0 + p * 0.6);
+      ctx.strokeStyle = `rgba(124, 240, 198, ${(1 - p) * 0.55})`;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(CX, CY, rad, 0, Math.PI * 2);
+      ctx.stroke();
+    });
+
+    // Outer plate
+    const plateGrad = ctx.createRadialGradient(CX - R * 0.4, CY - R * 0.4, R * 0.15, CX, CY, R);
+    plateGrad.addColorStop(0, "rgba(80, 110, 200, 0.35)");
+    plateGrad.addColorStop(1, "rgba(10, 16, 36, 0.85)");
+    ctx.fillStyle = plateGrad;
+    ctx.beginPath();
+    ctx.arc(CX, CY, R, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.15)";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Spokes — rotate with theta
+    ctx.save();
+    ctx.translate(CX, CY);
+    ctx.rotate(theta);
+
+    const spokes = 6;
+    for (let i = 0; i < spokes; i++) {
+      const a = (i / spokes) * Math.PI * 2;
+      const cx = Math.cos(a) * HANDLE_DIST;
+      const cy = Math.sin(a) * HANDLE_DIST;
+      // Stripe
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.1)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(cx * 1.08, cy * 1.08);
+      ctx.stroke();
+
+      // Handle nub (a tiny FokéBall)
+      const r = HANDLE_R;
+      const topGrad = ctx.createRadialGradient(cx - r * 0.3, cy - r * 0.3, r * 0.15, cx, cy, r);
+      topGrad.addColorStop(0, "#ff8d9e");
+      topGrad.addColorStop(1, "#c93650");
+      ctx.fillStyle = topGrad;
+      ctx.beginPath();
+      ctx.moveTo(cx + r, cy);
+      ctx.arc(cx, cy, r, 0, Math.PI, true);
+      ctx.closePath();
+      ctx.fill();
+
+      const botGrad = ctx.createRadialGradient(cx - r * 0.3, cy + r * 0.3, r * 0.15, cx, cy, r);
+      botGrad.addColorStop(0, "#ffffff");
+      botGrad.addColorStop(1, "#cdd3e2");
+      ctx.fillStyle = botGrad;
+      ctx.beginPath();
+      ctx.moveTo(cx - r, cy);
+      ctx.arc(cx, cy, r, Math.PI, 2 * Math.PI, true);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.strokeStyle = "#0b1226";
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      ctx.moveTo(cx - r, cy);
+      ctx.lineTo(cx + r, cy);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = "#f5f7ff";
+      ctx.beginPath();
+      ctx.arc(cx, cy, r * 0.34, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = "#0b1226";
+      ctx.beginPath();
+      ctx.arc(cx, cy, r * 0.15, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Hub
+    ctx.fillStyle = "#10193a";
+    ctx.beginPath();
+    ctx.arc(0, 0, R * 0.18, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,0.2)";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function draw() {
+    drawWheel();
+  }
+
+  function closeChallenge() {
+    cancelAnimationFrame(raf);
+    if (!stopped && collected > 0) finalizeSpent();
+    challenge.remove();
+    activeChallenge = null;
+    document.removeEventListener("keydown", onKey);
+  }
+
+  function onKey(ev) {
+    if (ev.key === "Escape") closeChallenge();
+  }
+  document.addEventListener("keydown", onKey);
+  cancel.addEventListener("click", closeChallenge);
+
+  setStatus();
+  raf = requestAnimationFrame(loop);
 }
 
 function updateLocationStatus(text, kind = "") {
@@ -1632,6 +2175,7 @@ function enterGame() {
   );
   ensureMap();
   ensureFreshPlacements();
+  renderBallCount();
   renderCards();
   renderMap();
   renderCollection();
@@ -1720,6 +2264,14 @@ if (typeof setInterval === "function") {
       connectGridCaught();
       renderCards();
       renderMap();
+    } else if (poiMarkers.size && currentPois.length) {
+      const now = Date.now();
+      let anyChange = false;
+      currentPois.forEach((poi) => {
+        const spent = poiSpent[poi.id];
+        if (spent && now - spent < POI_COOLDOWN_MS) anyChange = true;
+      });
+      if (anyChange) renderMap();
     }
     updateBucketLabel();
   }, 1000);
