@@ -68,21 +68,33 @@
         </header>
 
         <div class="grid">
-          <article class="panel">
-            <h3>Nearby Fokemon map</h3>
-            <p>Enable location to see nearby Fokemon and other trainers. Move close to a pulse, then start the catch challenge.</p>
-            <div class="location-row">
-              <button id="enableLocation" class="ghost">Enable location</button>
-              <small id="locationStatus">Location off</small>
-              <span class="ball-chip" id="ballChip" aria-live="polite" title="FokéBalls in your bag">
-                <span class="ball-icon" aria-hidden="true"></span>
-                <span><strong id="ballCount">0</strong><span class="ball-chip-label"> FokéBalls</span></span>
-              </span>
-            </div>
+          <article class="panel map-panel">
+            <header class="panel-head">
+              <h3>Nearby Fokemon map</h3>
+              <div class="panel-head-meta">
+                <span class="ball-chip" id="ballChip" aria-live="polite" title="FokéBalls in your bag">
+                  <span class="ball-icon" aria-hidden="true"></span>
+                  <span><strong id="ballCount">0</strong><span class="ball-chip-label"> FokéBalls</span></span>
+                </span>
+                <small id="locationStatus" class="loc-pill" aria-live="polite">Locating…</small>
+              </div>
+            </header>
             <div class="map-wrap">
-              <div id="nearbyMap" class="map" aria-label="Nearby map"></div>
-              <p id="mapHint" class="map-hint">Enable location for live distance + proximity catching.</p>
+              <div class="map-stage">
+                <div id="nearbyMap" class="map tilted" aria-label="Nearby map"></div>
+              </div>
+              <p id="mapHint" class="map-hint">Tap “Enable location” to start the world.</p>
               <p id="mapBucket" class="map-bucket" aria-live="polite"></p>
+              <div class="compass-rose" id="compassRose" aria-hidden="true">
+                <span class="compass-n">N</span>
+              </div>
+              <div class="map-overlay-controls">
+                <button id="compassBtn" class="map-chip" type="button" title="Toggle compass auto-rotate">🧭 Compass</button>
+                <button id="recenterBtn" class="map-chip" type="button" title="Recenter on you">🎯 Center</button>
+                <button id="zoomInBtn" class="map-chip square" type="button" aria-label="Zoom in">+</button>
+                <button id="zoomOutBtn" class="map-chip square" type="button" aria-label="Zoom out">−</button>
+              </div>
+              <p class="drag-hint">Drag left/right to spin · drag up/down to look ahead</p>
             </div>
             <div class="cards" id="cardsList"></div>
           </article>
@@ -110,6 +122,16 @@
         </div>
       </section>
     </main>
+
+    <div id="locationModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="locationModalTitle">
+      <div class="modal-card">
+        <p class="eyebrow">Tracker activation</p>
+        <h2 id="locationModalTitle">Allow location to start</h2>
+        <p id="locationModalBody">FokéGo spawns wild Fokemon around you — we need your live location to plot them on the map and let you walk up to catch them.</p>
+        <button id="enableLocation" type="button">Enable location</button>
+        <small id="modalLocationHelp"></small>
+      </div>
+    </div>
 
     <script type="module" src="app.js"></script>
   </body>
