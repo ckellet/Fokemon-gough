@@ -80,21 +80,9 @@
               </div>
             </header>
             <div class="map-wrap">
-              <div class="map-stage">
-                <div id="nearbyMap" class="map tilted" aria-label="Nearby map"></div>
-              </div>
+              <div id="nearbyMap" class="map" aria-label="Nearby map"></div>
               <p id="mapHint" class="map-hint">Tap “Enable location” to start the world.</p>
               <p id="mapBucket" class="map-bucket" aria-live="polite"></p>
-              <div class="compass-rose" id="compassRose" aria-hidden="true">
-                <span class="compass-n">N</span>
-              </div>
-              <div class="map-overlay-controls">
-                <button id="compassBtn" class="map-chip" type="button" title="Toggle compass auto-rotate">🧭 Compass</button>
-                <button id="recenterBtn" class="map-chip" type="button" title="Recenter on you">🎯 Center</button>
-                <button id="zoomInBtn" class="map-chip square" type="button" aria-label="Zoom in">+</button>
-                <button id="zoomOutBtn" class="map-chip square" type="button" aria-label="Zoom out">−</button>
-              </div>
-              <p class="drag-hint">Drag left/right to spin · drag up/down to look ahead</p>
             </div>
             <div class="cards" id="cardsList"></div>
           </article>
