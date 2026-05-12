@@ -204,6 +204,7 @@ function ensureMap() {
     zoomControl: true,
     attributionControl: true,
     worldCopyJump: true,
+    scrollWheelZoom: false,
   }).setView([0, 0], 2);
 
   L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -212,6 +213,7 @@ function ensureMap() {
   }).addTo(leafletMap);
 
   el.nearbyMap.classList.add("leaflet-active");
+  requestAnimationFrame(() => leafletMap?.invalidateSize());
   return leafletMap;
 }
 
