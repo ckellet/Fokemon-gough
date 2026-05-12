@@ -136,16 +136,15 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
 }
 .map-wrap {
   position: relative;
-  border-radius: 18px;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  background: #060b1c;
-  height: clamp(420px, 62vh, 640px);
+  margin-bottom: .8rem;
 }
 .map {
-  position: absolute;
-  inset: 0;
+  height: clamp(420px, 62vh, 640px);
+  border-radius: 18px;
+  border: 1px solid var(--line);
   background: linear-gradient(160deg, rgba(70,90,150,.28), rgba(13,20,45,.9));
+  position: relative;
+  overflow: hidden;
   z-index: 0;
   touch-action: none;
 }
@@ -480,5 +479,5 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
 
 @media (max-width: 850px) {
   .grid { grid-template-columns: 1fr; }
-  .map-wrap { height: clamp(360px, 56vh, 520px); }
+  .map { height: clamp(360px, 56vh, 520px); }
 }

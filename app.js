@@ -213,6 +213,7 @@ function ensureMap() {
   }).addTo(leafletMap);
 
   el.nearbyMap.classList.add("leaflet-active");
+  requestAnimationFrame(() => leafletMap?.invalidateSize());
   return leafletMap;
 }
 
