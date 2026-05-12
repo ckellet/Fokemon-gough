@@ -11,7 +11,7 @@ import {
 const SPAWN_INTERVAL_MS = 3 * 60 * 1000;
 const MAX_SPAWNS = 4;
 const CATCH_RANGE_METERS = 80;
-const POI_RANGE_METERS = 60;
+const POI_RANGE_METERS = CATCH_RANGE_METERS;
 const STARTING_FOKEBALLS = 5;
 const MAX_POI_REWARD = 8;
 const GUN_PEERS = ["https://relay.peer.ooo/gun", "https://gun.o8.is/gun"];
@@ -257,14 +257,12 @@ function poiCooldownRemaining(poi) {
   return Math.max(0, POI_COOLDOWN_MS - (Date.now() - spent));
 }
 
-function makePoiIcon(poi) {
-  const L = window.L;
+function poiIconSignature(poi) {
+  const available = isPoiAvailable(poi, poiSpent);
   const meters = playerLocation
     ? Math.round(distanceMeters(playerLocation, { lat: poi.lat, lng: poi.lng }))
     : null;
-  const available = isPoiAvailable(poi, poiSpent);
-  const near = available && meters !== null && meters <= POI_RANGE_METERS ? "near" : "";
-  const state = available ? "" : "cooldown";
+  const near = available && meters !== null && meters <= POI_RANGE_METERS;
   let label = "FokéCache";
   if (!available) {
     const remainingMs = poiCooldownRemaining(poi);
@@ -272,9 +270,16 @@ function makePoiIcon(poi) {
     const ss = Math.floor((remainingMs % 60000) / 1000).toString().padStart(2, "0");
     label = `Refilling ${mm}:${ss}`;
   }
+  return { available, near, label, sig: `${available ? "ok" : "cd"}|${near ? "near" : "far"}|${label}` };
+}
+
+function makePoiIcon(info) {
+  const L = window.L;
+  const state = info.available ? "" : "cooldown";
+  const near = info.near ? "near" : "";
   return L.divIcon({
     className: "",
-    html: `<div class="poi-marker ${state} ${near}"><span class="poi-ball" aria-hidden="true"></span><small>${escapeHtml(label)}</small></div>`,
+    html: `<div class="poi-marker ${state} ${near}"><span class="poi-ball" aria-hidden="true"></span><small>${escapeHtml(info.label)}</small></div>`,
     iconSize: [54, 64],
     iconAnchor: [27, 32],
   });
@@ -576,10 +581,11 @@ function renderMap() {
   const wantedPoiKeys = new Set();
   currentPois.forEach((poi) => {
     wantedPoiKeys.add(poi.id);
-    const icon = makePoiIcon(poi);
+    const info = poiIconSignature(poi);
     let marker = poiMarkers.get(poi.id);
     if (!marker) {
-      marker = L.marker([poi.lat, poi.lng], { icon }).addTo(map);
+      marker = L.marker([poi.lat, poi.lng], { icon: makePoiIcon(info) }).addTo(map);
+      marker._poiSig = info.sig;
       marker.on("click", () => {
         if (!isPoiAvailable(poi, poiSpent)) {
           map.flyTo([poi.lat, poi.lng], 19, { duration: 0.6 });
@@ -592,9 +598,9 @@ function renderMap() {
         launchPoiSpinner(poi);
       });
       poiMarkers.set(poi.id, marker);
-    } else {
-      marker.setIcon(icon);
-      marker.setLatLng([poi.lat, poi.lng]);
+    } else if (marker._poiSig !== info.sig) {
+      marker.setIcon(makePoiIcon(info));
+      marker._poiSig = info.sig;
     }
   });
   for (const [key, marker] of poiMarkers) {
