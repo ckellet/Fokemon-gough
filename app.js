@@ -22,11 +22,54 @@ let gridCaughtNode = null;
 let lastGridKey = null;
 
 const cards = [
-  { id: "voltlynx", name: "VoltLynx", type: "Electric" },
-  { id: "mossaur", name: "Mossaur", type: "Leaf" },
-  { id: "aquaphin", name: "AquaPhin", type: "Water" },
-  { id: "emberoo", name: "Emberoo", type: "Fire" },
-  { id: "cryptowl", name: "CryptOwl", type: "Shadow" },
+  { id: "voltlynx", name: "VoltLynx", type: "Electric", rarity: "rare",
+    body: "tall", ears: "pointy", accent: "lightning",
+    hp: 58, atk: 72, def: 44, spd: 88,
+    flavor: "Skittish hunter with arc-static fur. Sparks when surprised." },
+  { id: "mossaur", name: "Mossaur", type: "Leaf", rarity: "common",
+    body: "wide", ears: "horn", accent: "leaf",
+    hp: 84, atk: 56, def: 70, spd: 38,
+    flavor: "Grazes in tall meadows; sheds fresh sprouts each dawn." },
+  { id: "aquaphin", name: "AquaPhin", type: "Water", rarity: "common",
+    body: "round", ears: "fin", accent: "droplet",
+    hp: 64, atk: 60, def: 58, spd: 70,
+    flavor: "Surfs warm rain currents above the asphalt." },
+  { id: "emberoo", name: "Emberoo", type: "Fire", rarity: "rare",
+    body: "round", ears: "pointy", accent: "flame",
+    hp: 54, atk: 80, def: 40, spd: 78,
+    flavor: "Hops between sun-baked rooftops, leaving scorch prints." },
+  { id: "cryptowl", name: "CryptOwl", type: "Shadow", rarity: "epic",
+    body: "tall", ears: "horn", accent: "ghost",
+    hp: 50, atk: 86, def: 46, spd: 76,
+    flavor: "Stares from places no light is meant to reach." },
+  { id: "frostbun", name: "Frostbun", type: "Ice", rarity: "common",
+    body: "round", ears: "round", accent: "snowflake",
+    hp: 66, atk: 50, def: 70, spd: 60,
+    flavor: "Wrapped in a perpetual chilly fog that smells of mint." },
+  { id: "gustling", name: "Gustling", type: "Wind", rarity: "rare",
+    body: "blob", ears: "antenna", accent: "swirl",
+    hp: 48, atk: 64, def: 38, spd: 98,
+    flavor: "Zips through alleyways riding the breeze it brewed itself." },
+  { id: "pebbloid", name: "Pebbloid", type: "Rock", rarity: "common",
+    body: "wide", ears: "none", accent: "pebble",
+    hp: 96, atk: 60, def: 92, spd: 26,
+    flavor: "Slow but stubbornly unmovable. Disguises itself as scenery." },
+  { id: "nebulime", name: "Nebulime", type: "Cosmic", rarity: "epic",
+    body: "round", ears: "antenna", accent: "star",
+    hp: 60, atk: 78, def: 54, spd: 74,
+    flavor: "A whisper of starlight wearing fur. Hums at 432Hz." },
+  { id: "spectrip", name: "Spectrip", type: "Spirit", rarity: "rare",
+    body: "tall", ears: "none", accent: "ghost",
+    hp: 56, atk: 70, def: 50, spd: 72,
+    flavor: "Drifts past clocks that have started running slow." },
+  { id: "buzzwick", name: "Buzzwick", type: "Bug", rarity: "common",
+    body: "round", ears: "antenna", accent: "sparkle",
+    hp: 52, atk: 66, def: 44, spd: 86,
+    flavor: "Carries embers between flowers without scorching a petal." },
+  { id: "chromite", name: "Chromite", type: "Metal", rarity: "epic",
+    body: "wide", ears: "horn", accent: "gear",
+    hp: 84, atk: 72, def: 96, spd: 38,
+    flavor: "A polished little tank with a surprisingly gentle hum." },
 ];
 const cardsById = new Map(cards.map((c) => [c.id, c]));
 
@@ -161,7 +204,6 @@ function placementCatchable(p) {
 }
 
 function placementStatus(p) {
-  if (caughtIds.has(p.card.id)) return "owned";
   if (gridCaughtIds.has(p.card.id)) return "taken";
   return "available";
 }
@@ -181,14 +223,87 @@ function updateBucketLabel() {
   el.mapBucket.textContent = `Refresh in ${mm}:${ss}`;
 }
 
+function statBars(card) {
+  const stats = [
+    ["HP", card.hp ?? 0, 120],
+    ["ATK", card.atk ?? 0, 100],
+    ["DEF", card.def ?? 0, 100],
+    ["SPD", card.spd ?? 0, 100],
+  ];
+  return `
+    <ul class="stats-list">
+      ${stats
+        .map(
+          ([label, val, max]) => `
+        <li>
+          <span class="stat-label">${label}</span>
+          <span class="stat-bar"><span class="stat-fill" style="width:${Math.max(4, Math.min(100, (val / max) * 100))}%"></span></span>
+          <span class="stat-val">${val}</span>
+        </li>`
+        )
+        .join("")}
+    </ul>
+  `;
+}
+
 function renderCollection() {
   if (!el.caughtCount) return;
   el.caughtCount.textContent = caught.length;
-  const unique = [...new Set(caught.map((c) => c.id))];
-  el.uniqueCount.textContent = unique.length;
-  el.collection.innerHTML = unique
-    .map((id) => `<span class="chip">${escapeHtml(cardsById.get(id)?.name || id)}</span>`)
+  const counts = new Map();
+  for (const c of caught) counts.set(c.id, (counts.get(c.id) || 0) + 1);
+  el.uniqueCount.textContent = counts.size;
+
+  if (!counts.size) {
+    el.collection.innerHTML = `<p class="empty-state">Catch a Fokemon to start your dex — each unique one flips to reveal stats.</p>`;
+    return;
+  }
+
+  const entries = [...counts].sort((a, b) => b[1] - a[1]);
+  el.collection.innerHTML = entries
+    .map(([id, n]) => {
+      const card = cardsById.get(id);
+      if (!card) return "";
+      const colors = colorsFor(card);
+      return `
+        <div class="gallery-card" data-id="${escapeHtml(id)}" tabindex="0" role="button" aria-label="Flip ${escapeHtml(card.name)} card">
+          <div class="flipper">
+            <div class="face front">
+              <span class="count-pill" aria-label="Caught ${n} times">&times;${n}</span>
+              <canvas class="gallery-art" width="160" height="120" aria-hidden="true"></canvas>
+              <div class="gallery-meta">
+                <strong>${escapeHtml(card.name)}</strong>
+                <span class="type-pill" style="background:${colors.accent};color:#061226;">${escapeHtml(card.type)}</span>
+              </div>
+              <span class="flip-hint">Tap for stats</span>
+            </div>
+            <div class="face back">
+              <header>
+                <strong>${escapeHtml(card.name)}</strong>
+                <p class="rarity ${escapeHtml(card.rarity || "common")}">${escapeHtml(card.rarity || "common")} &bull; ${escapeHtml(card.type)}</p>
+              </header>
+              ${statBars(card)}
+              <p class="flavor">${escapeHtml(card.flavor || "")}</p>
+            </div>
+          </div>
+        </div>
+      `;
+    })
     .join("");
+
+  el.collection.querySelectorAll(".gallery-card").forEach((node) => {
+    const id = node.dataset.id;
+    const card = cardsById.get(id);
+    const canvas = node.querySelector(".gallery-art");
+    if (canvas && card) renderPortrait(canvas, card);
+    const toggle = () => node.classList.toggle("flipped");
+    node.addEventListener("click", toggle);
+    node.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") {
+        ev.preventDefault();
+        toggle();
+      }
+    });
+  });
 }
 
 function renderFeed() {
@@ -203,7 +318,7 @@ function renderCards() {
   if (!el.cardsList) return;
   ensureFreshPlacements();
   const availablePlacements = currentPlacements.filter(
-    (p) => !caughtIds.has(p.card.id) && !gridCaughtIds.has(p.card.id)
+    (p) => !gridCaughtIds.has(p.card.id)
   );
 
   if (!availablePlacements.length) {
@@ -245,17 +360,17 @@ function renderCards() {
 
 function makeSpawnIcon(p) {
   const L = window.L;
-  const status = placementStatus(p);
   const meters = playerLocation
     ? Math.round(distanceMeters(playerLocation, { lat: p.lat, lng: p.lng }))
     : null;
   const near = meters !== null && meters <= CATCH_RANGE_METERS ? "near" : "";
-  const taken = status === "taken" ? "taken" : "";
+  const colors = colorsFor(p.card);
+  const style = `--type-light:${colors.light};--type-dark:${colors.dark};--type-accent:${colors.accent};`;
   return L.divIcon({
     className: "",
-    html: `<div class="spawn-marker ${near} ${taken}"><span>${escapeHtml(p.card.name)}</span>${meters === null ? "" : `<small>${meters}m</small>`}</div>`,
-    iconSize: [56, 56],
-    iconAnchor: [28, 28],
+    html: `<div class="spawn-marker ${near}" style="${style}"><span>${escapeHtml(p.card.name)}</span>${meters === null ? "" : `<small>${meters}m</small>`}</div>`,
+    iconSize: [60, 60],
+    iconAnchor: [30, 30],
   });
 }
 
@@ -330,7 +445,8 @@ function renderMap() {
   }
 
   const wantedKeys = new Set();
-  currentPlacements.forEach((p) => {
+  const visiblePlacements = currentPlacements.filter((p) => !gridCaughtIds.has(p.card.id));
+  visiblePlacements.forEach((p) => {
     const key = `${currentPlacementsKey}|${p.card.id}`;
     wantedKeys.add(key);
     let marker = spawnMarkers.get(key);
@@ -338,7 +454,7 @@ function renderMap() {
     if (!marker) {
       marker = L.marker([p.lat, p.lng], { icon }).addTo(map);
       marker.on("click", () => {
-        if (caughtIds.has(p.card.id) || gridCaughtIds.has(p.card.id)) return;
+        if (gridCaughtIds.has(p.card.id)) return;
         if (!placementCatchable(p)) {
           map.flyTo([p.lat, p.lng], 19, { duration: 0.8 });
           return;
@@ -379,9 +495,17 @@ function renderMap() {
   }
 }
 
+function currentGridBucketKey() {
+  if (!playerLocation) return null;
+  const grid = getGridKey(playerLocation.lat, playerLocation.lng);
+  if (!grid) return null;
+  const bucket = Math.floor(Date.now() / SPAWN_INTERVAL_MS);
+  return `${grid}|${bucket}`;
+}
+
 function publishGridCatch(card, ts) {
   if (!gridCaughtNode || !playerLocation) return;
-  const key = getGridKey(playerLocation.lat, playerLocation.lng);
+  const key = currentGridBucketKey();
   if (!key) return;
   gridCaughtNode.get(key).get(card.id).put({ cardId: card.id, ts });
 }
@@ -407,12 +531,328 @@ function catchCard(card, placement) {
 }
 
 const TYPE_COLORS = {
-  Electric: { light: "#fff48a", dark: "#c98a14" },
-  Leaf: { light: "#9cf6a8", dark: "#1f7a3a" },
-  Water: { light: "#9fdaff", dark: "#1d63b8" },
-  Fire: { light: "#ffb185", dark: "#c43a18" },
-  Shadow: { light: "#b9a2ff", dark: "#3d2778" },
+  Electric: { light: "#fff48a", dark: "#c98a14", accent: "#ffd966" },
+  Leaf:     { light: "#9cf6a8", dark: "#1f7a3a", accent: "#5ed27a" },
+  Water:    { light: "#9fdaff", dark: "#1d63b8", accent: "#4ea9ff" },
+  Fire:     { light: "#ffb185", dark: "#c43a18", accent: "#ff7a3a" },
+  Shadow:   { light: "#b9a2ff", dark: "#3d2778", accent: "#8a6cff" },
+  Ice:      { light: "#d6f4ff", dark: "#2c6f9a", accent: "#7fd8f3" },
+  Wind:     { light: "#e2f6e8", dark: "#3a7768", accent: "#8ce4c4" },
+  Rock:     { light: "#d8c8a8", dark: "#6e553a", accent: "#a8825e" },
+  Cosmic:   { light: "#e0c8ff", dark: "#3f1f6d", accent: "#a878ff" },
+  Spirit:   { light: "#cfe1ff", dark: "#4a3a78", accent: "#7c8dff" },
+  Bug:      { light: "#d4f0a8", dark: "#5a7820", accent: "#9ec74e" },
+  Metal:    { light: "#dde4ee", dark: "#4d5a6a", accent: "#9aaabd" },
 };
+
+function colorsFor(card) {
+  return TYPE_COLORS[card.type] || { light: "#cfd8ff", dark: "#3d4d8a", accent: "#7c8dff" };
+}
+
+function drawStar(ctx, cx, cy, points, outer, inner) {
+  ctx.beginPath();
+  for (let i = 0; i < points * 2; i++) {
+    const ang = (i / (points * 2)) * Math.PI * 2 - Math.PI / 2;
+    const rad = i % 2 === 0 ? outer : inner;
+    const x = cx + Math.cos(ang) * rad;
+    const y = cy + Math.sin(ang) * rad;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+}
+
+function drawCreatureBody(ctx, shape, r, colors) {
+  const grad = ctx.createRadialGradient(-r * 0.32, -r * 0.4, r * 0.12, 0, 0, r * 1.05);
+  grad.addColorStop(0, colors.light);
+  grad.addColorStop(1, colors.dark);
+  ctx.fillStyle = grad;
+  ctx.strokeStyle = "rgba(7, 13, 28, 0.55)";
+  ctx.lineWidth = Math.max(1, r * 0.04);
+  ctx.beginPath();
+  if (shape === "tall") {
+    ctx.ellipse(0, 0, r * 0.78, r * 1.08, 0, 0, Math.PI * 2);
+  } else if (shape === "wide") {
+    ctx.ellipse(0, 0, r * 1.12, r * 0.78, 0, 0, Math.PI * 2);
+  } else if (shape === "blob") {
+    const points = 14;
+    for (let i = 0; i <= points; i++) {
+      const ang = (i / points) * Math.PI * 2;
+      const wob = 1 + Math.sin(ang * 3) * 0.09 + Math.cos(ang * 2) * 0.05;
+      const x = Math.cos(ang) * r * wob;
+      const y = Math.sin(ang) * r * wob;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+  } else {
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
+  }
+  ctx.fill();
+  ctx.stroke();
+}
+
+function drawCreatureEars(ctx, kind, r, colors) {
+  ctx.strokeStyle = "rgba(7, 13, 28, 0.45)";
+  ctx.lineWidth = Math.max(1, r * 0.035);
+
+  if (kind === "pointy") {
+    ctx.fillStyle = colors.dark;
+    [-1, 1].forEach((side) => {
+      ctx.beginPath();
+      ctx.moveTo(side * r * 0.45, -r * 0.55);
+      ctx.lineTo(side * r * 0.18, -r * 1.25);
+      ctx.lineTo(side * r * 0.7, -r * 0.85);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    });
+  } else if (kind === "round") {
+    ctx.fillStyle = colors.dark;
+    [-1, 1].forEach((side) => {
+      ctx.beginPath();
+      ctx.arc(side * r * 0.55, -r * 0.85, r * 0.24, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    });
+  } else if (kind === "fin") {
+    ctx.fillStyle = colors.accent;
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.05, -r * 0.95);
+    ctx.lineTo(r * 0.25, -r * 1.35);
+    ctx.lineTo(r * 0.4, -r * 0.85);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    [-1, 1].forEach((side) => {
+      ctx.beginPath();
+      ctx.moveTo(side * r * 0.88, -r * 0.05);
+      ctx.lineTo(side * r * 1.2, r * 0.25);
+      ctx.lineTo(side * r * 0.65, r * 0.35);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    });
+  } else if (kind === "horn") {
+    ctx.fillStyle = colors.accent;
+    [-1, 1].forEach((side) => {
+      ctx.beginPath();
+      ctx.moveTo(side * r * 0.32, -r * 0.7);
+      ctx.lineTo(side * r * 0.6, -r * 1.2);
+      ctx.lineTo(side * r * 0.15, -r * 0.85);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    });
+  } else if (kind === "antenna") {
+    [-1, 1].forEach((side) => {
+      ctx.strokeStyle = colors.dark;
+      ctx.lineWidth = Math.max(1.4, r * 0.06);
+      ctx.beginPath();
+      ctx.moveTo(side * r * 0.22, -r * 0.85);
+      ctx.quadraticCurveTo(side * r * 0.55, -r * 1.45, side * r * 0.78, -r * 1.2);
+      ctx.stroke();
+      ctx.fillStyle = colors.accent;
+      ctx.beginPath();
+      ctx.arc(side * r * 0.78, -r * 1.2, r * 0.15, 0, Math.PI * 2);
+      ctx.fill();
+    });
+  }
+}
+
+function drawCreatureEyes(ctx, shape, r) {
+  const yOff = shape === "tall" ? -r * 0.05 : -r * 0.12;
+  const xOff = shape === "wide" ? r * 0.42 : shape === "tall" ? r * 0.28 : r * 0.32;
+  ctx.fillStyle = "#0b1226";
+  ctx.beginPath();
+  ctx.arc(-xOff, yOff, r * 0.12, 0, Math.PI * 2);
+  ctx.arc(xOff, yOff, r * 0.12, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#fff";
+  ctx.beginPath();
+  ctx.arc(-xOff + r * 0.05, yOff - r * 0.05, r * 0.045, 0, Math.PI * 2);
+  ctx.arc(xOff + r * 0.05, yOff - r * 0.05, r * 0.045, 0, Math.PI * 2);
+  ctx.fill();
+
+  // little smile
+  ctx.strokeStyle = "rgba(7, 13, 28, 0.65)";
+  ctx.lineWidth = Math.max(1, r * 0.04);
+  ctx.beginPath();
+  ctx.arc(0, yOff + r * 0.35, r * 0.18, 0.15 * Math.PI, 0.85 * Math.PI);
+  ctx.stroke();
+}
+
+function drawCreatureAccent(ctx, kind, r, colors) {
+  ctx.save();
+  ctx.translate(0, r * 0.32);
+  const s = r * 0.42;
+  ctx.fillStyle = colors.accent;
+  ctx.strokeStyle = "rgba(7, 13, 28, 0.5)";
+  ctx.lineWidth = Math.max(0.8, r * 0.03);
+
+  if (kind === "lightning") {
+    ctx.beginPath();
+    ctx.moveTo(-s * 0.18, -s * 0.6);
+    ctx.lineTo(s * 0.18, -s * 0.05);
+    ctx.lineTo(-s * 0.05, -s * 0.05);
+    ctx.lineTo(s * 0.22, s * 0.65);
+    ctx.lineTo(-s * 0.05, s * 0.12);
+    ctx.lineTo(s * 0.1, s * 0.06);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  } else if (kind === "leaf") {
+    ctx.beginPath();
+    ctx.moveTo(0, -s * 0.6);
+    ctx.quadraticCurveTo(s * 0.55, -s * 0.15, 0, s * 0.55);
+    ctx.quadraticCurveTo(-s * 0.55, -s * 0.15, 0, -s * 0.6);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.strokeStyle = colors.dark;
+    ctx.beginPath();
+    ctx.moveTo(0, -s * 0.55);
+    ctx.lineTo(0, s * 0.5);
+    ctx.stroke();
+  } else if (kind === "droplet") {
+    ctx.beginPath();
+    ctx.moveTo(0, -s * 0.6);
+    ctx.quadraticCurveTo(s * 0.5, 0, 0, s * 0.5);
+    ctx.quadraticCurveTo(-s * 0.5, 0, 0, -s * 0.6);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  } else if (kind === "flame") {
+    ctx.beginPath();
+    ctx.moveTo(0, -s * 0.7);
+    ctx.quadraticCurveTo(s * 0.55, -s * 0.05, s * 0.22, s * 0.5);
+    ctx.quadraticCurveTo(0, s * 0.18, -s * 0.22, s * 0.5);
+    ctx.quadraticCurveTo(-s * 0.55, -s * 0.05, 0, -s * 0.7);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  } else if (kind === "star") {
+    drawStar(ctx, 0, 0, 5, s * 0.6, s * 0.28);
+    ctx.fill();
+    ctx.stroke();
+  } else if (kind === "snowflake") {
+    ctx.strokeStyle = colors.accent;
+    ctx.lineWidth = Math.max(1.2, r * 0.05);
+    for (let i = 0; i < 6; i++) {
+      const ang = (i / 6) * Math.PI * 2;
+      const ex = Math.cos(ang) * s * 0.55;
+      const ey = Math.sin(ang) * s * 0.55;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(ex, ey);
+      ctx.stroke();
+      const bx = ex * 0.65;
+      const by = ey * 0.65;
+      const px = Math.cos(ang + Math.PI / 2) * s * 0.14;
+      const py = Math.sin(ang + Math.PI / 2) * s * 0.14;
+      ctx.beginPath();
+      ctx.moveTo(bx - px, by - py);
+      ctx.lineTo(bx + px, by + py);
+      ctx.stroke();
+    }
+  } else if (kind === "swirl") {
+    ctx.strokeStyle = colors.accent;
+    ctx.lineWidth = Math.max(1.5, r * 0.06);
+    ctx.beginPath();
+    for (let i = 0; i < 100; i++) {
+      const a = i * 0.2;
+      const rad = i * 0.013 * s;
+      const x = Math.cos(a) * rad;
+      const y = Math.sin(a) * rad;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  } else if (kind === "pebble") {
+    ctx.beginPath();
+    ctx.ellipse(0, 0, s * 0.5, s * 0.32, Math.PI / 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "rgba(255,255,255,0.45)";
+    ctx.beginPath();
+    ctx.ellipse(-s * 0.12, -s * 0.1, s * 0.12, s * 0.06, -Math.PI / 6, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (kind === "ghost") {
+    ctx.fillStyle = "rgba(255,255,255,0.86)";
+    ctx.beginPath();
+    ctx.arc(0, 0, s * 0.42, Math.PI, 0);
+    ctx.lineTo(s * 0.42, s * 0.35);
+    ctx.lineTo(s * 0.22, s * 0.18);
+    ctx.lineTo(0, s * 0.4);
+    ctx.lineTo(-s * 0.22, s * 0.18);
+    ctx.lineTo(-s * 0.42, s * 0.35);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = colors.dark;
+    ctx.stroke();
+  } else if (kind === "sparkle") {
+    for (const [dx, dy, size] of [
+      [0, 0, s * 0.4],
+      [s * 0.6, -s * 0.2, s * 0.18],
+      [-s * 0.6, s * 0.2, s * 0.18],
+    ]) {
+      drawStar(ctx, dx, dy, 4, size, size * 0.4);
+      ctx.fill();
+    }
+  } else if (kind === "gear") {
+    const teeth = 8;
+    ctx.beginPath();
+    for (let i = 0; i < teeth * 2; i++) {
+      const ang = (i / (teeth * 2)) * Math.PI * 2;
+      const rad = i % 2 === 0 ? s * 0.55 : s * 0.38;
+      const x = Math.cos(ang) * rad;
+      const y = Math.sin(ang) * rad;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "rgba(7, 13, 28, 0.65)";
+    ctx.beginPath();
+    ctx.arc(0, 0, s * 0.16, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawCreature(ctx, card, cx, cy, r) {
+  const colors = colorsFor(card);
+  ctx.save();
+  ctx.translate(cx, cy);
+  drawCreatureEars(ctx, card.ears || "round", r, colors);
+  drawCreatureBody(ctx, card.body || "round", r, colors);
+  drawCreatureEyes(ctx, card.body || "round", r);
+  drawCreatureAccent(ctx, card.accent || "sparkle", r, colors);
+  ctx.restore();
+}
+
+function renderPortrait(canvas, card) {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = canvas.clientWidth || parseInt(canvas.getAttribute("width") || "120", 10);
+  const h = canvas.clientHeight || parseInt(canvas.getAttribute("height") || "100", 10);
+  canvas.width = Math.floor(w * dpr);
+  canvas.height = Math.floor(h * dpr);
+  canvas.style.width = `${w}px`;
+  canvas.style.height = `${h}px`;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+  const colors = colorsFor(card);
+  const bg = ctx.createLinearGradient(0, 0, 0, h);
+  bg.addColorStop(0, "rgba(255,255,255,0.05)");
+  bg.addColorStop(1, `rgba(${hexInt(colors.dark, 0)}, ${hexInt(colors.dark, 1)}, ${hexInt(colors.dark, 2)}, 0.4)`);
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, w, h);
+  drawCreature(ctx, card, w / 2, h * 0.6, Math.min(w, h) * 0.32);
+}
+
+function hexInt(hex, channel) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex);
+  if (!m) return 60;
+  const n = parseInt(m[1], 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255][channel];
+}
 
 function launchCatchChallenge(card, placement) {
   if (activeChallenge) return;
@@ -458,7 +898,6 @@ function launchCatchChallenge(card, placement) {
   const POWER = 14;
   const REST_OFFSET = { x: 0, y: -(NET_RADIUS + 8) };
   const RESTING = { x: ANCHOR.x + REST_OFFSET.x, y: ANCHOR.y + REST_OFFSET.y };
-  const colors = TYPE_COLORS[card.type] || { light: "#cfd8ff", dark: "#3d4d8a" };
 
   const fokemon = {
     x: W * 0.74,
@@ -751,33 +1190,16 @@ function launchCatchChallenge(card, placement) {
 
     ctx.fillStyle = "rgba(0,0,0,0.35)";
     ctx.beginPath();
-    ctx.ellipse(fokemon.x, FLOOR_Y - 2, r * 0.75, 5, 0, 0, Math.PI * 2);
+    ctx.ellipse(fokemon.x, FLOOR_Y - 2, r * 0.78, 6, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    const grad = ctx.createRadialGradient(fokemon.x - r * 0.3, bobY - r * 0.4, r * 0.15, fokemon.x, bobY, r);
-    grad.addColorStop(0, colors.light);
-    grad.addColorStop(1, colors.dark);
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.arc(fokemon.x, bobY, r, 0, Math.PI * 2);
-    ctx.fill();
+    drawCreature(ctx, card, fokemon.x, bobY, r);
 
     if (!fokemon.caught) {
-      ctx.fillStyle = "#0b1226";
-      ctx.beginPath();
-      ctx.arc(fokemon.x - r * 0.28, bobY - r * 0.12, r * 0.11, 0, Math.PI * 2);
-      ctx.arc(fokemon.x + r * 0.28, bobY - r * 0.12, r * 0.11, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = "#fff";
-      ctx.beginPath();
-      ctx.arc(fokemon.x - r * 0.24, bobY - r * 0.16, r * 0.04, 0, Math.PI * 2);
-      ctx.arc(fokemon.x + r * 0.32, bobY - r * 0.16, r * 0.04, 0, Math.PI * 2);
-      ctx.fill();
-
       ctx.font = "600 12px Outfit, sans-serif";
       ctx.fillStyle = "rgba(245, 247, 255, 0.9)";
       ctx.textAlign = "center";
-      ctx.fillText(card.name, fokemon.x, bobY - r - 8);
+      ctx.fillText(card.name, fokemon.x, bobY - r - 14);
     }
   }
 
@@ -909,7 +1331,7 @@ function connectFeed() {
 
 function connectGridCaught() {
   if (!gridCaughtNode || !playerLocation) return;
-  const key = getGridKey(playerLocation.lat, playerLocation.lng);
+  const key = currentGridBucketKey();
   if (!key) return;
   if (key === lastGridKey) return;
   if (lastGridKey) {
@@ -919,7 +1341,6 @@ function connectGridCaught() {
   lastGridKey = key;
   gridCaughtNode.get(key).map().on((entry) => {
     if (!entry?.cardId) return;
-    if (caughtIds.has(entry.cardId)) return;
     if (!gridCaughtIds.has(entry.cardId)) {
       gridCaughtIds.add(entry.cardId);
       renderCards();
@@ -993,6 +1414,7 @@ if (typeof setInterval === "function") {
     ensureFreshPlacements();
     if (prevKey !== currentPlacementsKey) {
       gridCaughtIds.clear();
+      connectGridCaught();
       renderCards();
       renderMap();
     }
