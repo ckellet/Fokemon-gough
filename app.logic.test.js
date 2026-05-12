@@ -2,11 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   computeCollectionStats,
+  computePoiPlacements,
   computeSpawnPlacements,
   computeSpawnSlots,
   filterUncaughtSpawns,
   getGridKey,
+  isPoiAvailable,
   mergeRecentEvents,
+  POI_COOLDOWN_MS,
   SPAWN_CELL_DEGREES,
 } from './app.logic.js';
 
@@ -79,4 +82,44 @@ test('computeSpawnSlots is deterministic per grid and time bucket', () => {
 test('filterUncaughtSpawns removes already-caught card ids', () => {
   const filtered = filterUncaughtSpawns([{ id: 'a' }, { id: 'b' }], new Set(['a']));
   assert.deepEqual(filtered.map((c) => c.id), ['b']);
+});
+
+test('computePoiPlacements is deterministic and stays within neighborhood cells', () => {
+  const opts = { neighborhoodCells: 1 };
+  const a = computePoiPlacements(37.7700, -122.4100, opts);
+  const b = computePoiPlacements(37.7700, -122.4100, opts);
+  assert.deepEqual(a, b);
+
+  const latLow = Math.floor((37.7700 + 90) / SPAWN_CELL_DEGREES) - 1;
+  const latHigh = latLow + 3;
+  const lonLow = Math.floor((-122.4100 + 180) / SPAWN_CELL_DEGREES) - 1;
+  const lonHigh = lonLow + 3;
+
+  for (const p of a) {
+    const latCell = Math.floor((p.lat + 90) / SPAWN_CELL_DEGREES);
+    const lonCell = Math.floor((p.lng + 180) / SPAWN_CELL_DEGREES);
+    assert.ok(latCell >= latLow && latCell < latHigh, `lat cell ${latCell} out of range`);
+    assert.ok(lonCell >= lonLow && lonCell < lonHigh, `lon cell ${lonCell} out of range`);
+    assert.ok(typeof p.id === 'string' && p.id.includes('|'));
+  }
+});
+
+test('computePoiPlacements neighborhood scales placement search area', () => {
+  const small = computePoiPlacements(0, 0, { neighborhoodCells: 0 });
+  const wide = computePoiPlacements(0, 0, { neighborhoodCells: 1 });
+  assert.ok(wide.length >= small.length, 'wider neighborhood should not lose POIs');
+  for (const p of small) {
+    assert.ok(
+      wide.some((w) => w.id === p.id && w.lat === p.lat && w.lng === p.lng),
+      'small-radius POIs should be a subset of wide-radius POIs'
+    );
+  }
+});
+
+test('isPoiAvailable respects cooldown window', () => {
+  const poi = { id: 'abc|0' };
+  assert.equal(isPoiAvailable(poi, {}), true);
+  const justSpent = { 'abc|0': 1_000_000 };
+  assert.equal(isPoiAvailable(poi, justSpent, 1_000_000 + 60_000), false);
+  assert.equal(isPoiAvailable(poi, justSpent, 1_000_000 + POI_COOLDOWN_MS), true);
 });
