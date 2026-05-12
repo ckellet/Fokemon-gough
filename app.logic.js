@@ -1,4 +1,5 @@
 export const SPAWN_CELL_DEGREES = 0.001;
+export const POI_COOLDOWN_MS = 5 * 60 * 1000;
 
 export function computeCollectionStats(caught) {
   const uniqueIds = [...new Set((caught || []).map((c) => c.id))];
@@ -86,4 +87,48 @@ export function computeSpawnSlots(cards, options) {
 export function filterUncaughtSpawns(spawns, caughtIds) {
   const caughtSet = caughtIds instanceof Set ? caughtIds : new Set(caughtIds || []);
   return (spawns || []).filter((spawn) => !caughtSet.has(spawn.id));
+}
+
+export function computePoiPlacements(
+  lat,
+  lon,
+  { cellSizeDegrees = SPAWN_CELL_DEGREES, neighborhoodCells = 1 } = {}
+) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return [];
+  const placements = [];
+  const latBaseCell = Math.floor((lat + 90) / cellSizeDegrees);
+  const lonBaseCell = Math.floor((lon + 180) / cellSizeDegrees);
+
+  for (let dlat = -neighborhoodCells; dlat <= neighborhoodCells; dlat++) {
+    for (let dlon = -neighborhoodCells; dlon <= neighborhoodCells; dlon++) {
+      const latCell = latBaseCell + dlat;
+      const lonCell = lonBaseCell + dlon;
+      const cellKey = `${latCell}:${lonCell}`;
+      const density = hashToUnitInterval(`poi-density|${cellKey}`);
+      let count;
+      if (density < 0.32) count = 0;
+      else if (density < 0.74) count = 1;
+      else if (density < 0.94) count = 2;
+      else count = 3;
+
+      const latBase = latCell * cellSizeDegrees - 90;
+      const lonBase = lonCell * cellSizeDegrees - 180;
+      for (let i = 0; i < count; i++) {
+        placements.push({
+          id: `${cellKey}|${i}`,
+          grid: cellKey,
+          lat: latBase + hashToUnitInterval(`poi|${cellKey}|${i}|lat`) * cellSizeDegrees,
+          lng: lonBase + hashToUnitInterval(`poi|${cellKey}|${i}|lng`) * cellSizeDegrees,
+        });
+      }
+    }
+  }
+  return placements;
+}
+
+export function isPoiAvailable(poi, spentMap, now = Date.now(), cooldownMs = POI_COOLDOWN_MS) {
+  if (!poi) return false;
+  const spent = spentMap && (spentMap instanceof Map ? spentMap.get(poi.id) : spentMap[poi.id]);
+  if (!spent) return true;
+  return now - spent >= cooldownMs;
 }
