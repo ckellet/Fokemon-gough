@@ -95,7 +95,21 @@ const el = {
   uniqueCount: $("uniqueCount"),
   collection: $("collection"),
   reset: $("resetProfile"),
+  locationModal: $("locationModal"),
+  modalLocationHelp: $("modalLocationHelp"),
+  compassBtn: $("compassBtn"),
+  recenterBtn: $("recenterBtn"),
+  zoomInBtn: $("zoomInBtn"),
+  zoomOutBtn: $("zoomOutBtn"),
 };
+
+let heading = 0;
+let cameraForward = 0;
+let cameraLateral = 0;
+let compassActive = false;
+let compassOffset = 0;
+let lastCompassReading = null;
+let locationGranted = false;
 
 function safeStorageGet(key, fallback) {
   try {
@@ -160,9 +174,16 @@ function ensureMap() {
   if (leafletMap || !leafletReady() || !el.nearbyMap) return leafletMap;
   const L = window.L;
   leafletMap = L.map(el.nearbyMap, {
-    zoomControl: true,
+    zoomControl: false,
     attributionControl: true,
     worldCopyJump: true,
+    dragging: false,
+    touchZoom: false,
+    doubleClickZoom: false,
+    scrollWheelZoom: false,
+    boxZoom: false,
+    keyboard: false,
+    inertia: false,
   }).setView([0, 0], 2);
 
   L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -171,7 +192,122 @@ function ensureMap() {
   }).addTo(leafletMap);
 
   el.nearbyMap.classList.add("leaflet-active");
+  attachMapDragControls(el.nearbyMap, leafletMap);
+  applyCameraTransform();
   return leafletMap;
+}
+
+const METERS_PER_DEG_LAT = 111111;
+function metersPerDegLng(lat) {
+  return METERS_PER_DEG_LAT * Math.max(0.01, Math.cos((lat * Math.PI) / 180));
+}
+
+function applyCameraTransform() {
+  if (!el.nearbyMap) return;
+  const wrapped = ((heading % 360) + 360) % 360;
+  el.nearbyMap.style.setProperty("--map-heading", `${wrapped}deg`);
+  const wrap = typeof el.nearbyMap.closest === "function" ? el.nearbyMap.closest(".map-wrap") : null;
+  if (wrap && wrap.style && wrap.style.setProperty) {
+    wrap.style.setProperty("--map-heading", `${wrapped}deg`);
+  }
+}
+
+function recenterCameraOnPlayer() {
+  if (!leafletMap || !playerLocation) return;
+  const hRad = (heading * Math.PI) / 180;
+  const dx = cameraForward * Math.sin(hRad) + cameraLateral * Math.cos(hRad);
+  const dy = cameraForward * Math.cos(hRad) - cameraLateral * Math.sin(hRad);
+  const lat = playerLocation.lat + dy / METERS_PER_DEG_LAT;
+  const lng = playerLocation.lng + dx / metersPerDegLng(playerLocation.lat);
+  leafletMap.setView([lat, lng], leafletMap.getZoom() || 18, { animate: false });
+}
+
+function clampCameraOffsets() {
+  const MAX = 600;
+  cameraForward = Math.max(-MAX, Math.min(MAX, cameraForward));
+  cameraLateral = Math.max(-MAX, Math.min(MAX, cameraLateral));
+}
+
+function pixelsToMeters(pixels) {
+  if (!leafletMap || !playerLocation) return pixels * 0.5;
+  const zoom = leafletMap.getZoom() || 18;
+  const latRad = (playerLocation.lat * Math.PI) / 180;
+  const metersPerPixel = (40075016.686 * Math.cos(latRad)) / Math.pow(2, zoom + 8);
+  return pixels * metersPerPixel;
+}
+
+function attachMapDragControls(node, map) {
+  if (!node || !map || node._dragControlsAttached) return;
+  node._dragControlsAttached = true;
+
+  let dragging = false;
+  let pointerId = null;
+  let lastX = 0;
+  let lastY = 0;
+  let totalMove = 0;
+  let startTs = 0;
+
+  const onDown = (e) => {
+    if (e.button !== undefined && e.button !== 0) return;
+    dragging = true;
+    pointerId = e.pointerId;
+    lastX = e.clientX;
+    lastY = e.clientY;
+    totalMove = 0;
+    startTs = Date.now();
+    node.classList.add("dragging");
+    try { node.setPointerCapture?.(pointerId); } catch {}
+  };
+
+  const onMove = (e) => {
+    if (!dragging || e.pointerId !== pointerId) return;
+    const dx = e.clientX - lastX;
+    const dy = e.clientY - lastY;
+    lastX = e.clientX;
+    lastY = e.clientY;
+    totalMove += Math.abs(dx) + Math.abs(dy);
+
+    const spinSensitivity = 0.45;
+    heading = ((heading + dx * spinSensitivity) % 360 + 360) % 360;
+    if (compassActive && lastCompassReading !== null) {
+      compassOffset = ((heading - lastCompassReading) % 360 + 360) % 360;
+    }
+
+    const forwardDelta = -pixelsToMeters(dy) * 1.2;
+    cameraForward += forwardDelta;
+    clampCameraOffsets();
+
+    applyCameraTransform();
+    recenterCameraOnPlayer();
+    e.preventDefault?.();
+  };
+
+  const onUp = (e) => {
+    if (!dragging) return;
+    dragging = false;
+    node.classList.remove("dragging");
+    try { node.releasePointerCapture?.(pointerId); } catch {}
+    pointerId = null;
+    const elapsed = Date.now() - startTs;
+    if (totalMove < 6 && elapsed < 350) {
+      let hit = null;
+      if (typeof document !== "undefined" && document.elementFromPoint) {
+        hit = document.elementFromPoint(e.clientX, e.clientY);
+      }
+      const marker = hit && hit.closest && hit.closest(".leaflet-marker-icon");
+      if (marker && marker._fokeMarkerClick) marker._fokeMarkerClick();
+      else if (e.target && e.target.closest) {
+        const chip = e.target.closest(".map-chip");
+        if (chip && typeof chip.click === "function") chip.click();
+      }
+    }
+  };
+
+  node.addEventListener("pointerdown", onDown);
+  node.addEventListener("pointermove", onMove);
+  node.addEventListener("pointerup", onUp);
+  node.addEventListener("pointercancel", onUp);
+  node.addEventListener("pointerleave", onUp);
 }
 
 function placementsKey(lat, lon, bucket) {
@@ -370,7 +506,7 @@ function makeSpawnIcon(p) {
     className: "",
     html: `<div class="spawn-marker ${near}" style="${style}"><span>${escapeHtml(p.card.name)}</span>${meters === null ? "" : `<small>${meters}m</small>`}</div>`,
     iconSize: [60, 60],
-    iconAnchor: [30, 30],
+    iconAnchor: [30, 60],
   });
 }
 
@@ -380,7 +516,7 @@ function makePlayerIcon(label) {
     className: "",
     html: `<div class="player-marker">${escapeHtml(label)}</div>`,
     iconSize: [38, 38],
-    iconAnchor: [19, 19],
+    iconAnchor: [19, 38],
   });
 }
 
@@ -390,7 +526,7 @@ function makeTrainerIcon(name) {
     className: "",
     html: `<div class="trainer-marker">${escapeHtml(String(name).slice(0, 2).toUpperCase())}</div>`,
     iconSize: [30, 30],
-    iconAnchor: [15, 15],
+    iconAnchor: [15, 30],
   });
 }
 
@@ -423,12 +559,18 @@ function renderMap() {
   ensureFreshPlacements();
 
   const center = [playerLocation.lat, playerLocation.lng];
+  const firstFix = !playerMarker;
   if (!playerMarker) {
     playerMarker = L.marker(center, { icon: makePlayerIcon("YOU"), zIndexOffset: 1000 }).addTo(map);
     map.setView(center, 18);
   } else {
     playerMarker.setLatLng(center);
   }
+  if (firstFix) {
+    cameraForward = 0;
+    cameraLateral = 0;
+  }
+  recenterCameraOnPlayer();
 
   if (!catchCircle) {
     catchCircle = L.circle(center, {
@@ -451,21 +593,26 @@ function renderMap() {
     wantedKeys.add(key);
     let marker = spawnMarkers.get(key);
     const icon = makeSpawnIcon(p);
+    const onMarkerClick = () => {
+      if (gridCaughtIds.has(p.card.id)) return;
+      if (!placementCatchable(p)) {
+        cameraForward = 0;
+        cameraLateral = 0;
+        map.setView([p.lat, p.lng], Math.max(map.getZoom(), 19), { animate: true });
+        return;
+      }
+      launchCatchChallenge(p.card, p);
+    };
     if (!marker) {
       marker = L.marker([p.lat, p.lng], { icon }).addTo(map);
-      marker.on("click", () => {
-        if (gridCaughtIds.has(p.card.id)) return;
-        if (!placementCatchable(p)) {
-          map.flyTo([p.lat, p.lng], 19, { duration: 0.8 });
-          return;
-        }
-        launchCatchChallenge(p.card, p);
-      });
+      marker.on("click", onMarkerClick);
       spawnMarkers.set(key, marker);
     } else {
       marker.setIcon(icon);
       marker.setLatLng([p.lat, p.lng]);
     }
+    const iconEl = marker.getElement();
+    if (iconEl) iconEl._fokeMarkerClick = onMarkerClick;
   });
   for (const [key, marker] of spawnMarkers) {
     if (!wantedKeys.has(key)) {
@@ -1274,13 +1421,39 @@ function launchCatchChallenge(card, placement) {
   rafId = requestAnimationFrame(loop);
 }
 
-function updateLocationStatus(text) {
-  if (el.locationStatus) el.locationStatus.textContent = text;
+function updateLocationStatus(text, kind = "") {
+  if (el.locationStatus) {
+    el.locationStatus.textContent = text;
+    el.locationStatus.className = `loc-pill${kind ? ` ${kind}` : ""}`;
+  }
+}
+
+function setModalHelp(text, kind = "") {
+  if (!el.modalLocationHelp) return;
+  el.modalLocationHelp.textContent = text || "";
+  el.modalLocationHelp.className = kind === "error" ? "error" : "";
+}
+
+function showLocationModal(body) {
+  if (!el.locationModal) return;
+  if (body) {
+    const bodyNode = document.getElementById("locationModalBody");
+    if (bodyNode) bodyNode.textContent = body;
+  }
+  el.locationModal.classList.remove("hidden");
+}
+
+function hideLocationModal() {
+  if (!el.locationModal) return;
+  el.locationModal.classList.add("hidden");
 }
 
 function onPositionUpdate(pos) {
   playerLocation = { lat: pos.coords.latitude, lng: pos.coords.longitude };
-  updateLocationStatus(`Live • ${playerLocation.lat.toFixed(5)}, ${playerLocation.lng.toFixed(5)}`);
+  locationGranted = true;
+  hideLocationModal();
+  updateLocationStatus(`Live • ${playerLocation.lat.toFixed(5)}, ${playerLocation.lng.toFixed(5)}`, "live");
+  if (el.mapHint) el.mapHint.classList.add("hidden");
   connectGridCaught();
   ensureFreshPlacements();
   renderMap();
@@ -1288,25 +1461,64 @@ function onPositionUpdate(pos) {
   updateBucketLabel();
 }
 
+function onPositionError(err) {
+  if (err && err.code === 1) {
+    updateLocationStatus("Permission denied", "error");
+    showLocationModal("Location was blocked. Please re-enable it in your browser site settings to play.");
+    setModalHelp("Tip: refresh the page after granting permission in browser settings.", "error");
+  } else {
+    updateLocationStatus("Unavailable", "error");
+    setModalHelp("Couldn't get a fix — try again outdoors with a clear sky.", "error");
+  }
+}
+
 function startLocationTracking() {
   if (typeof navigator === "undefined" || !navigator.geolocation) {
-    updateLocationStatus("Geolocation unavailable in this browser.");
+    updateLocationStatus("Geolocation unavailable", "error");
+    setModalHelp("Your browser doesn't support geolocation.", "error");
     return;
   }
-  updateLocationStatus("Requesting location…");
+  updateLocationStatus("Locating…");
+  setModalHelp("Requesting your location…");
 
   if (watchId !== null) navigator.geolocation.clearWatch(watchId);
   watchId = navigator.geolocation.watchPosition(
     onPositionUpdate,
-    (err) => {
-      if (err && err.code === 1) {
-        updateLocationStatus("Location permission denied. Enable it in browser settings.");
-      } else {
-        updateLocationStatus("Location unavailable. Try again outdoors.");
-      }
-    },
+    onPositionError,
     { enableHighAccuracy: true, maximumAge: 10000, timeout: 15000 }
   );
+}
+
+async function bootstrapLocation() {
+  if (typeof navigator === "undefined" || !navigator.geolocation) {
+    updateLocationStatus("Geolocation unavailable", "error");
+    showLocationModal("Your browser doesn't support geolocation.");
+    return;
+  }
+  let state = null;
+  try {
+    if (navigator.permissions && navigator.permissions.query) {
+      const status = await navigator.permissions.query({ name: "geolocation" });
+      state = status.state;
+      if (typeof status.addEventListener === "function") {
+        status.addEventListener("change", () => {
+          if (status.state === "granted" && !locationGranted) startLocationTracking();
+        });
+      }
+    }
+  } catch {
+    state = null;
+  }
+
+  if (state === "granted") {
+    hideLocationModal();
+    startLocationTracking();
+  } else if (state === "denied") {
+    updateLocationStatus("Permission denied", "error");
+    showLocationModal("Location is blocked. Please re-enable it in your browser site settings to play.");
+  } else {
+    showLocationModal();
+  }
 }
 
 function connectFeed() {
@@ -1363,6 +1575,52 @@ function initGun() {
   }
 }
 
+function onDeviceOrientation(ev) {
+  if (!compassActive) return;
+  let raw = null;
+  if (typeof ev.webkitCompassHeading === "number") {
+    raw = ev.webkitCompassHeading;
+  } else if (typeof ev.alpha === "number" && ev.alpha !== null) {
+    raw = 360 - ev.alpha;
+    const screenAngle =
+      (typeof screen !== "undefined" && screen.orientation && screen.orientation.angle) || 0;
+    raw = (raw + screenAngle) % 360;
+  }
+  if (raw === null) return;
+  lastCompassReading = raw;
+  heading = ((raw + compassOffset) % 360 + 360) % 360;
+  applyCameraTransform();
+  recenterCameraOnPlayer();
+}
+
+async function enableCompass() {
+  if (typeof window === "undefined") return false;
+  try {
+    if (
+      typeof window.DeviceOrientationEvent !== "undefined" &&
+      typeof window.DeviceOrientationEvent.requestPermission === "function"
+    ) {
+      const res = await window.DeviceOrientationEvent.requestPermission();
+      if (res !== "granted") return false;
+    }
+  } catch {
+    return false;
+  }
+  if (typeof window.addEventListener !== "function") return false;
+  if ("ondeviceorientationabsolute" in window) {
+    window.addEventListener("deviceorientationabsolute", onDeviceOrientation, true);
+  }
+  window.addEventListener("deviceorientation", onDeviceOrientation, true);
+  return true;
+}
+
+function disableCompass() {
+  if (typeof window === "undefined" || typeof window.removeEventListener !== "function") return;
+  window.removeEventListener("deviceorientationabsolute", onDeviceOrientation, true);
+  window.removeEventListener("deviceorientation", onDeviceOrientation, true);
+  lastCompassReading = null;
+}
+
 function enterGame() {
   if (!el.auth || !el.game) return;
   el.auth.classList.add("hidden");
@@ -1379,6 +1637,7 @@ function enterGame() {
   renderCollection();
   connectFeed();
   updateBucketLabel();
+  bootstrapLocation();
 }
 
 if (el.form) {
@@ -1389,7 +1648,6 @@ if (el.form) {
     profile = { name, team: el.team.value };
     saveLocal();
     enterGame();
-    startLocationTracking();
   });
 }
 
@@ -1401,7 +1659,52 @@ if (el.reset) {
 }
 
 if (el.enableLocation) {
-  el.enableLocation.addEventListener("click", startLocationTracking);
+  el.enableLocation.addEventListener("click", () => {
+    setModalHelp("Requesting your location…");
+    startLocationTracking();
+  });
+}
+
+if (el.compassBtn) {
+  el.compassBtn.addEventListener("click", async () => {
+    if (compassActive) {
+      compassActive = false;
+      disableCompass();
+      el.compassBtn.classList.remove("active");
+      return;
+    }
+    const ok = await enableCompass();
+    compassActive = ok;
+    compassOffset = lastCompassReading !== null ? ((heading - lastCompassReading) % 360 + 360) % 360 : 0;
+    el.compassBtn.classList.toggle("active", ok);
+    if (!ok) {
+      el.compassBtn.title = "Compass not available on this device";
+    }
+  });
+}
+
+if (el.recenterBtn) {
+  el.recenterBtn.addEventListener("click", () => {
+    cameraForward = 0;
+    cameraLateral = 0;
+    if (!compassActive) heading = 0;
+    applyCameraTransform();
+    recenterCameraOnPlayer();
+    if (leafletMap && playerLocation) {
+      leafletMap.setZoom(18);
+    }
+  });
+}
+
+if (el.zoomInBtn) {
+  el.zoomInBtn.addEventListener("click", () => {
+    if (leafletMap) leafletMap.zoomIn();
+  });
+}
+if (el.zoomOutBtn) {
+  el.zoomOutBtn.addEventListener("click", () => {
+    if (leafletMap) leafletMap.zoomOut();
+  });
 }
 
 initGun();
