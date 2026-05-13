@@ -176,17 +176,38 @@ const SITE_ADJECTIVES = [
   "Crystal", "Ember", "Glacial", "Hollow", "Solar", "Twilight",
   "Verdant", "Storm", "Iron", "Wild", "Aurora", "Mossy",
   "Sunken", "Cinder", "Quiet", "Howling", "Lumen", "Drift",
+  "Bramble", "Velvet", "Cobalt", "Marble", "Onyx", "Amber",
+  "Frosted", "Gilded", "Hidden", "Lonely", "Restless", "Ashen",
+  "Silken", "Tidal", "Whispering", "Crooked", "Singing", "Stoneworn",
+  "Crimson", "Lantern", "Shimmer", "Vagrant",
 ];
 const SITE_NOUNS = [
   "Spire", "Falls", "Arena", "Grove", "Bastion", "Hollow",
   "Court", "Keep", "Cradle", "Forge", "Glade", "Reach",
   "Ring", "Pyre", "Den", "Hall", "Steppe", "Crag",
+  "Cairn", "Watch", "Mire", "Vault", "Wharf", "Embers",
+  "Bluff", "Cove", "Causeway", "Hearth", "Lyceum", "Marsh",
+  "Meadow", "Obelisk", "Pavilion", "Quay", "Refuge", "Sanctum",
+  "Tower", "Verge", "Wellspring", "Yard",
+];
+const SITE_SUFFIXES = [
+  "", "of the Dawn", "of the Hush", "of the Veil", "of Echoes",
+  "of the Ember", "of the Tide", "of the Wisp", "of the Lattice",
+  "of the Mirror", "of the Spine", "of the Cinder",
 ];
 
+// Mix the input so adjacent IDs (which share long prefixes) don't pick adjacent
+// dictionary slots. Salt with a per-token nonce and a reversed-id tail.
+function nameSeed(siteId, role, salt) {
+  const tail = String(siteId).split("").reverse().join("");
+  return hashToUnitInterval(`${salt}|${role}|${siteId}|${tail}|${role}`);
+}
+
 export function battleSiteName(siteId) {
-  const adj = SITE_ADJECTIVES[Math.floor(hashToUnitInterval(`name|adj|${siteId}`) * SITE_ADJECTIVES.length)];
-  const noun = SITE_NOUNS[Math.floor(hashToUnitInterval(`name|noun|${siteId}`) * SITE_NOUNS.length)];
-  return `${adj} ${noun}`;
+  const adj = SITE_ADJECTIVES[Math.floor(nameSeed(siteId, "adj", "Q7r") * SITE_ADJECTIVES.length)];
+  const noun = SITE_NOUNS[Math.floor(nameSeed(siteId, "noun", "9LM") * SITE_NOUNS.length)];
+  const suffix = SITE_SUFFIXES[Math.floor(nameSeed(siteId, "suf", "kV3") * SITE_SUFFIXES.length)];
+  return suffix ? `${adj} ${noun} ${suffix}` : `${adj} ${noun}`;
 }
 
 export function clampBoost(value) {

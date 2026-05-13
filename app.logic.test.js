@@ -160,11 +160,23 @@ test('computeBattleSitePlacements is sparser than POIs at default density', () =
   assert.ok(totalBs < totalPoi, `expected fewer battle sites than POIs; got ${totalBs} vs ${totalPoi}`);
 });
 
-test('battleSiteName produces stable adjective + noun names', () => {
+test('battleSiteName produces stable, non-trivial names', () => {
   const a = battleSiteName('bs|123:456');
   const b = battleSiteName('bs|123:456');
   assert.equal(a, b);
-  assert.ok(a.split(' ').length === 2, `expected two-word name, got "${a}"`);
+  assert.ok(a.length >= 5, `expected non-trivial name, got "${a}"`);
+});
+
+test('battleSiteName has high diversity across adjacent grid cells', () => {
+  const names = new Set();
+  for (let dlat = 0; dlat < 60; dlat++) {
+    for (let dlon = 0; dlon < 60; dlon++) {
+      names.add(battleSiteName(`bs|${100000 + dlat}:${200000 + dlon}`));
+    }
+  }
+  // Out of 3,600 nearby IDs, expect at least ~2,000 unique names — well above the
+  // earlier ~324-combo dictionary where adjacent cells routinely collided.
+  assert.ok(names.size >= 2000, `expected high name diversity; got ${names.size} unique of 3600`);
 });
 
 test('effectiveStats adds boosts and applies fatigue from defenses', () => {
