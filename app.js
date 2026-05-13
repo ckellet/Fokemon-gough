@@ -48,54 +48,198 @@ let battleSitesNode = null;
 let battleEventsNode = null;
 
 const cards = [
+  // Electric ----------------------------------------------------------------
   { id: "voltlynx", name: "VoltLynx", type: "Electric", rarity: "rare",
     body: "tall", ears: "pointy", accent: "lightning",
+    markings: "stripes", expression: "fierce",
     hp: 58, atk: 72, def: 44, spd: 88,
     flavor: "Skittish hunter with arc-static fur. Sparks when surprised." },
+  { id: "sparkit", name: "Sparkit", type: "Electric", rarity: "common",
+    body: "round", ears: "tufted", accent: "lightning",
+    markings: "blush", expression: "happy",
+    hp: 46, atk: 58, def: 38, spd: 80,
+    flavor: "Cheeky pocket-sized live wire. Stores static in fluffy cheeks." },
+  { id: "thundake", name: "Thundake", type: "Electric", rarity: "epic",
+    body: "tall", ears: "crest", accent: "wings",
+    markings: "mask", expression: "grin",
+    hp: 68, atk: 90, def: 52, spd: 92,
+    flavor: "Rides storm fronts and re-routes lightning for fun." },
+  // Leaf --------------------------------------------------------------------
   { id: "mossaur", name: "Mossaur", type: "Leaf", rarity: "common",
     body: "wide", ears: "horn", accent: "leaf",
+    markings: "belly", expression: "calm",
     hp: 84, atk: 56, def: 70, spd: 38,
     flavor: "Grazes in tall meadows; sheds fresh sprouts each dawn." },
+  { id: "petalune", name: "Petalune", type: "Leaf", rarity: "common",
+    body: "round", ears: "round", accent: "petal",
+    markings: "blush", expression: "happy",
+    hp: 60, atk: 48, def: 58, spd: 66,
+    flavor: "Carries a single perfect petal it refuses to drop." },
+  { id: "boscarapod", name: "Boscarapod", type: "Leaf", rarity: "epic",
+    body: "stocky", ears: "crest", accent: "vines",
+    markings: "stripes", expression: "smirk",
+    hp: 92, atk: 78, def: 88, spd: 32,
+    flavor: "An old grove walking. Birds nest between its shoulders." },
+  // Water -------------------------------------------------------------------
   { id: "aquaphin", name: "AquaPhin", type: "Water", rarity: "common",
     body: "round", ears: "fin", accent: "droplet",
+    markings: "belly", expression: "smile",
     hp: 64, atk: 60, def: 58, spd: 70,
     flavor: "Surfs warm rain currents above the asphalt." },
+  { id: "tideroe", name: "Tideroe", type: "Water", rarity: "common",
+    body: "blob", ears: "fin", accent: "bubble",
+    markings: "spots", expression: "happy",
+    hp: 70, atk: 52, def: 64, spd: 58,
+    flavor: "Bobs along gutter rivers, blowing perfect glass bubbles." },
+  { id: "marlumi", name: "Marlumi", type: "Water", rarity: "rare",
+    body: "long", ears: "antenna", accent: "lantern",
+    markings: "spots", expression: "grin",
+    hp: 62, atk: 76, def: 50, spd: 68,
+    flavor: "Dangles its lure-light in dark drains, fishing for moths." },
+  // Fire --------------------------------------------------------------------
   { id: "emberoo", name: "Emberoo", type: "Fire", rarity: "rare",
     body: "round", ears: "pointy", accent: "flame",
+    markings: "blush", expression: "grin",
     hp: 54, atk: 80, def: 40, spd: 78,
     flavor: "Hops between sun-baked rooftops, leaving scorch prints." },
+  { id: "cindash", name: "Cindash", type: "Fire", rarity: "common",
+    body: "tall", ears: "tufted", accent: "ember-trail",
+    markings: "stripes", expression: "fierce",
+    hp: 50, atk: 70, def: 36, spd: 84,
+    flavor: "A quick-step pup that leaves a wake of glowing embers." },
+  { id: "vulpyre", name: "Vulpyre", type: "Fire", rarity: "epic",
+    body: "tall", ears: "pointy", accent: "tail-curl",
+    markings: "mask", expression: "smirk",
+    hp: 62, atk: 92, def: 50, spd: 86,
+    flavor: "Nine-tongued flame fox. Bows once before it scorches you." },
+  // Shadow ------------------------------------------------------------------
   { id: "cryptowl", name: "CryptOwl", type: "Shadow", rarity: "epic",
     body: "tall", ears: "horn", accent: "ghost",
+    markings: "mask", expression: "fierce",
     hp: 50, atk: 86, def: 46, spd: 76,
     flavor: "Stares from places no light is meant to reach." },
+  { id: "umbrette", name: "Umbrette", type: "Shadow", rarity: "common",
+    body: "blob", ears: "none", accent: "third-eye",
+    markings: "spots", expression: "sleepy",
+    hp: 58, atk: 60, def: 54, spd: 56,
+    flavor: "Pools under streetlamps. Blinks once, slow, when watched." },
+  { id: "nightwing", name: "Nightwing", type: "Shadow", rarity: "rare",
+    body: "tall", ears: "swept", accent: "wings",
+    markings: "mask", expression: "smirk",
+    hp: 54, atk: 78, def: 48, spd: 82,
+    flavor: "Folds itself into alley shadows; pops out two blocks later." },
+  // Ice ---------------------------------------------------------------------
   { id: "frostbun", name: "Frostbun", type: "Ice", rarity: "common",
     body: "round", ears: "round", accent: "snowflake",
+    markings: "belly", expression: "happy",
     hp: 66, atk: 50, def: 70, spd: 60,
     flavor: "Wrapped in a perpetual chilly fog that smells of mint." },
+  { id: "glaceel", name: "Glaceel", type: "Ice", rarity: "rare",
+    body: "long", ears: "fin", accent: "shard",
+    markings: "stripes", expression: "calm",
+    hp: 60, atk: 72, def: 56, spd: 74,
+    flavor: "Glides between frost patches like a ribbon of cold light." },
+  { id: "crystag", name: "Crystag", type: "Ice", rarity: "epic",
+    body: "tall", ears: "horn", accent: "crystal",
+    markings: "belly", expression: "fierce",
+    hp: 80, atk: 84, def: 78, spd: 64,
+    flavor: "Antlers grow new crystals overnight. Drops them at dawn." },
+  // Wind --------------------------------------------------------------------
   { id: "gustling", name: "Gustling", type: "Wind", rarity: "rare",
     body: "blob", ears: "antenna", accent: "swirl",
+    markings: "none", expression: "grin",
     hp: 48, atk: 64, def: 38, spd: 98,
     flavor: "Zips through alleyways riding the breeze it brewed itself." },
+  { id: "cumulurr", name: "Cumulurr", type: "Wind", rarity: "common",
+    body: "blob", ears: "none", accent: "cloud",
+    markings: "blush", expression: "sleepy",
+    hp: 64, atk: 44, def: 52, spd: 72,
+    flavor: "A drifting cloud nap. Drizzles when startled." },
+  { id: "zephyrm", name: "Zephyrm", type: "Wind", rarity: "epic",
+    body: "tall", ears: "swept", accent: "wings",
+    markings: "stripes", expression: "grin",
+    hp: 56, atk: 80, def: 48, spd: 96,
+    flavor: "Outruns its own shadow. Sometimes courteously waits up." },
+  // Rock --------------------------------------------------------------------
   { id: "pebbloid", name: "Pebbloid", type: "Rock", rarity: "common",
     body: "wide", ears: "none", accent: "pebble",
+    markings: "spots", expression: "calm",
     hp: 96, atk: 60, def: 92, spd: 26,
     flavor: "Slow but stubbornly unmovable. Disguises itself as scenery." },
+  { id: "boulderp", name: "Boulderp", type: "Rock", rarity: "common",
+    body: "stocky", ears: "horn", accent: "spike-back",
+    markings: "stripes", expression: "smirk",
+    hp: 88, atk: 70, def: 84, spd: 30,
+    flavor: "Headbutts first, considers consequences later. Maybe." },
+  { id: "magmatar", name: "Magmatar", type: "Rock", rarity: "rare",
+    body: "wide", ears: "horn", accent: "ember-trail",
+    markings: "stripes", expression: "fierce",
+    hp: 92, atk: 84, def: 80, spd: 36,
+    flavor: "Half rock, half lava. Heats its bedroom rock all winter." },
+  // Cosmic ------------------------------------------------------------------
   { id: "nebulime", name: "Nebulime", type: "Cosmic", rarity: "epic",
     body: "round", ears: "antenna", accent: "star",
+    markings: "spots", expression: "calm",
     hp: 60, atk: 78, def: 54, spd: 74,
     flavor: "A whisper of starlight wearing fur. Hums at 432Hz." },
+  { id: "nebleek", name: "Nebleek", type: "Cosmic", rarity: "common",
+    body: "round", ears: "round", accent: "crescent",
+    markings: "spots", expression: "sleepy",
+    hp: 54, atk: 58, def: 52, spd: 64,
+    flavor: "Naps in skylight beams. Sneezes faint comets." },
+  { id: "astralope", name: "Astralope", type: "Cosmic", rarity: "epic",
+    body: "tall", ears: "horn", accent: "halo",
+    markings: "stripes", expression: "smirk",
+    hp: 72, atk: 84, def: 60, spd: 88,
+    flavor: "Leaps between constellations. Sometimes lands in your yard." },
+  // Spirit ------------------------------------------------------------------
   { id: "spectrip", name: "Spectrip", type: "Spirit", rarity: "rare",
     body: "tall", ears: "none", accent: "ghost",
+    markings: "none", expression: "sleepy",
     hp: 56, atk: 70, def: 50, spd: 72,
     flavor: "Drifts past clocks that have started running slow." },
+  { id: "wispette", name: "Wispette", type: "Spirit", rarity: "common",
+    body: "blob", ears: "none", accent: "halo",
+    markings: "none", expression: "happy",
+    hp: 44, atk: 58, def: 42, spd: 70,
+    flavor: "A friendly will-o'-the-wisp who hates being alone." },
+  { id: "halofly", name: "Halofly", type: "Spirit", rarity: "rare",
+    body: "round", ears: "antenna", accent: "halo",
+    markings: "blush", expression: "grin",
+    hp: 52, atk: 72, def: 48, spd: 80,
+    flavor: "Tiny seraph moth. Its halo doubles as a nightlight." },
+  // Bug ---------------------------------------------------------------------
   { id: "buzzwick", name: "Buzzwick", type: "Bug", rarity: "common",
     body: "round", ears: "antenna", accent: "sparkle",
+    markings: "stripes", expression: "happy",
     hp: 52, atk: 66, def: 44, spd: 86,
     flavor: "Carries embers between flowers without scorching a petal." },
+  { id: "pollybit", name: "Pollybit", type: "Bug", rarity: "common",
+    body: "round", ears: "antenna", accent: "petal",
+    markings: "spots", expression: "happy",
+    hp: 50, atk: 56, def: 48, spd: 80,
+    flavor: "Dusted in golden pollen. Sneezes summon dandelions." },
+  { id: "mantazz", name: "Mantazz", type: "Bug", rarity: "rare",
+    body: "tall", ears: "antenna", accent: "claw",
+    markings: "stripes", expression: "fierce",
+    hp: 56, atk: 84, def: 50, spd: 78,
+    flavor: "Folds two scythes politely behind its back. Until it doesn't." },
+  // Metal -------------------------------------------------------------------
   { id: "chromite", name: "Chromite", type: "Metal", rarity: "epic",
     body: "wide", ears: "horn", accent: "gear",
+    markings: "stripes", expression: "smirk",
     hp: 84, atk: 72, def: 96, spd: 38,
     flavor: "A polished little tank with a surprisingly gentle hum." },
+  { id: "cogwarm", name: "Cogwarm", type: "Metal", rarity: "common",
+    body: "round", ears: "antenna", accent: "gear",
+    markings: "spots", expression: "happy",
+    hp: 60, atk: 54, def: 78, spd: 42,
+    flavor: "Hums like a clockwork heart. Polishes itself when bored." },
+  { id: "aegismite", name: "Aegismite", type: "Metal", rarity: "epic",
+    body: "stocky", ears: "crest", accent: "shield",
+    markings: "stripes", expression: "fierce",
+    hp: 96, atk: 70, def: 104, spd: 30,
+    flavor: "Born from an old knight's shield. Takes its job very seriously." },
 ];
 const cardsById = new Map(cards.map((c) => [c.id, c]));
 
@@ -635,6 +779,24 @@ function flashEmptyInventory() {
   setTimeout(() => el.ballChip && el.ballChip.classList.remove("flash"), 700);
 }
 
+const spawnPortraitCache = new Map();
+function spawnPortraitDataUrl(card) {
+  if (typeof document === "undefined") return "";
+  const cached = spawnPortraitCache.get(card.id);
+  if (cached) return cached;
+  const size = 96;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return "";
+  // Transparent background — the marker pill behind shows colour & glow.
+  drawCreature(ctx, card, size / 2, size / 2 + 4, size * 0.34);
+  const url = canvas.toDataURL("image/png");
+  spawnPortraitCache.set(card.id, url);
+  return url;
+}
+
 function makeSpawnIcon(p) {
   const L = window.L;
   const meters = playerLocation
@@ -643,11 +805,18 @@ function makeSpawnIcon(p) {
   const near = meters !== null && meters <= CATCH_RANGE_METERS ? "near" : "";
   const colors = colorsFor(p.card);
   const style = `--type-light:${colors.light};--type-dark:${colors.dark};--type-accent:${colors.accent};`;
+  const portrait = spawnPortraitDataUrl(p.card);
   return L.divIcon({
     className: "",
-    html: `<div class="spawn-marker ${near}" style="${style}"><span>${escapeHtml(p.card.name)}</span>${meters === null ? "" : `<small>${meters}m</small>`}</div>`,
-    iconSize: [60, 60],
-    iconAnchor: [30, 30],
+    html: `<div class="spawn-marker ${near}" style="${style}">
+      <div class="spawn-face">
+        <img class="spawn-portrait" src="${portrait}" alt="" aria-hidden="true" />
+      </div>
+      <span class="spawn-name">${escapeHtml(p.card.name)}</span>
+      ${meters === null ? "" : `<small class="spawn-dist">${meters}m</small>`}
+    </div>`,
+    iconSize: [78, 92],
+    iconAnchor: [39, 46],
   });
 }
 
@@ -993,6 +1162,14 @@ function drawStar(ctx, cx, cy, points, outer, inner) {
   ctx.closePath();
 }
 
+function bodyDims(shape, r) {
+  if (shape === "tall") return { rx: r * 0.78, ry: r * 1.08 };
+  if (shape === "wide") return { rx: r * 1.12, ry: r * 0.78 };
+  if (shape === "stocky") return { rx: r * 1.05, ry: r * 0.95 };
+  if (shape === "long") return { rx: r * 1.25, ry: r * 0.62 };
+  return { rx: r, ry: r };
+}
+
 function drawCreatureBody(ctx, shape, r, colors) {
   const grad = ctx.createRadialGradient(-r * 0.32, -r * 0.4, r * 0.12, 0, 0, r * 1.05);
   grad.addColorStop(0, colors.light);
@@ -1005,6 +1182,14 @@ function drawCreatureBody(ctx, shape, r, colors) {
     ctx.ellipse(0, 0, r * 0.78, r * 1.08, 0, 0, Math.PI * 2);
   } else if (shape === "wide") {
     ctx.ellipse(0, 0, r * 1.12, r * 0.78, 0, 0, Math.PI * 2);
+  } else if (shape === "stocky") {
+    // Pear-ish: slightly heavier bottom for character.
+    ctx.moveTo(-r * 1.0, -r * 0.18);
+    ctx.bezierCurveTo(-r * 1.05, -r * 0.95, r * 1.05, -r * 0.95, r * 1.0, -r * 0.18);
+    ctx.bezierCurveTo(r * 1.15, r * 0.9, -r * 1.15, r * 0.9, -r * 1.0, -r * 0.18);
+    ctx.closePath();
+  } else if (shape === "long") {
+    ctx.ellipse(0, 0, r * 1.25, r * 0.62, 0, 0, Math.PI * 2);
   } else if (shape === "blob") {
     const points = 14;
     for (let i = 0; i <= points; i++) {
@@ -1020,6 +1205,117 @@ function drawCreatureBody(ctx, shape, r, colors) {
   }
   ctx.fill();
   ctx.stroke();
+
+  // Subtle highlight sheen — adds depth on every body.
+  ctx.save();
+  const sheen = ctx.createRadialGradient(-r * 0.38, -r * 0.5, r * 0.05, -r * 0.3, -r * 0.4, r * 0.55);
+  sheen.addColorStop(0, "rgba(255,255,255,0.55)");
+  sheen.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = sheen;
+  ctx.beginPath();
+  ctx.ellipse(-r * 0.28, -r * 0.42, r * 0.42, r * 0.28, -0.35, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // Little feet — adds grounded character to non-floaty shapes.
+  if (shape === "tall" || shape === "wide" || shape === "stocky") {
+    const dims = bodyDims(shape, r);
+    ctx.fillStyle = colors.dark;
+    ctx.strokeStyle = "rgba(7, 13, 28, 0.5)";
+    ctx.lineWidth = Math.max(0.8, r * 0.03);
+    const fy = dims.ry * 0.92;
+    const fx = dims.rx * 0.48;
+    [-1, 1].forEach((side) => {
+      ctx.beginPath();
+      ctx.ellipse(side * fx, fy, r * 0.18, r * 0.1, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    });
+  }
+}
+
+function clipBodyPath(ctx, shape, r) {
+  ctx.beginPath();
+  if (shape === "tall") {
+    ctx.ellipse(0, 0, r * 0.78, r * 1.08, 0, 0, Math.PI * 2);
+  } else if (shape === "wide") {
+    ctx.ellipse(0, 0, r * 1.12, r * 0.78, 0, 0, Math.PI * 2);
+  } else if (shape === "stocky") {
+    ctx.moveTo(-r * 1.0, -r * 0.18);
+    ctx.bezierCurveTo(-r * 1.05, -r * 0.95, r * 1.05, -r * 0.95, r * 1.0, -r * 0.18);
+    ctx.bezierCurveTo(r * 1.15, r * 0.9, -r * 1.15, r * 0.9, -r * 1.0, -r * 0.18);
+    ctx.closePath();
+  } else if (shape === "long") {
+    ctx.ellipse(0, 0, r * 1.25, r * 0.62, 0, 0, Math.PI * 2);
+  } else if (shape === "blob") {
+    const points = 14;
+    for (let i = 0; i <= points; i++) {
+      const ang = (i / points) * Math.PI * 2;
+      const wob = 1 + Math.sin(ang * 3) * 0.09 + Math.cos(ang * 2) * 0.05;
+      const x = Math.cos(ang) * r * wob;
+      const y = Math.sin(ang) * r * wob;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+  } else {
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
+  }
+  ctx.clip();
+}
+
+function drawCreatureMarkings(ctx, kind, shape, r, colors) {
+  if (!kind || kind === "none") return;
+  ctx.save();
+  clipBodyPath(ctx, shape, r);
+  if (kind === "belly") {
+    const grad = ctx.createRadialGradient(0, r * 0.3, r * 0.1, 0, r * 0.4, r * 0.85);
+    grad.addColorStop(0, "rgba(255,255,255,0.85)");
+    grad.addColorStop(0.7, `${colors.light}cc`);
+    grad.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.ellipse(0, r * 0.42, r * 0.52, r * 0.58, 0, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (kind === "spots") {
+    ctx.fillStyle = `${colors.dark}cc`;
+    const spots = [
+      [-r * 0.5, -r * 0.05, r * 0.12],
+      [r * 0.35, r * 0.15, r * 0.1],
+      [-r * 0.15, r * 0.45, r * 0.13],
+      [r * 0.55, -r * 0.35, r * 0.09],
+    ];
+    for (const [x, y, rad] of spots) {
+      ctx.beginPath();
+      ctx.arc(x, y, rad, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  } else if (kind === "stripes") {
+    ctx.strokeStyle = `${colors.dark}d0`;
+    ctx.lineWidth = Math.max(1.4, r * 0.07);
+    ctx.lineCap = "round";
+    const ys = [-r * 0.4, -r * 0.1, r * 0.25, r * 0.55];
+    for (const y of ys) {
+      ctx.beginPath();
+      ctx.moveTo(-r * 0.95, y);
+      ctx.quadraticCurveTo(0, y + r * 0.08, r * 0.95, y);
+      ctx.stroke();
+    }
+  } else if (kind === "mask") {
+    ctx.fillStyle = `${colors.dark}e0`;
+    ctx.beginPath();
+    const my = shape === "tall" ? -r * 0.1 : -r * 0.18;
+    ctx.ellipse(0, my, r * 0.78, r * 0.2, 0, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (kind === "blush") {
+    ctx.fillStyle = "rgba(255, 120, 150, 0.55)";
+    const by = shape === "tall" ? r * 0.08 : r * 0.02;
+    const bx = shape === "wide" ? r * 0.62 : r * 0.46;
+    ctx.beginPath();
+    ctx.ellipse(-bx, by, r * 0.13, r * 0.08, 0, 0, Math.PI * 2);
+    ctx.ellipse(bx, by, r * 0.13, r * 0.08, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
 }
 
 function drawCreatureEars(ctx, kind, r, colors) {
@@ -1087,29 +1383,179 @@ function drawCreatureEars(ctx, kind, r, colors) {
       ctx.arc(side * r * 0.78, -r * 1.2, r * 0.15, 0, Math.PI * 2);
       ctx.fill();
     });
+  } else if (kind === "tufted") {
+    // Small pointed ears with a fluff tip.
+    ctx.fillStyle = colors.dark;
+    ctx.lineWidth = Math.max(1, r * 0.035);
+    [-1, 1].forEach((side) => {
+      ctx.beginPath();
+      ctx.moveTo(side * r * 0.4, -r * 0.65);
+      ctx.lineTo(side * r * 0.2, -r * 1.15);
+      ctx.lineTo(side * r * 0.62, -r * 0.78);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = colors.light;
+      ctx.beginPath();
+      ctx.arc(side * r * 0.24, -r * 1.12, r * 0.08, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = colors.dark;
+    });
+  } else if (kind === "crest") {
+    // A central mohawk-style crest, three spikes.
+    ctx.fillStyle = colors.accent;
+    ctx.lineWidth = Math.max(1, r * 0.035);
+    const spikes = [
+      [-r * 0.32, -r * 0.95, -r * 0.5, -r * 1.25, -r * 0.1, -r * 1.0],
+      [0, -r * 1.05, -r * 0.18, -r * 1.45, r * 0.18, -r * 1.05],
+      [r * 0.32, -r * 0.95, r * 0.1, -r * 1.25, r * 0.5, -r * 1.0],
+    ];
+    for (const [x1, y1, x2, y2, x3, y3] of spikes) {
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.lineTo(x3, y3);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
+  } else if (kind === "swept") {
+    // Long ears swept backward — sleek, fast.
+    ctx.fillStyle = colors.dark;
+    ctx.lineWidth = Math.max(1, r * 0.035);
+    [-1, 1].forEach((side) => {
+      ctx.beginPath();
+      ctx.moveTo(side * r * 0.35, -r * 0.6);
+      ctx.quadraticCurveTo(side * r * 1.1, -r * 1.0, side * r * 1.25, -r * 0.55);
+      ctx.quadraticCurveTo(side * r * 0.85, -r * 0.5, side * r * 0.5, -r * 0.55);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = colors.accent;
+      ctx.beginPath();
+      ctx.moveTo(side * r * 0.55, -r * 0.6);
+      ctx.quadraticCurveTo(side * r * 1.0, -r * 0.85, side * r * 1.15, -r * 0.6);
+      ctx.quadraticCurveTo(side * r * 0.85, -r * 0.55, side * r * 0.55, -r * 0.6);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = colors.dark;
+    });
   }
 }
 
-function drawCreatureEyes(ctx, shape, r) {
-  const yOff = shape === "tall" ? -r * 0.05 : -r * 0.12;
-  const xOff = shape === "wide" ? r * 0.42 : shape === "tall" ? r * 0.28 : r * 0.32;
-  ctx.fillStyle = "#0b1226";
-  ctx.beginPath();
-  ctx.arc(-xOff, yOff, r * 0.12, 0, Math.PI * 2);
-  ctx.arc(xOff, yOff, r * 0.12, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = "#fff";
-  ctx.beginPath();
-  ctx.arc(-xOff + r * 0.05, yOff - r * 0.05, r * 0.045, 0, Math.PI * 2);
-  ctx.arc(xOff + r * 0.05, yOff - r * 0.05, r * 0.045, 0, Math.PI * 2);
-  ctx.fill();
+function drawCreatureEyes(ctx, shape, r, expression = "smile") {
+  const yOff = shape === "tall" ? -r * 0.05 : shape === "long" ? -r * 0.18 : -r * 0.12;
+  const xOff =
+    shape === "wide" || shape === "long" ? r * 0.42 :
+    shape === "stocky" ? r * 0.36 :
+    shape === "tall" ? r * 0.28 :
+    r * 0.32;
+  ctx.lineWidth = Math.max(1, r * 0.05);
+  ctx.strokeStyle = "rgba(7, 13, 28, 0.85)";
 
-  // little smile
-  ctx.strokeStyle = "rgba(7, 13, 28, 0.65)";
-  ctx.lineWidth = Math.max(1, r * 0.04);
-  ctx.beginPath();
-  ctx.arc(0, yOff + r * 0.35, r * 0.18, 0.15 * Math.PI, 0.85 * Math.PI);
-  ctx.stroke();
+  if (expression === "sleepy") {
+    // Half-closed eye arcs.
+    ctx.beginPath();
+    ctx.arc(-xOff, yOff, r * 0.14, Math.PI * 1.05, Math.PI * 1.95);
+    ctx.arc(xOff, yOff, r * 0.14, Math.PI * 1.05, Math.PI * 1.95);
+    ctx.stroke();
+  } else if (expression === "happy") {
+    // Closed upward-curving eyes.
+    ctx.lineWidth = Math.max(1.2, r * 0.06);
+    ctx.beginPath();
+    ctx.arc(-xOff, yOff + r * 0.05, r * 0.14, Math.PI * 1.05, Math.PI * 1.95);
+    ctx.arc(xOff, yOff + r * 0.05, r * 0.14, Math.PI * 1.05, Math.PI * 1.95);
+    ctx.stroke();
+  } else if (expression === "fierce") {
+    // Angled-down brows + sharp eyes.
+    ctx.fillStyle = "#0b1226";
+    ctx.beginPath();
+    ctx.arc(-xOff, yOff + r * 0.02, r * 0.12, 0, Math.PI * 2);
+    ctx.arc(xOff, yOff + r * 0.02, r * 0.12, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#fff";
+    ctx.beginPath();
+    ctx.arc(-xOff + r * 0.045, yOff - r * 0.02, r * 0.04, 0, Math.PI * 2);
+    ctx.arc(xOff + r * 0.045, yOff - r * 0.02, r * 0.04, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(7, 13, 28, 0.85)";
+    ctx.lineWidth = Math.max(1.5, r * 0.07);
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(-xOff - r * 0.18, yOff - r * 0.28);
+    ctx.lineTo(-xOff + r * 0.12, yOff - r * 0.16);
+    ctx.moveTo(xOff + r * 0.18, yOff - r * 0.28);
+    ctx.lineTo(xOff - r * 0.12, yOff - r * 0.16);
+    ctx.stroke();
+  } else {
+    // Default rounded eyes with highlights.
+    ctx.fillStyle = "#0b1226";
+    ctx.beginPath();
+    ctx.arc(-xOff, yOff, r * 0.13, 0, Math.PI * 2);
+    ctx.arc(xOff, yOff, r * 0.13, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#fff";
+    ctx.beginPath();
+    ctx.arc(-xOff + r * 0.05, yOff - r * 0.05, r * 0.05, 0, Math.PI * 2);
+    ctx.arc(xOff + r * 0.05, yOff - r * 0.05, r * 0.05, 0, Math.PI * 2);
+    ctx.fill();
+    // Lower glint for life.
+    ctx.fillStyle = "rgba(255,255,255,0.55)";
+    ctx.beginPath();
+    ctx.arc(-xOff - r * 0.04, yOff + r * 0.06, r * 0.022, 0, Math.PI * 2);
+    ctx.arc(xOff - r * 0.04, yOff + r * 0.06, r * 0.022, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Mouth — varies by expression.
+  ctx.strokeStyle = "rgba(7, 13, 28, 0.78)";
+  ctx.lineWidth = Math.max(1, r * 0.045);
+  ctx.lineCap = "round";
+  const my = yOff + r * 0.38;
+  if (expression === "grin") {
+    ctx.fillStyle = "#3a0d1c";
+    ctx.beginPath();
+    ctx.arc(0, my, r * 0.22, 0.08 * Math.PI, 0.92 * Math.PI);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    // Little fang.
+    ctx.fillStyle = "#fff";
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.08, my + r * 0.02);
+    ctx.lineTo(-r * 0.02, my + r * 0.14);
+    ctx.lineTo(r * 0.04, my + r * 0.02);
+    ctx.closePath();
+    ctx.fill();
+  } else if (expression === "smirk") {
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.05, my);
+    ctx.quadraticCurveTo(r * 0.12, my - r * 0.06, r * 0.22, my - r * 0.12);
+    ctx.stroke();
+  } else if (expression === "sleepy") {
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.08, my);
+    ctx.lineTo(r * 0.08, my);
+    ctx.stroke();
+  } else if (expression === "calm") {
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.12, my);
+    ctx.quadraticCurveTo(0, my + r * 0.04, r * 0.12, my);
+    ctx.stroke();
+  } else if (expression === "fierce") {
+    // Snarl: zigzag.
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.2, my);
+    ctx.lineTo(-r * 0.1, my - r * 0.06);
+    ctx.lineTo(0, my);
+    ctx.lineTo(r * 0.1, my - r * 0.06);
+    ctx.lineTo(r * 0.2, my);
+    ctx.stroke();
+  } else {
+    ctx.beginPath();
+    ctx.arc(0, my - r * 0.03, r * 0.18, 0.15 * Math.PI, 0.85 * Math.PI);
+    ctx.stroke();
+  }
 }
 
 function drawCreatureAccent(ctx, kind, r, colors) {
@@ -1245,17 +1691,246 @@ function drawCreatureAccent(ctx, kind, r, colors) {
     ctx.beginPath();
     ctx.arc(0, 0, s * 0.16, 0, Math.PI * 2);
     ctx.fill();
+  } else if (kind === "petal") {
+    // Five-petal flower.
+    ctx.fillStyle = colors.accent;
+    for (let i = 0; i < 5; i++) {
+      const a = (i / 5) * Math.PI * 2 - Math.PI / 2;
+      const px = Math.cos(a) * s * 0.42;
+      const py = Math.sin(a) * s * 0.42;
+      ctx.beginPath();
+      ctx.ellipse(px, py, s * 0.22, s * 0.32, a, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+    ctx.fillStyle = colors.dark;
+    ctx.beginPath();
+    ctx.arc(0, 0, s * 0.16, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (kind === "crescent") {
+    ctx.fillStyle = colors.accent;
+    ctx.beginPath();
+    ctx.arc(0, 0, s * 0.5, 0.25 * Math.PI, 1.75 * Math.PI);
+    ctx.arc(s * 0.18, 0, s * 0.42, 1.75 * Math.PI, 0.25 * Math.PI, true);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  } else if (kind === "wings") {
+    ctx.fillStyle = colors.accent;
+    ctx.translate(0, -s * 0.7);
+    [-1, 1].forEach((side) => {
+      ctx.beginPath();
+      ctx.moveTo(side * s * 0.1, 0);
+      ctx.quadraticCurveTo(side * s * 0.9, -s * 0.5, side * s * 1.2, -s * 0.1);
+      ctx.quadraticCurveTo(side * s * 0.8, s * 0.1, side * s * 0.1, s * 0.05);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    });
+  } else if (kind === "tail-curl") {
+    ctx.strokeStyle = colors.accent;
+    ctx.lineWidth = Math.max(2, r * 0.12);
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(-s * 0.8, s * 0.4);
+    ctx.quadraticCurveTo(-s * 1.6, s * 0.1, -s * 1.5, -s * 0.5);
+    ctx.quadraticCurveTo(-s * 1.3, -s * 1.0, -s * 0.7, -s * 0.85);
+    ctx.stroke();
+    ctx.fillStyle = colors.accent;
+    ctx.beginPath();
+    ctx.arc(-s * 0.7, -s * 0.85, s * 0.13, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (kind === "spike-back") {
+    ctx.fillStyle = colors.dark;
+    const spikes = [[-s * 0.6, -s * 0.45], [-s * 0.25, -s * 0.6], [s * 0.1, -s * 0.65], [s * 0.45, -s * 0.55]];
+    for (const [x, baseY] of spikes) {
+      ctx.beginPath();
+      ctx.moveTo(x - s * 0.12, baseY);
+      ctx.lineTo(x, baseY - s * 0.45);
+      ctx.lineTo(x + s * 0.12, baseY);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
+  } else if (kind === "halo") {
+    ctx.strokeStyle = colors.accent;
+    ctx.lineWidth = Math.max(2, r * 0.09);
+    ctx.beginPath();
+    ctx.ellipse(0, -s * 1.65, s * 0.45, s * 0.14, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.strokeStyle = "rgba(255,255,255,0.7)";
+    ctx.lineWidth = Math.max(1, r * 0.04);
+    ctx.beginPath();
+    ctx.ellipse(0, -s * 1.66, s * 0.42, s * 0.12, 0, 0, Math.PI * 2);
+    ctx.stroke();
+  } else if (kind === "third-eye") {
+    ctx.fillStyle = colors.accent;
+    ctx.beginPath();
+    ctx.ellipse(0, -s * 1.05, s * 0.22, s * 0.13, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "#0b1226";
+    ctx.beginPath();
+    ctx.arc(0, -s * 1.05, s * 0.08, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (kind === "claw") {
+    ctx.fillStyle = colors.accent;
+    ctx.strokeStyle = "rgba(7, 13, 28, 0.55)";
+    [-1, 1].forEach((side) => {
+      ctx.beginPath();
+      ctx.moveTo(side * s * 0.55, s * 0.4);
+      ctx.lineTo(side * s * 1.15, s * 0.1);
+      ctx.lineTo(side * s * 0.95, s * 0.5);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(side * s * 0.35, s * 0.45);
+      ctx.lineTo(side * s * 0.85, s * 0.3);
+      ctx.lineTo(side * s * 0.7, s * 0.6);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    });
+  } else if (kind === "bubble") {
+    ctx.fillStyle = "rgba(255,255,255,0.55)";
+    ctx.strokeStyle = `${colors.dark}aa`;
+    const bubs = [[0, -s * 0.1, s * 0.32], [s * 0.5, -s * 0.55, s * 0.18], [-s * 0.45, -s * 0.65, s * 0.14], [s * 0.35, -s * 0.9, s * 0.1]];
+    for (const [x, y, rad] of bubs) {
+      ctx.beginPath();
+      ctx.arc(x, y, rad, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = "rgba(255,255,255,0.85)";
+      ctx.beginPath();
+      ctx.arc(x - rad * 0.35, y - rad * 0.35, rad * 0.22, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "rgba(255,255,255,0.55)";
+    }
+  } else if (kind === "lantern") {
+    // Curved stalk with a glowing bulb hovering above the head.
+    ctx.strokeStyle = colors.dark;
+    ctx.lineWidth = Math.max(1.5, r * 0.07);
+    ctx.beginPath();
+    ctx.moveTo(0, -s * 0.7);
+    ctx.quadraticCurveTo(s * 0.4, -s * 1.4, s * 0.05, -s * 1.7);
+    ctx.stroke();
+    const glow = ctx.createRadialGradient(s * 0.05, -s * 1.7, s * 0.05, s * 0.05, -s * 1.7, s * 0.5);
+    glow.addColorStop(0, "rgba(255, 240, 200, 1)");
+    glow.addColorStop(0.5, colors.accent);
+    glow.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(s * 0.05, -s * 1.7, s * 0.45, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#fff7d0";
+    ctx.beginPath();
+    ctx.arc(s * 0.05, -s * 1.7, s * 0.18, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (kind === "shield") {
+    ctx.fillStyle = colors.accent;
+    ctx.beginPath();
+    ctx.moveTo(0, -s * 0.7);
+    ctx.lineTo(s * 0.55, -s * 0.45);
+    ctx.lineTo(s * 0.5, s * 0.25);
+    ctx.quadraticCurveTo(0, s * 0.7, -s * 0.5, s * 0.25);
+    ctx.lineTo(-s * 0.55, -s * 0.45);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.strokeStyle = colors.dark;
+    ctx.lineWidth = Math.max(1.5, r * 0.06);
+    ctx.beginPath();
+    ctx.moveTo(0, -s * 0.5);
+    ctx.lineTo(0, s * 0.45);
+    ctx.moveTo(-s * 0.4, -s * 0.1);
+    ctx.lineTo(s * 0.4, -s * 0.1);
+    ctx.stroke();
+  } else if (kind === "vines") {
+    ctx.strokeStyle = colors.accent;
+    ctx.lineWidth = Math.max(2, r * 0.08);
+    ctx.lineCap = "round";
+    for (let i = 0; i < 3; i++) {
+      const offset = (i - 1) * s * 0.42;
+      ctx.beginPath();
+      ctx.moveTo(offset, -s * 0.5);
+      ctx.bezierCurveTo(offset + s * 0.25, -s * 0.85, offset - s * 0.25, -s * 1.15, offset, -s * 1.4);
+      ctx.stroke();
+      // Leaflet at tip.
+      ctx.fillStyle = colors.accent;
+      ctx.beginPath();
+      ctx.ellipse(offset, -s * 1.42, s * 0.14, s * 0.08, Math.PI / 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  } else if (kind === "ember-trail") {
+    // Tail of embers behind/below.
+    const embers = [[-s * 0.95, s * 0.05, s * 0.22], [-s * 0.55, s * 0.45, s * 0.14], [-s * 1.2, -s * 0.25, s * 0.12], [-s * 0.3, s * 0.7, s * 0.08]];
+    for (const [x, y, rad] of embers) {
+      const grad = ctx.createRadialGradient(x, y, rad * 0.1, x, y, rad);
+      grad.addColorStop(0, "#fff2b0");
+      grad.addColorStop(0.5, colors.accent);
+      grad.addColorStop(1, "rgba(255,80,30,0)");
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(x, y, rad, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  } else if (kind === "cloud") {
+    ctx.fillStyle = "rgba(255,255,255,0.92)";
+    ctx.strokeStyle = `${colors.dark}aa`;
+    const puffs = [[-s * 0.45, 0, s * 0.32], [0, -s * 0.18, s * 0.4], [s * 0.45, 0, s * 0.32], [0, s * 0.18, s * 0.3]];
+    ctx.beginPath();
+    for (const [x, y, rad] of puffs) {
+      ctx.moveTo(x + rad, y);
+      ctx.arc(x, y, rad, 0, Math.PI * 2);
+    }
+    ctx.fill();
+    ctx.stroke();
+  } else if (kind === "shard") {
+    ctx.fillStyle = colors.accent;
+    const shards = [[-s * 0.35, -s * 0.1, s * 0.18, s * 0.55], [s * 0.05, -s * 0.25, s * 0.14, s * 0.45], [s * 0.4, 0, s * 0.16, s * 0.6]];
+    for (const [x, y, w, h] of shards) {
+      ctx.beginPath();
+      ctx.moveTo(x, y - h / 2);
+      ctx.lineTo(x + w, y);
+      ctx.lineTo(x, y + h / 2);
+      ctx.lineTo(x - w, y);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
+  } else if (kind === "crystal") {
+    ctx.fillStyle = colors.accent;
+    const cs = s * 0.55;
+    ctx.beginPath();
+    ctx.moveTo(0, -cs);
+    ctx.lineTo(cs * 0.55, -cs * 0.25);
+    ctx.lineTo(cs * 0.45, cs * 0.6);
+    ctx.lineTo(-cs * 0.45, cs * 0.6);
+    ctx.lineTo(-cs * 0.55, -cs * 0.25);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.strokeStyle = "rgba(255,255,255,0.8)";
+    ctx.beginPath();
+    ctx.moveTo(0, -cs);
+    ctx.lineTo(0, cs * 0.6);
+    ctx.moveTo(-cs * 0.55, -cs * 0.25);
+    ctx.lineTo(cs * 0.55, -cs * 0.25);
+    ctx.stroke();
   }
   ctx.restore();
 }
 
 function drawCreature(ctx, card, cx, cy, r) {
   const colors = colorsFor(card);
+  const shape = card.body || "round";
   ctx.save();
   ctx.translate(cx, cy);
   drawCreatureEars(ctx, card.ears || "round", r, colors);
-  drawCreatureBody(ctx, card.body || "round", r, colors);
-  drawCreatureEyes(ctx, card.body || "round", r);
+  drawCreatureBody(ctx, shape, r, colors);
+  drawCreatureMarkings(ctx, card.markings || "none", shape, r, colors);
+  drawCreatureEyes(ctx, shape, r, card.expression || "smile");
   drawCreatureAccent(ctx, card.accent || "sparkle", r, colors);
   ctx.restore();
 }
