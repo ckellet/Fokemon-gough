@@ -1,6 +1,18 @@
 import {
   computePoiPlacements,
   computeSpawnPlacements,
+  computeBattleSitePlacements,
+  battleSiteName,
+  effectiveStats,
+  isChampionRetired,
+  simulateBattle,
+  seedFromStrings,
+  clampBoost,
+  totalBoostCapRemaining,
+  MAX_TRAINING_BOOST_PER_STAT,
+  MAX_CHAMPION_DEFENSES,
+  CHAMPION_TTL_MS,
+  typeMultiplier,
   filterUncaughtSpawns,
   getGridKey,
   isPoiAvailable,
@@ -12,6 +24,7 @@ const SPAWN_INTERVAL_MS = 3 * 60 * 1000;
 const MAX_SPAWNS = 4;
 const CATCH_RANGE_METERS = 80;
 const POI_RANGE_METERS = CATCH_RANGE_METERS;
+const BATTLE_SITE_RANGE_METERS = 100;
 const STARTING_FOKEBALLS = 5;
 const MAX_POI_REWARD = 8;
 const GUN_PEERS = ["https://relay.peer.ooo/gun", "https://gun.o8.is/gun"];
@@ -26,6 +39,8 @@ const FALLBACK_EVENTS_NODE = {
 let eventsNode = FALLBACK_EVENTS_NODE;
 let gridCaughtNode = null;
 let lastGridKey = null;
+let battleSitesNode = null;
+let battleEventsNode = null;
 
 const cards = [
   { id: "voltlynx", name: "VoltLynx", type: "Electric", rarity: "rare",
@@ -229,6 +244,11 @@ let catchCircle = null;
 const spawnMarkers = new Map();
 const trainerMarkers = new Map();
 const poiMarkers = new Map();
+const battleSiteMarkers = new Map();
+let currentBattleSites = [];
+let currentBattleSitesCellKey = null;
+const championsBySite = new Map();
+const subscribedChampionSites = new Set();
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (c) =>
@@ -314,6 +334,8 @@ function ensureFreshPlacements() {
     currentPlacementsKey = null;
     currentPois = [];
     currentPoisCellKey = null;
+    currentBattleSites = [];
+    currentBattleSitesCellKey = null;
     return;
   }
   const bucket = Math.floor(Date.now() / SPAWN_INTERVAL_MS);
@@ -335,6 +357,13 @@ function ensureFreshPlacements() {
       neighborhoodCells: 1,
     });
     currentPoisCellKey = gridKey;
+  }
+  if (gridKey !== currentBattleSitesCellKey) {
+    currentBattleSites = computeBattleSitePlacements(playerLocation.lat, playerLocation.lng, {
+      neighborhoodCells: 2,
+    });
+    currentBattleSitesCellKey = gridKey;
+    subscribeChampionUpdates();
   }
 }
 
@@ -603,6 +632,56 @@ function makeTrainerIcon(name) {
   });
 }
 
+function activeChampionFor(siteId) {
+  const champion = championsBySite.get(siteId);
+  if (!champion) return null;
+  if (isChampionRetired(champion)) return null;
+  return champion;
+}
+
+function siteCatchable(site) {
+  if (!playerLocation || !site) return false;
+  return distanceMeters(playerLocation, { lat: site.lat, lng: site.lng }) <= BATTLE_SITE_RANGE_METERS;
+}
+
+function siteIconSignature(site) {
+  const champion = activeChampionFor(site.id);
+  const meters = playerLocation
+    ? Math.round(distanceMeters(playerLocation, { lat: site.lat, lng: site.lng }))
+    : null;
+  const near = meters !== null && meters <= BATTLE_SITE_RANGE_METERS;
+  const mine = champion && champion.trainer === profile?.name;
+  const status = !champion ? "vacant" : mine ? "yours" : "rival";
+  const sig = `${status}|${near ? "near" : "far"}|${champion?.cardId || ""}|${champion?.defenses || 0}`;
+  return { champion, near, status, sig, meters };
+}
+
+function makeBattleSiteIcon(site, info) {
+  const L = window.L;
+  const name = battleSiteName(site.id);
+  const champion = info.champion;
+  let label;
+  if (champion) {
+    const card = cardsById.get(champion.cardId);
+    label = card ? `${card.name}` : "Champion";
+  } else {
+    label = "Vacant";
+  }
+  const ring = champion ? colorsFor(cardsById.get(champion.cardId) || { type: "Metal" }).accent : "#9aaabd";
+  return L.divIcon({
+    className: "",
+    html: `
+      <div class="battle-site-marker ${info.status} ${info.near ? "near" : ""}" style="--ring:${ring}">
+        <span class="bs-banner">${escapeHtml(name)}</span>
+        <span class="bs-medal"><span class="bs-medal-inner">⚔</span></span>
+        <small>${escapeHtml(label)}</small>
+      </div>
+    `,
+    iconSize: [86, 80],
+    iconAnchor: [43, 80],
+  });
+}
+
 function renderMap() {
   if (!el.mapHint) return;
 
@@ -615,6 +694,8 @@ function renderMap() {
     trainerMarkers.clear();
     poiMarkers.forEach((m) => m.remove());
     poiMarkers.clear();
+    battleSiteMarkers.forEach((m) => m.remove());
+    battleSiteMarkers.clear();
     if (playerMarker) {
       playerMarker.remove();
       playerMarker = null;
@@ -682,6 +763,35 @@ function renderMap() {
     if (!wantedKeys.has(key)) {
       marker.remove();
       spawnMarkers.delete(key);
+    }
+  }
+
+  const wantedSiteKeys = new Set();
+  currentBattleSites.forEach((site) => {
+    wantedSiteKeys.add(site.id);
+    const info = siteIconSignature(site);
+    let marker = battleSiteMarkers.get(site.id);
+    const onSiteClick = () => {
+      if (!siteCatchable(site)) {
+        map.flyTo([site.lat, site.lng], 19, { duration: 0.8 });
+        return;
+      }
+      openBattleSite(site);
+    };
+    if (!marker) {
+      marker = L.marker([site.lat, site.lng], { icon: makeBattleSiteIcon(site, info) }).addTo(map);
+      marker._siteSig = info.sig;
+      marker.on("click", onSiteClick);
+      battleSiteMarkers.set(site.id, marker);
+    } else if (marker._siteSig !== info.sig) {
+      marker.setIcon(makeBattleSiteIcon(site, info));
+      marker._siteSig = info.sig;
+    }
+  });
+  for (const [key, marker] of battleSiteMarkers) {
+    if (!wantedSiteKeys.has(key)) {
+      marker.remove();
+      battleSiteMarkers.delete(key);
     }
   }
 
@@ -1892,6 +2002,225 @@ function launchCatchChallenge(card, placement) {
   rafId = requestAnimationFrame(loop);
 }
 
+let openSiteId = null;
+let openSiteRefresh = null;
+
+function refreshOpenSitePanel(siteId) {
+  if (!openSiteId || openSiteId !== siteId) return;
+  if (typeof openSiteRefresh === "function") openSiteRefresh();
+}
+
+function uniqueCollectionEntries() {
+  const counts = new Map();
+  for (const c of caught) counts.set(c.id, (counts.get(c.id) || 0) + 1);
+  return [...counts.entries()]
+    .map(([id, count]) => ({ card: cardsById.get(id), count }))
+    .filter((e) => e.card)
+    .sort((a, b) => (b.card.hp + b.card.atk + b.card.def + b.card.spd) - (a.card.hp + a.card.atk + a.card.def + a.card.spd));
+}
+
+function statRowHtml(label, base, boost, max) {
+  const total = base + boost;
+  const pct = Math.max(4, Math.min(100, (total / max) * 100));
+  return `
+    <li>
+      <span class="stat-label">${label}</span>
+      <span class="stat-bar"><span class="stat-fill" style="width:${pct}%"></span></span>
+      <span class="stat-val">${total}${boost ? `<span class="stat-boost"> +${boost}</span>` : ""}</span>
+    </li>
+  `;
+}
+
+function championPickerHtml(actionLabel) {
+  const entries = uniqueCollectionEntries();
+  if (!entries.length) {
+    return `<p class="empty-state">Catch some Fokemon first — you can't deploy what you don't have.</p>`;
+  }
+  return `
+    <p class="picker-prompt">Pick your fighter to ${escapeHtml(actionLabel)}:</p>
+    <div class="picker-grid">
+      ${entries.map(({ card, count }) => {
+        const colors = colorsFor(card);
+        const total = card.hp + card.atk + card.def + card.spd;
+        return `
+          <button class="picker-card" data-card="${escapeHtml(card.id)}" style="--type-light:${colors.light};--type-dark:${colors.dark};--type-accent:${colors.accent};">
+            <span class="picker-power">⚡${total}</span>
+            <strong>${escapeHtml(card.name)}</strong>
+            <small>${escapeHtml(card.type)} • ×${count}</small>
+          </button>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+function openBattleSite(site) {
+  if (activeChallenge) return;
+  if (openSiteId) return;
+  openSiteId = site.id;
+
+  const overlay = document.createElement("div");
+  overlay.className = "battle-site-modal";
+  overlay.innerHTML = `
+    <div class="site-card" role="dialog" aria-modal="true" aria-label="Battle site">
+      <header class="site-head">
+        <div>
+          <p class="eyebrow">Foké Gym</p>
+          <h3 class="site-name"></h3>
+        </div>
+        <button class="ghost site-close" aria-label="Close">Close</button>
+      </header>
+      <div class="site-body"></div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const nameEl = overlay.querySelector(".site-name");
+  const bodyEl = overlay.querySelector(".site-body");
+  const closeBtn = overlay.querySelector(".site-close");
+  nameEl.textContent = battleSiteName(site.id);
+
+  function close() {
+    overlay.remove();
+    openSiteId = null;
+    openSiteRefresh = null;
+    document.removeEventListener("keydown", onKey);
+  }
+  function onKey(ev) { if (ev.key === "Escape") close(); }
+  closeBtn.addEventListener("click", close);
+  overlay.addEventListener("click", (ev) => { if (ev.target === overlay) close(); });
+  document.addEventListener("keydown", onKey);
+
+  function render() {
+    const champion = activeChampionFor(site.id);
+    const meters = playerLocation
+      ? Math.round(distanceMeters(playerLocation, { lat: site.lat, lng: site.lng }))
+      : null;
+    const inRange = meters !== null && meters <= BATTLE_SITE_RANGE_METERS;
+
+    if (!champion) {
+      bodyEl.innerHTML = `
+        <div class="site-state vacant">
+          <p class="site-status">⚔ Vacant arena. Be the first to plant a flag here.</p>
+          ${inRange ? championPickerHtml("deploy as champion") : `<p class="empty-state">Walk into range (${meters ?? "?"}m / ${BATTLE_SITE_RANGE_METERS}m) to deploy.</p>`}
+        </div>
+      `;
+      if (inRange) {
+        bodyEl.querySelectorAll(".picker-card").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            const cardId = btn.dataset.card;
+            const card = cardsById.get(cardId);
+            if (!card) return;
+            const champ = {
+              trainer: profile.name,
+              team: profile.team || "mint",
+              cardId,
+              boosts: { hp: 0, atk: 0, def: 0, spd: 0 },
+              defenses: 0,
+              placedAt: Date.now(),
+              lastBattleAt: 0,
+            };
+            championsBySite.set(site.id, champ);
+            publishChampion(site.id, champ);
+            renderMap();
+            render();
+          });
+        });
+      }
+      return;
+    }
+
+    const card = cardsById.get(champion.cardId);
+    if (!card) {
+      bodyEl.innerHTML = `<p class="empty-state">Champion data corrupted.</p>`;
+      return;
+    }
+    const stats = effectiveStats(card, champion);
+    const colors = colorsFor(card);
+    const mine = champion.trainer === profile?.name;
+    const placedAgo = Math.max(0, Date.now() - champion.placedAt);
+    const ttlLeft = Math.max(0, CHAMPION_TTL_MS - placedAgo);
+    const hours = Math.floor(ttlLeft / 3_600_000);
+    const minutes = Math.floor((ttlLeft % 3_600_000) / 60_000);
+    const boostCap = totalBoostCapRemaining(champion.boosts);
+
+    bodyEl.innerHTML = `
+      <div class="site-state ${mine ? "yours" : "rival"}">
+        <div class="champion-pane" style="--type-light:${colors.light};--type-dark:${colors.dark};--type-accent:${colors.accent};">
+          <div class="champion-portrait">
+            <canvas class="champ-art" width="180" height="160" aria-hidden="true"></canvas>
+            <span class="defense-pips" aria-label="Defenses">
+              ${Array.from({ length: MAX_CHAMPION_DEFENSES }, (_, i) =>
+                `<span class="pip ${i < champion.defenses ? "lit" : ""}"></span>`
+              ).join("")}
+            </span>
+          </div>
+          <div class="champion-meta">
+            <h4>${escapeHtml(card.name)} <span class="type-pill" style="background:${colors.accent};color:#061226;">${escapeHtml(card.type)}</span></h4>
+            <p class="champion-owner">Champion of <strong>${escapeHtml(champion.trainer)}</strong>${mine ? " (you)" : ""}</p>
+            <ul class="stats-list">
+              ${statRowHtml("HP", card.hp, champion.boosts.hp, 140)}
+              ${statRowHtml("ATK", card.atk, champion.boosts.atk, 120)}
+              ${statRowHtml("DEF", card.def, champion.boosts.def, 120)}
+              ${statRowHtml("SPD", card.spd, champion.boosts.spd, 120)}
+            </ul>
+            <p class="champion-meta-line">
+              <span class="badge">Defenses ${champion.defenses}/${MAX_CHAMPION_DEFENSES}</span>
+              <span class="badge">Time left ${hours}h ${minutes}m</span>
+              ${champion.defenses > 0 ? `<span class="badge fatigue">Fatigue ${Math.min(45, champion.defenses * 9)}%</span>` : ""}
+            </p>
+          </div>
+        </div>
+        ${!inRange ? `<p class="empty-state">Walk into range (${meters ?? "?"}m / ${BATTLE_SITE_RANGE_METERS}m) to interact.</p>` : ""}
+        <div class="site-actions"></div>
+      </div>
+    `;
+
+    const portraitCanvas = bodyEl.querySelector(".champ-art");
+    if (portraitCanvas) renderPortrait(portraitCanvas, card);
+
+    if (!inRange) return;
+
+    const actions = bodyEl.querySelector(".site-actions");
+    if (mine) {
+      actions.innerHTML = `
+        <button class="primary action-train">${boostCap > 0 ? "Train in the gym" : "Boost capped — recall to retrain"}</button>
+        <button class="ghost action-recall">Recall champion</button>
+      `;
+      if (boostCap > 0) {
+        actions.querySelector(".action-train").addEventListener("click", () => {
+          close();
+          launchTraining(site, champion);
+        });
+      } else {
+        actions.querySelector(".action-train").disabled = true;
+      }
+      actions.querySelector(".action-recall").addEventListener("click", () => {
+        championsBySite.delete(site.id);
+        publishChampionRemoved(site.id);
+        renderMap();
+        render();
+      });
+    } else {
+      actions.innerHTML = `
+        <p class="picker-prompt">Send a challenger to dethrone <strong>${escapeHtml(champion.trainer)}</strong>:</p>
+        ${championPickerHtml("send into battle")}
+      `;
+      actions.querySelectorAll(".picker-card").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const cardId = btn.dataset.card;
+          const card = cardsById.get(cardId);
+          if (!card) return;
+          close();
+          launchBattle(site, card, champion);
+        });
+      });
+    }
+  }
+  openSiteRefresh = render;
+  render();
+}
+
 function launchPoiSpinner(poi) {
   if (activeChallenge) return;
 
@@ -2266,6 +2595,1148 @@ function launchPoiSpinner(poi) {
   raf = requestAnimationFrame(loop);
 }
 
+const TRAINING_STAT_KEYS = ["hp", "atk", "def", "spd"];
+const TRAINING_STAT_LABELS = { hp: "HP", atk: "ATK", def: "DEF", spd: "SPD" };
+
+function preferredTrainingStat(card) {
+  if (!card) return "atk";
+  const movement = MOVEMENT_BY_TYPE[card.type] || "walk";
+  if (movement === "fly" || movement === "glide" || card.type === "Wind") return "spd";
+  if (card.type === "Metal" || card.type === "Rock" || card.type === "Leaf") return "def";
+  if (card.type === "Electric" || card.type === "Fire" || card.type === "Cosmic") return "atk";
+  return "hp";
+}
+
+function launchTraining(site, champion) {
+  if (activeChallenge) return;
+  const card = cardsById.get(champion.cardId);
+  if (!card) return;
+
+  const challenge = document.createElement("div");
+  challenge.className = "catch-challenge training-challenge";
+  challenge.innerHTML = `
+    <div class="challenge-card" role="dialog" aria-modal="true" aria-label="Training arena">
+      <p class="eyebrow">Gym training</p>
+      <h3>Dodge drill — <span class="train-name">${escapeHtml(card.name)}</span></h3>
+      <div class="challenge-meta">
+        <span class="motion-tag">${escapeHtml(card.type)} • ${MOVEMENT_PROFILES[movementFor(card)].label}</span>
+        <span class="hits-meter"><span class="meta-label">HP</span><span class="train-hp"></span></span>
+        <span class="hits-meter"><span class="meta-label">Reps</span><span class="train-score">0</span></span>
+      </div>
+      <p class="train-help">Drag your Fokemon to dodge incoming trainer-balls. Survive as long as you can — each near-miss earns training reps. Boost stats when the drill ends.</p>
+      <div class="arena training-arena">
+        <canvas class="training-canvas" aria-label="Training arena"></canvas>
+      </div>
+      <p class="status" aria-live="polite">Drag your fighter. Avoid the balls!</p>
+      <div class="training-footer">
+        <button class="ghost cancel">Stop drill</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(challenge);
+  activeChallenge = challenge;
+
+  const canvas = challenge.querySelector(".training-canvas");
+  const arena = challenge.querySelector(".training-arena");
+  const status = challenge.querySelector(".status");
+  const cancel = challenge.querySelector(".cancel");
+  const scoreEl = challenge.querySelector(".train-score");
+  const hpEl = challenge.querySelector(".train-hp");
+
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const rect = arena.getBoundingClientRect();
+  const W = Math.max(320, Math.floor(rect.width));
+  const H = Math.max(280, Math.floor(rect.height));
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = `${W}px`;
+  canvas.style.height = `${H}px`;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+
+  const PLAYER_R = 26;
+  let hpMax = 3;
+  let hp = hpMax;
+  let score = 0;
+  let stopped = false;
+  let dragging = false;
+  let totalElapsed = 0;
+  let nextSpawnIn = 1.4;
+  let spawnInterval = 1.4;
+  let difficulty = 0;
+  let fokePos = { x: W / 2, y: H / 2 };
+  const balls = [];
+  const sparks = [];
+  const comicTexts = [];
+
+  function setHpText() {
+    if (hpEl) hpEl.textContent = `${hp}/${hpMax}`;
+  }
+  setHpText();
+
+  function popComic(text, x, y, color) {
+    comicTexts.push({ text, x, y, vy: -50 - Math.random() * 30, life: 0.9, maxLife: 0.9, color, rotation: (Math.random() - 0.5) * 0.4 });
+    if (comicTexts.length > 6) comicTexts.shift();
+  }
+  function popSparks(x, y, color) {
+    for (let i = 0; i < 8; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const v = 80 + Math.random() * 120;
+      sparks.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 0.6, maxLife: 0.6, color });
+    }
+  }
+
+  function getPointer(e) {
+    const r = canvas.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  function onDown(e) {
+    if (stopped) return;
+    const p = getPointer(e);
+    const dx = p.x - fokePos.x;
+    const dy = p.y - fokePos.y;
+    if (dx * dx + dy * dy < (PLAYER_R + 10) * (PLAYER_R + 10)) {
+      e.preventDefault();
+      canvas.setPointerCapture?.(e.pointerId);
+      dragging = true;
+    } else {
+      // Allow grabbing anywhere — pull fokemon toward pointer instead.
+      e.preventDefault();
+      canvas.setPointerCapture?.(e.pointerId);
+      dragging = true;
+      fokePos.x = clamp(p.x, PLAYER_R, W - PLAYER_R);
+      fokePos.y = clamp(p.y, PLAYER_R, H - PLAYER_R);
+    }
+  }
+  function onMove(e) {
+    if (!dragging || stopped) return;
+    e.preventDefault();
+    const p = getPointer(e);
+    fokePos.x = clamp(p.x, PLAYER_R, W - PLAYER_R);
+    fokePos.y = clamp(p.y, PLAYER_R, H - PLAYER_R);
+  }
+  function onUp() { dragging = false; }
+  canvas.addEventListener("pointerdown", onDown);
+  canvas.addEventListener("pointermove", onMove);
+  canvas.addEventListener("pointerup", onUp);
+  canvas.addEventListener("pointercancel", onUp);
+
+  function spawnBall(dt) {
+    nextSpawnIn -= dt;
+    if (nextSpawnIn > 0) return;
+    nextSpawnIn = spawnInterval;
+    const edge = Math.floor(Math.random() * 4);
+    let x, y;
+    if (edge === 0) { x = Math.random() * W; y = -20; }
+    else if (edge === 1) { x = W + 20; y = Math.random() * H; }
+    else if (edge === 2) { x = Math.random() * W; y = H + 20; }
+    else { x = -20; y = Math.random() * H; }
+    const targetJitterX = (Math.random() - 0.5) * 90;
+    const targetJitterY = (Math.random() - 0.5) * 90;
+    const tx = fokePos.x + targetJitterX;
+    const ty = fokePos.y + targetJitterY;
+    const dx = tx - x;
+    const dy = ty - y;
+    const dist = Math.hypot(dx, dy);
+    const speed = 230 + difficulty * 90 + Math.random() * 80;
+    balls.push({
+      x, y,
+      vx: (dx / dist) * speed,
+      vy: (dy / dist) * speed,
+      r: 11,
+      passed: false,
+      spin: Math.random() * Math.PI * 2,
+    });
+  }
+
+  function updateBalls(dt) {
+    for (const b of balls) {
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+      b.spin += dt * 8;
+      const dx = b.x - fokePos.x;
+      const dy = b.y - fokePos.y;
+      const dist = Math.hypot(dx, dy);
+      if (!b.passed && dist < PLAYER_R + b.r) {
+        b.dead = true;
+        b.passed = true;
+        hp -= 1;
+        setHpText();
+        popComic("HIT!", fokePos.x, fokePos.y - PLAYER_R - 8, "#ff8ca6");
+        popSparks(fokePos.x, fokePos.y, "#ff8ca6");
+        if (hp <= 0) endDrill("ko");
+      } else if (!b.passed && dist < PLAYER_R + 38 && (b.vx * dx + b.vy * dy) > 0) {
+        // ball just whizzed past
+        b.passed = true;
+        score += 1;
+        if (scoreEl) scoreEl.textContent = String(score);
+        if (score % 5 === 0) {
+          popComic("STREAK!", fokePos.x, fokePos.y - PLAYER_R - 4, "#ffe27a");
+        } else {
+          popComic("WHIFF!", b.x, b.y, "#7cf0c6");
+        }
+        popSparks(b.x, b.y, "#7cf0c6");
+      }
+    }
+    for (let i = balls.length - 1; i >= 0; i--) {
+      const b = balls[i];
+      if (b.dead || b.x < -60 || b.x > W + 60 || b.y < -60 || b.y > H + 60) balls.splice(i, 1);
+    }
+  }
+
+  function updateFx(dt) {
+    for (const s of sparks) {
+      s.life -= dt;
+      s.x += s.vx * dt;
+      s.y += s.vy * dt;
+      s.vx *= 0.94;
+      s.vy *= 0.94;
+    }
+    for (let i = sparks.length - 1; i >= 0; i--) if (sparks[i].life <= 0) sparks.splice(i, 1);
+    for (const t of comicTexts) {
+      t.life -= dt;
+      t.y += t.vy * dt;
+      t.vy *= 0.92;
+    }
+    for (let i = comicTexts.length - 1; i >= 0; i--) if (comicTexts[i].life <= 0) comicTexts.splice(i, 1);
+  }
+
+  function step(dt) {
+    if (stopped) return;
+    totalElapsed += dt;
+    difficulty = Math.min(2.4, totalElapsed / 18);
+    spawnInterval = Math.max(0.35, 1.35 - difficulty * 0.32);
+    spawnBall(dt);
+    updateBalls(dt);
+    updateFx(dt);
+  }
+
+  function drawBackground() {
+    ctx.fillStyle = "rgba(7, 11, 22, 0.6)";
+    ctx.fillRect(0, 0, W, H);
+    // floor grid lines for cartoon vibe
+    ctx.strokeStyle = "rgba(124, 240, 198, 0.08)";
+    ctx.lineWidth = 1;
+    for (let x = 0; x < W; x += 40) {
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+    }
+    for (let y = 0; y < H; y += 40) {
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+    }
+  }
+
+  function drawBall(b) {
+    ctx.save();
+    ctx.translate(b.x, b.y);
+    ctx.rotate(b.spin);
+    ctx.fillStyle = "#ff5d6e";
+    ctx.beginPath();
+    ctx.arc(0, 0, b.r, 0, Math.PI, true);
+    ctx.fill();
+    ctx.fillStyle = "#f5f7ff";
+    ctx.beginPath();
+    ctx.arc(0, 0, b.r, 0, Math.PI, false);
+    ctx.fill();
+    ctx.strokeStyle = "#0b1226";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(0, 0, b.r, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-b.r, 0); ctx.lineTo(b.r, 0); ctx.stroke();
+    ctx.fillStyle = "#f5f7ff";
+    ctx.beginPath(); ctx.arc(0, 0, 3.5, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "#0b1226"; ctx.beginPath(); ctx.arc(0, 0, 3.5, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawSparks() {
+    for (const s of sparks) {
+      const t = s.life / s.maxLife;
+      ctx.fillStyle = s.color;
+      ctx.globalAlpha = t;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, 2 + (1 - t) * 1.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawComicTexts() {
+    for (const t of comicTexts) {
+      const lifeT = t.life / t.maxLife;
+      let s = 1, alpha = 1;
+      if (lifeT > 0.85) { const k = (1 - lifeT) / 0.15; s = 0.5 + k * 0.7; alpha = k; }
+      else if (lifeT < 0.3) { alpha = lifeT / 0.3; }
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.translate(t.x, t.y);
+      ctx.rotate(t.rotation);
+      ctx.scale(s, s);
+      ctx.font = "900 22px 'Outfit', sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.lineJoin = "round";
+      ctx.lineWidth = 6;
+      ctx.strokeStyle = "rgba(7, 13, 28, 0.95)";
+      ctx.strokeText(t.text, 0, 0);
+      ctx.fillStyle = t.color;
+      ctx.fillText(t.text, 0, 0);
+      ctx.restore();
+    }
+  }
+
+  function drawPlayer() {
+    drawCreature(ctx, card, fokePos.x, fokePos.y, PLAYER_R);
+    // shadow
+    ctx.fillStyle = "rgba(7, 11, 22, 0.35)";
+    ctx.beginPath();
+    ctx.ellipse(fokePos.x, fokePos.y + PLAYER_R + 3, PLAYER_R * 0.7, PLAYER_R * 0.18, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    drawBackground();
+    drawSparks();
+    for (const b of balls) drawBall(b);
+    drawPlayer();
+    drawComicTexts();
+  }
+
+  let last = performance.now();
+  let raf = 0;
+  function loop(now) {
+    if (!document.body.contains(challenge)) return;
+    const dt = Math.min(0.04, (now - last) / 1000);
+    last = now;
+    step(dt);
+    draw();
+    raf = requestAnimationFrame(loop);
+  }
+
+  function endDrill(reason) {
+    if (stopped) return;
+    stopped = true;
+    cancelAnimationFrame(raf);
+    awardTraining(reason);
+  }
+
+  function awardTraining(reason) {
+    const remaining = totalBoostCapRemaining(champion.boosts);
+    const pref = preferredTrainingStat(card);
+    const breakdown = { hp: 0, atk: 0, def: 0, spd: 0 };
+    // 1 boost per ~3 reps, biased toward preferred stat
+    let earned = Math.min(remaining, Math.floor(score / 3));
+    if (reason === "stop" && score >= 6) earned = Math.max(earned, Math.floor(score / 4));
+    let pool = earned;
+    // 60% goes to preferred stat (until capped), rest distributed
+    const order = [pref, ...TRAINING_STAT_KEYS.filter((k) => k !== pref)];
+    for (const stat of order) {
+      const headroom = MAX_TRAINING_BOOST_PER_STAT - (champion.boosts[stat] || 0);
+      const share = stat === pref ? Math.ceil(pool * 0.6) : Math.ceil(pool * 0.15);
+      const give = Math.min(headroom, share, pool);
+      breakdown[stat] = give;
+      pool -= give;
+      if (pool <= 0) break;
+    }
+    if (pool > 0) {
+      // Spread leftovers wherever room exists.
+      for (const stat of TRAINING_STAT_KEYS) {
+        while (pool > 0 && champion.boosts[stat] + breakdown[stat] < MAX_TRAINING_BOOST_PER_STAT) {
+          breakdown[stat] += 1;
+          pool -= 1;
+        }
+        if (pool <= 0) break;
+      }
+    }
+
+    const updated = {
+      ...champion,
+      boosts: {
+        hp: clampBoost((champion.boosts.hp || 0) + breakdown.hp),
+        atk: clampBoost((champion.boosts.atk || 0) + breakdown.atk),
+        def: clampBoost((champion.boosts.def || 0) + breakdown.def),
+        spd: clampBoost((champion.boosts.spd || 0) + breakdown.spd),
+      },
+    };
+    championsBySite.set(site.id, updated);
+    publishChampion(site.id, updated);
+    renderMap();
+
+    const lines = TRAINING_STAT_KEYS
+      .filter((k) => breakdown[k] > 0)
+      .map((k) => `+${breakdown[k]} ${TRAINING_STAT_LABELS[k]}`)
+      .join(" • ");
+    const headline = reason === "ko"
+      ? `KO'd after ${score} reps`
+      : `Drill ended at ${score} reps`;
+    const summary = earned > 0
+      ? `${headline}. Boosts gained: ${lines}.`
+      : `${headline}. Need a few more reps for stat gains — try again!`;
+    status.innerHTML = `<span class="success">Training complete.</span> ${escapeHtml(summary)}`;
+    // swap stop button for return
+    cancel.textContent = "Back to gym";
+    cancel.onclick = () => {
+      challenge.remove();
+      activeChallenge = null;
+      document.removeEventListener("keydown", onKey);
+      openBattleSite(site);
+    };
+  }
+
+  function closeChallenge() {
+    if (!stopped) { endDrill("stop"); return; }
+    challenge.remove();
+    activeChallenge = null;
+    document.removeEventListener("keydown", onKey);
+  }
+
+  function onKey(ev) { if (ev.key === "Escape") closeChallenge(); }
+  document.addEventListener("keydown", onKey);
+  cancel.addEventListener("click", closeChallenge);
+  raf = requestAnimationFrame(loop);
+}
+
+const SKILL_NAMES_BY_TYPE = {
+  Electric: "Volt Surge",
+  Leaf: "Verdant Whip",
+  Water: "Tidal Slam",
+  Fire: "Ember Blast",
+  Shadow: "Umbral Lance",
+  Ice: "Frost Shard",
+  Wind: "Cyclone Cut",
+  Rock: "Boulder Drop",
+  Cosmic: "Star Lance",
+  Spirit: "Soul Drift",
+  Bug: "Buzz Sting",
+  Metal: "Iron Press",
+};
+
+function skillNameFor(card) {
+  return SKILL_NAMES_BY_TYPE[card?.type] || "Power Strike";
+}
+
+function launchBattle(site, challengerCard, championBefore) {
+  if (activeChallenge) return;
+  if (!challengerCard) return;
+  const champCard = cardsById.get(championBefore.cardId);
+  if (!champCard) return;
+
+  const attackerStats = effectiveStats(challengerCard, null);
+  const defenderStats = effectiveStats(champCard, championBefore);
+  const seed = seedFromStrings(
+    site.id,
+    profile?.name || "anon",
+    challengerCard.id,
+    championBefore.trainer,
+    championBefore.cardId,
+    String(championBefore.placedAt || 0),
+    String(championBefore.defenses || 0),
+    String(Date.now())
+  );
+  const result = simulateBattle({
+    attacker: { card: challengerCard, stats: attackerStats },
+    defender: { card: champCard, stats: defenderStats },
+    seed,
+  });
+
+  const challenge = document.createElement("div");
+  challenge.className = "catch-challenge battle-challenge";
+  challenge.innerHTML = `
+    <div class="challenge-card battle-card-wrap" role="dialog" aria-modal="true" aria-label="Battle">
+      <p class="eyebrow">Foké Battle</p>
+      <h3 class="battle-title">${escapeHtml(challengerCard.name)} vs ${escapeHtml(champCard.name)}</h3>
+      <div class="battle-roster">
+        <div class="roster-side challenger">
+          <p class="roster-label">Challenger • ${escapeHtml(profile?.name || "You")}</p>
+          <p class="roster-name">${escapeHtml(challengerCard.name)} <span class="type-pill" style="background:${colorsFor(challengerCard).accent};color:#061226;">${escapeHtml(challengerCard.type)}</span></p>
+          <div class="hp-bar"><div class="hp-fill challenger-hp" style="width:100%"></div></div>
+          <small class="hp-text challenger-hp-text">${attackerStats.hp} / ${attackerStats.hp}</small>
+        </div>
+        <span class="vs-pill">VS</span>
+        <div class="roster-side defender">
+          <p class="roster-label">Champion • ${escapeHtml(championBefore.trainer)}</p>
+          <p class="roster-name">${escapeHtml(champCard.name)} <span class="type-pill" style="background:${colorsFor(champCard).accent};color:#061226;">${escapeHtml(champCard.type)}</span></p>
+          <div class="hp-bar"><div class="hp-fill defender-hp" style="width:100%"></div></div>
+          <small class="hp-text defender-hp-text">${defenderStats.hp} / ${defenderStats.hp}</small>
+        </div>
+      </div>
+      <div class="arena battle-arena">
+        <canvas class="battle-canvas" aria-label="Battle stage"></canvas>
+      </div>
+      <p class="status battle-status" aria-live="polite">Combatants ready…</p>
+      <div class="training-footer">
+        <button class="ghost cancel">Forfeit</button>
+        <button class="primary battle-continue hidden">Continue</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(challenge);
+  activeChallenge = challenge;
+
+  const canvas = challenge.querySelector(".battle-canvas");
+  const arena = challenge.querySelector(".battle-arena");
+  const status = challenge.querySelector(".battle-status");
+  const cancel = challenge.querySelector(".cancel");
+  const continueBtn = challenge.querySelector(".battle-continue");
+  const challengerHpBar = challenge.querySelector(".challenger-hp");
+  const defenderHpBar = challenge.querySelector(".defender-hp");
+  const challengerHpText = challenge.querySelector(".challenger-hp-text");
+  const defenderHpText = challenge.querySelector(".defender-hp-text");
+
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const rect = arena.getBoundingClientRect();
+  const W = Math.max(360, Math.floor(rect.width));
+  const H = Math.max(280, Math.floor(rect.height));
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = `${W}px`;
+  canvas.style.height = `${H}px`;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+
+  const FLOOR_Y = H * 0.78;
+  const CHALLENGER_HOME = { x: W * 0.22, y: FLOOR_Y - 8 };
+  const DEFENDER_HOME = { x: W * 0.78, y: FLOOR_Y - 14 };
+  const BODY_R = Math.max(36, Math.min(56, W * 0.07));
+
+  const challenger = {
+    home: { ...CHALLENGER_HOME },
+    pos: { ...CHALLENGER_HOME },
+    card: challengerCard,
+    hpMax: attackerStats.hp,
+    hp: attackerStats.hp,
+    facing: 1,
+    flashTime: 0,
+    shakeTime: 0,
+    knockedOut: false,
+    bob: 0,
+  };
+  const defender = {
+    home: { ...DEFENDER_HOME },
+    pos: { ...DEFENDER_HOME },
+    card: champCard,
+    hpMax: defenderStats.hp,
+    hp: defenderStats.hp,
+    facing: -1,
+    flashTime: 0,
+    shakeTime: 0,
+    knockedOut: false,
+    bob: 0,
+  };
+
+  const projectiles = [];
+  const comicTexts = [];
+  const auras = [];
+  const sparks = [];
+  let screenShake = 0;
+  let flashWhole = 0;
+
+  function popComic(text, x, y, color, big = false) {
+    comicTexts.push({ text, x, y, vy: -55 - Math.random() * 25, life: big ? 1.4 : 1.0, maxLife: big ? 1.4 : 1.0, color, rotation: (Math.random() - 0.5) * 0.5, scaleBoost: big ? 1.6 : 1 });
+    if (comicTexts.length > 8) comicTexts.shift();
+  }
+  function popSparks(x, y, color, n = 10, speed = 160) {
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const v = speed * (0.5 + Math.random());
+      sparks.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 30, life: 0.6, maxLife: 0.6, color });
+    }
+  }
+
+  // Map a typed skill to a visual effect descriptor.
+  function makeSkillProjectile(fromSide, toSide, attackerCard) {
+    const from = fromSide.pos;
+    const to = toSide.pos;
+    const colors = colorsFor(attackerCard);
+    const type = attackerCard.type;
+    return {
+      kind: "skill",
+      type,
+      colors,
+      x: from.x + fromSide.facing * BODY_R * 0.5,
+      y: from.y - BODY_R * 0.4,
+      tx: to.x,
+      ty: to.y - BODY_R * 0.5,
+      t: 0,
+      dur: 0.55,
+      attacker: attackerCard,
+      done: false,
+      trail: [],
+    };
+  }
+  function makeAttackProjectile(fromSide, toSide, attackerCard) {
+    const from = fromSide.pos;
+    const to = toSide.pos;
+    const colors = colorsFor(attackerCard);
+    return {
+      kind: "attack",
+      type: attackerCard.type,
+      colors,
+      x: from.x + fromSide.facing * BODY_R * 0.5,
+      y: from.y - BODY_R * 0.4,
+      tx: to.x,
+      ty: to.y - BODY_R * 0.5,
+      t: 0,
+      dur: 0.38,
+      done: false,
+      trail: [],
+    };
+  }
+
+  function drawArc(proj) {
+    const t = proj.t / proj.dur;
+    const x = proj.x + (proj.tx - proj.x) * t;
+    const arcLift = -110 * Math.sin(Math.PI * t) * (proj.kind === "skill" ? 1 : 0.7);
+    const y = proj.y + (proj.ty - proj.y) * t + arcLift;
+    return { x, y, t };
+  }
+
+  function drawProjectile(proj) {
+    const { x, y, t } = drawArc(proj);
+    proj.trail.push({ x, y, life: 0.25 });
+    if (proj.trail.length > 16) proj.trail.shift();
+    for (let i = 0; i < proj.trail.length; i++) {
+      const tr = proj.trail[i];
+      tr.life -= 0.04;
+      const alpha = Math.max(0, tr.life / 0.25) * (i / proj.trail.length);
+      if (alpha <= 0) continue;
+      ctx.fillStyle = proj.colors.accent;
+      ctx.globalAlpha = alpha * 0.6;
+      ctx.beginPath();
+      ctx.arc(tr.x, tr.y, (proj.kind === "skill" ? 9 : 6) * (i / proj.trail.length), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    if (proj.kind === "skill") {
+      drawSkillVisual(proj.type, proj.colors, x, y, t);
+    } else {
+      drawAttackVisual(proj.colors, x, y, t);
+    }
+  }
+
+  function drawAttackVisual(colors, x, y, t) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(t * Math.PI * 4);
+    ctx.fillStyle = colors.light;
+    ctx.beginPath();
+    ctx.arc(0, 0, 9, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = colors.dark;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawSkillVisual(type, colors, x, y, t) {
+    ctx.save();
+    ctx.translate(x, y);
+    const pulse = 1 + Math.sin(t * Math.PI * 6) * 0.1;
+    if (type === "Electric") {
+      ctx.strokeStyle = colors.accent;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      let px = -16, py = -10;
+      ctx.moveTo(px, py);
+      for (let i = 0; i < 4; i++) {
+        px += 9 + Math.random() * 4;
+        py += (Math.random() - 0.5) * 14;
+        ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+      ctx.fillStyle = "#fff48a";
+      ctx.shadowColor = colors.accent;
+      ctx.shadowBlur = 12;
+      ctx.beginPath(); ctx.arc(0, 0, 8 * pulse, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowBlur = 0;
+    } else if (type === "Fire") {
+      const grad = ctx.createRadialGradient(0, 0, 4, 0, 0, 22);
+      grad.addColorStop(0, "#fff2a8");
+      grad.addColorStop(0.6, colors.accent);
+      grad.addColorStop(1, "rgba(255, 90, 20, 0)");
+      ctx.fillStyle = grad;
+      ctx.beginPath(); ctx.arc(0, 0, 22 * pulse, 0, Math.PI * 2); ctx.fill();
+      for (let i = 0; i < 5; i++) {
+        const ang = Math.random() * Math.PI * 2;
+        const r = 12 + Math.random() * 8;
+        ctx.fillStyle = "rgba(255, 200, 90, 0.7)";
+        ctx.beginPath();
+        ctx.arc(Math.cos(ang) * r, Math.sin(ang) * r, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    } else if (type === "Water" || type === "Ice") {
+      ctx.fillStyle = colors.accent;
+      for (let i = 0; i < 6; i++) {
+        const ang = (i / 6) * Math.PI * 2 + t * 4;
+        const r = 14 * pulse;
+        ctx.beginPath();
+        ctx.arc(Math.cos(ang) * r, Math.sin(ang) * r, 4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.fillStyle = colors.light;
+      ctx.beginPath(); ctx.arc(0, 0, 7 * pulse, 0, Math.PI * 2); ctx.fill();
+    } else if (type === "Leaf") {
+      ctx.fillStyle = colors.accent;
+      for (let i = 0; i < 6; i++) {
+        const ang = (i / 6) * Math.PI * 2 + t * 6;
+        ctx.save();
+        ctx.rotate(ang);
+        ctx.beginPath();
+        ctx.ellipse(14, 0, 8, 3, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    } else if (type === "Rock" || type === "Metal") {
+      ctx.fillStyle = colors.dark;
+      ctx.strokeStyle = "#0b1226";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      const sides = 7;
+      for (let i = 0; i < sides; i++) {
+        const ang = (i / sides) * Math.PI * 2 + t * 1.2;
+        const r = 14 + Math.sin(t * 8 + i) * 2;
+        const px = Math.cos(ang) * r;
+        const py = Math.sin(ang) * r;
+        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.fill(); ctx.stroke();
+    } else if (type === "Wind") {
+      ctx.strokeStyle = colors.accent;
+      ctx.lineWidth = 3;
+      for (let i = 0; i < 3; i++) {
+        ctx.beginPath();
+        const r = 8 + i * 6;
+        ctx.arc(0, 0, r, t * 4, t * 4 + Math.PI * 1.4);
+        ctx.stroke();
+      }
+    } else if (type === "Cosmic" || type === "Spirit" || type === "Shadow") {
+      const grad = ctx.createRadialGradient(0, 0, 2, 0, 0, 20);
+      grad.addColorStop(0, "#fff");
+      grad.addColorStop(0.4, colors.accent);
+      grad.addColorStop(1, "rgba(20, 0, 60, 0)");
+      ctx.fillStyle = grad;
+      ctx.beginPath(); ctx.arc(0, 0, 20 * pulse, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "#fff";
+      ctx.font = "900 18px 'Outfit', sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("★", 0, 0);
+    } else if (type === "Bug") {
+      ctx.fillStyle = colors.accent;
+      for (let i = 0; i < 5; i++) {
+        const ang = (i / 5) * Math.PI * 2 + t * 10;
+        ctx.beginPath();
+        ctx.arc(Math.cos(ang) * 9, Math.sin(ang) * 9, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.strokeStyle = colors.dark;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(0, 0, 12, 0, Math.PI * 2);
+      ctx.stroke();
+    } else {
+      ctx.fillStyle = colors.accent;
+      ctx.beginPath();
+      ctx.arc(0, 0, 12 * pulse, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawSideFokemon(side, dt) {
+    side.bob += dt;
+    let drawX = side.pos.x;
+    let drawY = side.pos.y - BODY_R - 4 + Math.sin(side.bob * 3) * 2.5;
+    if (side.shakeTime > 0) {
+      drawX += (Math.random() - 0.5) * 8;
+      drawY += (Math.random() - 0.5) * 4;
+    }
+    // shadow
+    ctx.fillStyle = "rgba(7, 11, 22, 0.45)";
+    ctx.beginPath();
+    ctx.ellipse(side.pos.x, side.pos.y + 4, BODY_R * 0.75, BODY_R * 0.18, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // KO fade
+    let alpha = 1;
+    if (side.knockedOut) {
+      const t = Math.min(1, side.koTime / 0.9);
+      alpha = 1 - t;
+      drawY += t * 24;
+    }
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    if (side.facing < 0) {
+      ctx.translate(drawX, drawY);
+      ctx.scale(-1, 1);
+      drawCreature(ctx, side.card, 0, 0, BODY_R);
+    } else {
+      drawCreature(ctx, side.card, drawX, drawY, BODY_R);
+    }
+    ctx.restore();
+    // Flash overlay
+    if (side.flashTime > 0) {
+      const t = side.flashTime / 0.35;
+      ctx.fillStyle = `rgba(255, 240, 200, ${t * 0.55})`;
+      ctx.beginPath();
+      ctx.arc(drawX, drawY, BODY_R * 1.1, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    if (side.shakeTime > 0) side.shakeTime = Math.max(0, side.shakeTime - dt);
+    if (side.flashTime > 0) side.flashTime = Math.max(0, side.flashTime - dt);
+  }
+
+  function drawBackground() {
+    const grad = ctx.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, "rgba(80, 70, 160, 0.4)");
+    grad.addColorStop(1, "rgba(7, 11, 22, 0.7)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+    // floor
+    const floorGrad = ctx.createLinearGradient(0, FLOOR_Y, 0, H);
+    floorGrad.addColorStop(0, "rgba(124, 240, 198, 0.25)");
+    floorGrad.addColorStop(1, "rgba(7, 11, 22, 0.85)");
+    ctx.fillStyle = floorGrad;
+    ctx.fillRect(0, FLOOR_Y, W, H - FLOOR_Y);
+    // floor stripe
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.18)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, FLOOR_Y);
+    ctx.lineTo(W, FLOOR_Y);
+    ctx.stroke();
+  }
+
+  function drawAuras(dt) {
+    for (const a of auras) {
+      a.t += dt;
+      const p = a.t / a.dur;
+      if (p >= 1) continue;
+      const r = a.r * (1 + p * 1.4);
+      ctx.strokeStyle = a.color;
+      ctx.globalAlpha = (1 - p) * 0.7;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(a.x, a.y, r, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    for (let i = auras.length - 1; i >= 0; i--) if (auras[i].t >= auras[i].dur) auras.splice(i, 1);
+  }
+
+  function drawSparksLayer(dt) {
+    for (const s of sparks) {
+      s.life -= dt;
+      s.x += s.vx * dt;
+      s.y += s.vy * dt;
+      s.vx *= 0.92;
+      s.vy *= 0.92;
+      s.vy += 360 * dt;
+    }
+    for (let i = sparks.length - 1; i >= 0; i--) if (sparks[i].life <= 0) sparks.splice(i, 1);
+    for (const s of sparks) {
+      const t = s.life / s.maxLife;
+      ctx.fillStyle = s.color;
+      ctx.globalAlpha = t;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, 2.4 + (1 - t) * 1.3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawComicTexts(dt) {
+    for (const t of comicTexts) {
+      t.life -= dt;
+      t.y += t.vy * dt;
+      t.vy *= 0.92;
+    }
+    for (let i = comicTexts.length - 1; i >= 0; i--) if (comicTexts[i].life <= 0) comicTexts.splice(i, 1);
+    for (const t of comicTexts) {
+      const lifeT = t.life / t.maxLife;
+      let s = 1, alpha = 1;
+      if (lifeT > 0.85) { const k = (1 - lifeT) / 0.15; s = 0.45 + k * 0.85; alpha = k; }
+      else if (lifeT < 0.3) { alpha = lifeT / 0.3; s = 1.05; }
+      else s = 1.1;
+      s *= t.scaleBoost || 1;
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, alpha);
+      ctx.translate(t.x, t.y);
+      ctx.rotate(t.rotation);
+      ctx.scale(s, s);
+      ctx.font = "900 22px 'Outfit', sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.lineJoin = "round";
+      ctx.lineWidth = 6;
+      ctx.strokeStyle = "rgba(7, 13, 28, 0.95)";
+      ctx.strokeText(t.text, 0, 0);
+      ctx.fillStyle = t.color;
+      ctx.fillText(t.text, 0, 0);
+      ctx.restore();
+    }
+  }
+
+  function drawAll(dt) {
+    ctx.save();
+    if (screenShake > 0) {
+      ctx.translate((Math.random() - 0.5) * screenShake * 10, (Math.random() - 0.5) * screenShake * 10);
+      screenShake = Math.max(0, screenShake - dt * 4);
+    }
+    drawBackground();
+    drawAuras(dt);
+    drawSideFokemon(challenger, dt);
+    drawSideFokemon(defender, dt);
+    for (const p of projectiles) {
+      p.t += dt;
+      drawProjectile(p);
+    }
+    drawSparksLayer(dt);
+    drawComicTexts(dt);
+    if (flashWhole > 0) {
+      ctx.fillStyle = `rgba(255, 255, 255, ${flashWhole})`;
+      ctx.fillRect(0, 0, W, H);
+      flashWhole = Math.max(0, flashWhole - dt * 3);
+    }
+    ctx.restore();
+  }
+
+  function setHpBar(side, kind) {
+    const pct = Math.max(0, (side.hp / side.hpMax) * 100);
+    const bar = kind === "challenger" ? challengerHpBar : defenderHpBar;
+    const txt = kind === "challenger" ? challengerHpText : defenderHpText;
+    if (bar) bar.style.width = `${pct}%`;
+    if (txt) txt.textContent = `${Math.max(0, Math.round(side.hp))} / ${side.hpMax}`;
+    if (bar) bar.classList.toggle("low", pct < 30);
+  }
+
+  function attackEntry(entry) {
+    const isAttackerChallenger = entry.attacker === "attacker";
+    const atkSide = isAttackerChallenger ? challenger : defender;
+    const defSide = isAttackerChallenger ? defender : challenger;
+    const atkCard = atkSide.card;
+
+    // wind-up: bounce attacker
+    const windup = 0.32;
+    const recoverAt = windup + (entry.move === "skill" ? 0.55 : 0.4);
+
+    return {
+      duration: recoverAt + 0.45,
+      atkSide,
+      defSide,
+      entry,
+      started: false,
+      projectileSpawned: false,
+      hit: false,
+    };
+  }
+
+  function ensureBodyAt(side, x, y) {
+    side.pos.x = x;
+    side.pos.y = y;
+  }
+
+  function applyHit(state) {
+    const { entry, defSide } = state;
+    const isAttackerChallenger = entry.attacker === "attacker";
+    const newHp = isAttackerChallenger ? result.log[state.idx].defenderHp : result.log[state.idx].defenderHp;
+    void newHp;
+    if (entry.dodged) {
+      defSide.shakeTime = 0.15;
+      popComic("MISS!", defSide.pos.x, defSide.pos.y - BODY_R - 16, "#cdd6f0");
+      return;
+    }
+    defSide.hp = entry.defenderHp;
+    defSide.flashTime = 0.35;
+    defSide.shakeTime = 0.32;
+    setHpBar(defSide, defSide === challenger ? "challenger" : "defender");
+    popSparks(defSide.pos.x, defSide.pos.y - BODY_R * 0.5, state.atkSide.card.type === "Fire" ? "#ffb185" : colorsFor(state.atkSide.card).accent, entry.crit ? 22 : 14);
+    const colors = colorsFor(state.atkSide.card);
+    auras.push({ x: defSide.pos.x, y: defSide.pos.y - BODY_R * 0.4, r: BODY_R * 0.9, dur: 0.45, t: 0, color: colors.accent });
+    const word = entry.move === "skill"
+      ? entry.crit ? "CRIT!" : "ZWAP!"
+      : entry.crit ? "CRIT!" : ["POW!", "BAM!", "ZAP!", "WHACK!"][Math.floor(Math.random() * 4)];
+    popComic(`${word} -${entry.damage}`, defSide.pos.x, defSide.pos.y - BODY_R - 20, entry.crit ? "#ffe27a" : "#ff8ca6", entry.crit);
+    if (entry.effective === "super") popComic("SUPER!", defSide.pos.x, defSide.pos.y - BODY_R - 44, "#7cf0c6");
+    if (entry.effective === "weak") popComic("weak…", defSide.pos.x, defSide.pos.y - BODY_R - 44, "#9fb0d9");
+    screenShake = entry.crit ? 0.9 : entry.move === "skill" ? 0.65 : 0.35;
+    if (entry.move === "skill") flashWhole = 0.35;
+    if (defSide.hp <= 0) {
+      defSide.knockedOut = true;
+      defSide.koTime = 0;
+      popComic("K.O.!", defSide.pos.x, defSide.pos.y - BODY_R - 50, "#ffd166", true);
+      screenShake = 1.1;
+    }
+  }
+
+  let queue = [];
+  result.log.forEach((entry, idx) => {
+    const state = attackEntry(entry);
+    state.idx = idx;
+    queue.push(state);
+  });
+
+  let current = null;
+  let phaseT = 0;
+  let raf = 0;
+  let last = performance.now();
+  let battleOver = false;
+
+  function advance() {
+    current = queue.shift() || null;
+    phaseT = 0;
+    if (current) {
+      const moveLabel = current.entry.move === "skill" ? skillNameFor(current.atkSide.card) : "Quick Strike";
+      const who = current.entry.attacker === "attacker" ? challengerCard.name : champCard.name;
+      const effectivenessNote = current.entry.dodged
+        ? " — but it missed!"
+        : current.entry.effective === "super" ? " — super effective!"
+        : current.entry.effective === "weak" ? " — not very effective."
+        : "";
+      status.innerHTML = `<strong>${escapeHtml(who)}</strong> used <em>${escapeHtml(moveLabel)}</em>${escapeHtml(effectivenessNote)}`;
+    } else if (!battleOver) {
+      finishBattle();
+    }
+  }
+
+  function tickPhase(dt) {
+    if (!current) return;
+    phaseT += dt;
+    const entry = current.entry;
+    const atkHome = current.atkSide === challenger ? CHALLENGER_HOME : DEFENDER_HOME;
+
+    // wind-up: lunge slightly forward
+    const lunge = Math.min(1, phaseT / 0.22);
+    const lungeOffset = current.atkSide.facing * 18 * lunge * (1 - lunge);
+    ensureBodyAt(current.atkSide, atkHome.x + lungeOffset, atkHome.y);
+
+    if (!current.projectileSpawned && phaseT >= 0.22) {
+      current.projectileSpawned = true;
+      const proj = entry.move === "skill"
+        ? makeSkillProjectile(current.atkSide, current.defSide, current.atkSide.card)
+        : makeAttackProjectile(current.atkSide, current.defSide, current.atkSide.card);
+      proj.onHit = () => {
+        if (current.hit) return;
+        current.hit = true;
+        applyHit(current);
+      };
+      projectiles.push(proj);
+    }
+
+    // hand off when this turn's projectile is done and a small recovery delay passes
+    if (current.hit && phaseT >= 0.22 + 0.55 + 0.35) {
+      // small pause before next turn
+      if (current.defSide.knockedOut && current.defSide.koTime > 0.8) {
+        battleOver = true;
+        current = null;
+        finishBattle();
+        return;
+      }
+      advance();
+    }
+  }
+
+  function tickProjectiles(dt) {
+    for (const p of projectiles) {
+      if (p.done) continue;
+      if (p.t >= p.dur && !p.exploded) {
+        p.exploded = true;
+        p.done = true;
+        if (typeof p.onHit === "function") p.onHit();
+      }
+    }
+    for (let i = projectiles.length - 1; i >= 0; i--) {
+      if (projectiles[i].done && projectiles[i].t > projectiles[i].dur + 0.2) projectiles.splice(i, 1);
+    }
+  }
+
+  function finishBattle() {
+    if (current) return;
+    // resolve outcome
+    const challengerWon = result.winner === "attacker";
+    let summary;
+    let winnerName;
+    if (challengerWon) {
+      winnerName = profile?.name || "Challenger";
+      const placedAt = Date.now();
+      const newChampion = {
+        trainer: profile.name,
+        team: profile.team || "mint",
+        cardId: challengerCard.id,
+        boosts: { hp: 0, atk: 0, def: 0, spd: 0 },
+        defenses: 0,
+        placedAt,
+        lastBattleAt: placedAt,
+      };
+      championsBySite.set(site.id, newChampion);
+      publishChampion(site.id, newChampion);
+      summary = `${escapeHtml(challengerCard.name)} dethroned ${escapeHtml(champCard.name)}. ${escapeHtml(profile?.name || "")} is the new champion of ${escapeHtml(battleSiteName(site.id))}!`;
+    } else {
+      winnerName = championBefore.trainer;
+      const updated = {
+        ...championBefore,
+        defenses: (championBefore.defenses || 0) + 1,
+        lastBattleAt: Date.now(),
+      };
+      // If defending pushes them past the cap, the next champion poll will retire them.
+      championsBySite.set(site.id, updated);
+      publishChampion(site.id, updated);
+      summary = `${escapeHtml(champCard.name)} held their ground. ${escapeHtml(championBefore.trainer)} keeps ${escapeHtml(battleSiteName(site.id))} (defenses: ${updated.defenses}/${MAX_CHAMPION_DEFENSES}).`;
+    }
+    publishBattleEvent({
+      ts: Date.now(),
+      site: site.id,
+      siteName: battleSiteName(site.id),
+      challenger: profile?.name || "anon",
+      challengerCard: challengerCard.name,
+      defender: championBefore.trainer,
+      defenderCard: champCard.name,
+      winner: winnerName,
+      challengerWon,
+    });
+    renderMap();
+    status.innerHTML = `<span class="${challengerWon ? "success" : "fail"}">${challengerWon ? "Victory!" : "Defeat!"}</span> ${summary}`;
+    cancel.classList.add("hidden");
+    continueBtn.classList.remove("hidden");
+    continueBtn.addEventListener("click", () => {
+      challenge.remove();
+      activeChallenge = null;
+      document.removeEventListener("keydown", onKey);
+    });
+  }
+
+  function loop(now) {
+    if (!document.body.contains(challenge)) return;
+    const dt = Math.min(0.04, (now - last) / 1000);
+    last = now;
+    if (challenger.knockedOut) challenger.koTime = (challenger.koTime || 0) + dt;
+    if (defender.knockedOut) defender.koTime = (defender.koTime || 0) + dt;
+    tickProjectiles(dt);
+    tickPhase(dt);
+    drawAll(dt);
+    raf = requestAnimationFrame(loop);
+  }
+
+  function closeChallenge() {
+    cancelAnimationFrame(raf);
+    challenge.remove();
+    activeChallenge = null;
+    document.removeEventListener("keydown", onKey);
+  }
+  function onKey(ev) { if (ev.key === "Escape") closeChallenge(); }
+  document.addEventListener("keydown", onKey);
+  cancel.addEventListener("click", closeChallenge);
+
+  // intro pause then kick off
+  setHpBar(challenger, "challenger");
+  setHpBar(defender, "defender");
+  setTimeout(advance, 600);
+  raf = requestAnimationFrame(loop);
+}
+
 function updateLocationStatus(text, kind = "") {
   if (el.locationStatus) {
     el.locationStatus.textContent = text;
@@ -2406,6 +3877,94 @@ function connectGridCaught() {
   });
 }
 
+function normalizeChampion(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  if (!raw.cardId || !raw.trainer || !raw.placedAt) return null;
+  const champ = {
+    trainer: String(raw.trainer),
+    team: raw.team || "mint",
+    cardId: String(raw.cardId),
+    boosts: {
+      hp: clampBoost(raw?.boosts?.hp ?? 0),
+      atk: clampBoost(raw?.boosts?.atk ?? 0),
+      def: clampBoost(raw?.boosts?.def ?? 0),
+      spd: clampBoost(raw?.boosts?.spd ?? 0),
+    },
+    defenses: Math.max(0, Math.min(MAX_CHAMPION_DEFENSES, Number(raw.defenses) || 0)),
+    placedAt: Number(raw.placedAt) || Date.now(),
+    lastBattleAt: Number(raw.lastBattleAt) || 0,
+  };
+  if (!cardsById.has(champ.cardId)) return null;
+  return champ;
+}
+
+function subscribeChampionUpdates() {
+  if (!battleSitesNode) return;
+  const wanted = new Set(currentBattleSites.map((s) => s.id));
+  for (const id of subscribedChampionSites) {
+    if (!wanted.has(id)) {
+      try { battleSitesNode.get(id).off(); } catch {}
+      subscribedChampionSites.delete(id);
+      championsBySite.delete(id);
+    }
+  }
+  currentBattleSites.forEach((site) => {
+    if (subscribedChampionSites.has(site.id)) return;
+    subscribedChampionSites.add(site.id);
+    battleSitesNode.get(site.id).on((raw) => {
+      const champ = normalizeChampion(raw);
+      if (!champ) {
+        if (championsBySite.has(site.id)) {
+          championsBySite.delete(site.id);
+          renderMap();
+          refreshOpenSitePanel(site.id);
+        }
+        return;
+      }
+      if (isChampionRetired(champ)) {
+        championsBySite.delete(site.id);
+        // Auto-clear stale champion record so the site re-opens.
+        try { battleSitesNode.get(site.id).put(null); } catch {}
+        renderMap();
+        refreshOpenSitePanel(site.id);
+        return;
+      }
+      const existing = championsBySite.get(site.id);
+      const sig = JSON.stringify(champ);
+      const existingSig = existing ? JSON.stringify(existing) : "";
+      if (sig === existingSig) return;
+      championsBySite.set(site.id, champ);
+      renderMap();
+      refreshOpenSitePanel(site.id);
+    });
+  });
+}
+
+function publishChampion(siteId, champion) {
+  if (!battleSitesNode) return;
+  try {
+    battleSitesNode.get(siteId).put({
+      trainer: champion.trainer,
+      team: champion.team,
+      cardId: champion.cardId,
+      boosts: { ...champion.boosts },
+      defenses: champion.defenses,
+      placedAt: champion.placedAt,
+      lastBattleAt: champion.lastBattleAt || 0,
+    });
+  } catch {}
+}
+
+function publishChampionRemoved(siteId) {
+  if (!battleSitesNode) return;
+  try { battleSitesNode.get(siteId).put(null); } catch {}
+}
+
+function publishBattleEvent(event) {
+  if (!battleEventsNode) return;
+  try { battleEventsNode.set(event); } catch {}
+}
+
 function initGun() {
   if (typeof window === "undefined" || typeof window.Gun !== "function") return;
   try {
@@ -2413,8 +3972,11 @@ function initGun() {
     const root = gun.get("fokemon");
     eventsNode = root.get("events");
     gridCaughtNode = root.get("caughtByGrid");
+    battleSitesNode = root.get("battleSites");
+    battleEventsNode = root.get("battleEvents");
     connectFeed();
     connectGridCaught();
+    subscribeChampionUpdates();
   } catch {
     eventsNode = FALLBACK_EVENTS_NODE;
   }

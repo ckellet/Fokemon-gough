@@ -26,6 +26,14 @@ Then open `http://localhost:8080`.
 
 Workflow file: `.github/workflows/deploy-pages.yml`.
 
+## Battle sites (Foké Gyms)
+- Deterministic battle sites scatter the world alongside POIs (see `computeBattleSitePlacements`).
+- Players within ~100 m can interact: deploy a champion at a vacant site, train an owned champion, or challenge a rival.
+- Champions sync through the same public GUN store under `fokemon/battleSites/<siteId>`.
+- Training is a dodge mini-game — survive incoming trainer-balls to earn boosts up to `MAX_TRAINING_BOOST_PER_STAT` per stat.
+- Battles resolve via the deterministic `simulateBattle` simulator that respects HP/ATK/DEF/SPD plus a type-effectiveness matrix, animated turn-by-turn with type-specific skills, comic-text hits, and KO effects.
+- Run-away protection: each successful defense increments fatigue, and champions auto-retire after `MAX_CHAMPION_DEFENSES` wins or `CHAMPION_TTL_MS` (24h).
+
 ## Map and spawn system
 - The map is rendered with Leaflet (CDN with SRI) and OpenStreetMap tiles.
 - Fokemon spawn locations are deterministic per `(grid cell, time bucket)` — every trainer in the same ~111 m cell sees the same Fokemon in the same world coordinates.
