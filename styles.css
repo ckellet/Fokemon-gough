@@ -871,6 +871,45 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
 .training-footer .battle-continue.hidden,
 .training-footer button.hidden { display: none; }
 
+/* ---------- Debug location chip + dialog ---------- */
+.debug-loc-chip {
+  position: fixed;
+  bottom: 1rem;
+  left: 1rem;
+  z-index: 30;
+  padding: .45rem .8rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 220, 130, .6);
+  background: linear-gradient(90deg, rgba(255, 200, 90, .25), rgba(255, 90, 130, .25));
+  color: #ffe27a;
+  font-weight: 800;
+  letter-spacing: .04em;
+  font-size: .72rem;
+  cursor: pointer;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, .35);
+  font-family: inherit;
+}
+.debug-loc-chip:hover { transform: translateY(-1px); }
+.debug-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .35rem;
+  justify-content: center;
+  margin-top: .35rem;
+}
+.debug-presets button { padding: .35rem .65rem; font-size: .72rem; }
+.debug-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: .45rem;
+  margin-top: .55rem;
+}
+.debug-actions .dbg-apply {
+  background: linear-gradient(90deg, #6df0c4, #4bb7ff);
+  color: #031423;
+  font-weight: 800;
+}
+
 @media (max-width: 1024px) {
   .app-shell { padding: 1.25rem; }
   .card { padding: 1.5rem; }

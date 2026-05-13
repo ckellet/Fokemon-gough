@@ -3789,6 +3789,12 @@ function onPositionError(err) {
 }
 
 function startLocationTracking() {
+  if (debugLocation) {
+    hideLocationModal();
+    onPositionUpdate({ coords: { latitude: debugLocation.lat, longitude: debugLocation.lng } });
+    updateLocationStatus(`Debug • ${debugLocation.lat.toFixed(5)}, ${debugLocation.lng.toFixed(5)}`, "live");
+    return;
+  }
   if (typeof navigator === "undefined" || !navigator.geolocation) {
     updateLocationStatus("Geolocation unavailable", "error");
     setModalHelp("Your browser doesn't support geolocation.", "error");
@@ -3805,7 +3811,147 @@ function startLocationTracking() {
   );
 }
 
+let debugLocation = safeStorageGet("fokemon_debug_location", null);
+function isValidLatLng(v) {
+  return v && Number.isFinite(v.lat) && Number.isFinite(v.lng) && Math.abs(v.lat) <= 90 && Math.abs(v.lng) <= 180;
+}
+if (!isValidLatLng(debugLocation)) debugLocation = null;
+
+function persistDebugLocation() {
+  try {
+    if (debugLocation) localStorage.setItem("fokemon_debug_location", JSON.stringify(debugLocation));
+    else localStorage.removeItem("fokemon_debug_location");
+  } catch {}
+}
+
+function applyDebugLocation(loc) {
+  if (!isValidLatLng(loc)) return;
+  debugLocation = { lat: loc.lat, lng: loc.lng };
+  persistDebugLocation();
+  if (typeof navigator !== "undefined" && navigator.geolocation && watchId !== null) {
+    try { navigator.geolocation.clearWatch(watchId); } catch {}
+    watchId = null;
+  }
+  onPositionUpdate({ coords: { latitude: loc.lat, longitude: loc.lng } });
+  updateLocationStatus(`Debug • ${loc.lat.toFixed(5)}, ${loc.lng.toFixed(5)}`, "live");
+  renderDebugChip();
+}
+
+function clearDebugLocation() {
+  debugLocation = null;
+  persistDebugLocation();
+  renderDebugChip();
+  if (typeof navigator !== "undefined" && navigator.geolocation && locationGranted) {
+    startLocationTracking();
+  }
+}
+
+function renderDebugChip() {
+  if (typeof document === "undefined") return;
+  let chip = document.getElementById("debugLocChip");
+  if (!debugLocation) {
+    chip?.remove();
+    return;
+  }
+  if (!chip) {
+    chip = document.createElement("button");
+    chip.id = "debugLocChip";
+    chip.className = "debug-loc-chip";
+    chip.type = "button";
+    chip.title = "Debug location active — click to clear";
+    chip.addEventListener("click", clearDebugLocation);
+    document.body.appendChild(chip);
+  }
+  chip.textContent = `🐛 DEBUG LOC ${debugLocation.lat.toFixed(4)}, ${debugLocation.lng.toFixed(4)}`;
+}
+
+function openDebugLocationDialog() {
+  if (document.getElementById("debugLocDialog")) return;
+  const overlay = document.createElement("div");
+  overlay.id = "debugLocDialog";
+  overlay.className = "modal";
+  const current = debugLocation || playerLocation || { lat: 0, lng: 0 };
+  overlay.innerHTML = `
+    <div class="modal-card">
+      <p class="eyebrow">Debug tools</p>
+      <h2>Override location</h2>
+      <p>Pin yourself to any coordinates for testing. Geolocation is suppressed until you clear it.</p>
+      <label style="text-align:left;">Latitude
+        <input id="dbgLat" type="number" step="0.0001" value="${current.lat || 0}" />
+      </label>
+      <label style="text-align:left;">Longitude
+        <input id="dbgLng" type="number" step="0.0001" value="${current.lng || 0}" />
+      </label>
+      <div class="debug-presets">
+        <button type="button" class="ghost" data-lat="51.5074" data-lng="-0.1278">London</button>
+        <button type="button" class="ghost" data-lat="40.7589" data-lng="-73.9851">NYC</button>
+        <button type="button" class="ghost" data-lat="35.6762" data-lng="139.6503">Tokyo</button>
+        <button type="button" class="ghost" data-lat="37.7749" data-lng="-122.4194">SF</button>
+      </div>
+      <div class="debug-actions">
+        <button type="button" class="ghost dbg-cancel">Cancel</button>
+        ${debugLocation ? `<button type="button" class="ghost dbg-clear">Clear override</button>` : ""}
+        <button type="button" class="dbg-apply">Apply</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  const latInput = overlay.querySelector("#dbgLat");
+  const lngInput = overlay.querySelector("#dbgLng");
+  function close() {
+    overlay.remove();
+    document.removeEventListener("keydown", onKey);
+  }
+  function onKey(ev) { if (ev.key === "Escape") close(); }
+  document.addEventListener("keydown", onKey);
+  overlay.addEventListener("click", (ev) => { if (ev.target === overlay) close(); });
+  overlay.querySelectorAll(".debug-presets button").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      latInput.value = btn.dataset.lat;
+      lngInput.value = btn.dataset.lng;
+    });
+  });
+  overlay.querySelector(".dbg-cancel").addEventListener("click", close);
+  overlay.querySelector(".dbg-clear")?.addEventListener("click", () => {
+    clearDebugLocation();
+    close();
+  });
+  overlay.querySelector(".dbg-apply").addEventListener("click", () => {
+    const lat = Number(latInput.value);
+    const lng = Number(lngInput.value);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return;
+    applyDebugLocation({ lat, lng });
+    close();
+  });
+}
+
+if (typeof window !== "undefined") {
+  window.fokeDebug = {
+    setLocation(lat, lng) { applyDebugLocation({ lat, lng }); return debugLocation; },
+    clearLocation() { clearDebugLocation(); return null; },
+    getLocation() { return debugLocation; },
+    open() { openDebugLocationDialog(); },
+  };
+}
+
+if (typeof document !== "undefined") {
+  document.addEventListener("keydown", (ev) => {
+    const meta = ev.ctrlKey || ev.metaKey;
+    if (meta && ev.shiftKey && (ev.key === "L" || ev.key === "l")) {
+      ev.preventDefault();
+      openDebugLocationDialog();
+    }
+  });
+}
+
 async function bootstrapLocation() {
+  if (debugLocation) {
+    hideLocationModal();
+    onPositionUpdate({ coords: { latitude: debugLocation.lat, longitude: debugLocation.lng } });
+    updateLocationStatus(`Debug • ${debugLocation.lat.toFixed(5)}, ${debugLocation.lng.toFixed(5)}`, "live");
+    renderDebugChip();
+    return;
+  }
   if (typeof navigator === "undefined" || !navigator.geolocation) {
     updateLocationStatus("Geolocation unavailable", "error");
     showLocationModal("Your browser doesn't support geolocation.");
@@ -3999,6 +4145,7 @@ function enterGame() {
   renderCollection();
   connectFeed();
   updateBucketLabel();
+  renderDebugChip();
   bootstrapLocation();
 }
 

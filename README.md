@@ -45,6 +45,11 @@ Workflow file: `.github/workflows/deploy-pages.yml`.
 - Public relays (`relay.peer.ooo`, `gun.o8.is`) are still used for transport; if both are down the app degrades to solo mode without errors.
 - Because this is public infrastructure, do not store private or sensitive data.
 
+## Debug tools
+- Press **Ctrl/Cmd + Shift + L** to open the "Override location" dialog and pin yourself to any coordinates (handy for testing battle sites without walking around). Presets for London, NYC, Tokyo, and SF are included.
+- The override persists in `localStorage` (`fokemon_debug_location`) and is shown via a 🐛 DEBUG LOC chip in the bottom-left corner — click the chip to clear it.
+- From the browser console: `fokeDebug.setLocation(lat, lng)`, `fokeDebug.clearLocation()`, `fokeDebug.open()`.
+
 ## Tests
 ```bash
 node --test
