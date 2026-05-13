@@ -3,6 +3,7 @@ import {
   computeSpawnPlacements,
   computeBattleSitePlacements,
   battleSiteName,
+  siteTheme,
   effectiveStats,
   isChampionRetired,
   simulateBattle,
@@ -27,6 +28,10 @@ const POI_RANGE_METERS = CATCH_RANGE_METERS;
 const BATTLE_SITE_RANGE_METERS = 100;
 const STARTING_FOKEBALLS = 5;
 const MAX_POI_REWARD = 8;
+// Below this zoom level the map shows only the world + player marker — too many
+// entities to draw otherwise. 15 is street-level (a few hundred meters across).
+const NEARBY_ZOOM_THRESHOLD = 15;
+const RECENTER_ZOOM = 18;
 const GUN_PEERS = ["https://relay.peer.ooo/gun", "https://gun.o8.is/gun"];
 
 const FALLBACK_EVENTS_NODE = {
@@ -196,6 +201,8 @@ const el = {
   nearbyMap: $("nearbyMap"),
   mapHint: $("mapHint"),
   mapBucket: $("mapBucket"),
+  recenterBtn: $("recenterBtn"),
+  mapFarHint: $("mapFarHint"),
   enableLocation: $("enableLocation"),
   locationStatus: $("locationStatus"),
   feedList: $("feedList"),
@@ -311,7 +318,8 @@ function ensureMap() {
     zoomControl: true,
     attributionControl: true,
     worldCopyJump: true,
-    scrollWheelZoom: false,
+    scrollWheelZoom: true,
+    minZoom: 2,
   }).setView([0, 0], 2);
 
   L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -319,9 +327,36 @@ function ensureMap() {
     attribution: "&copy; OpenStreetMap contributors",
   }).addTo(leafletMap);
 
+  // Recompute placements + redraw when the user pans or zooms — this is how
+  // exploration shows POIs/battle sites for whatever area is in view.
+  leafletMap.on("moveend zoomend", () => {
+    ensureFreshPlacements();
+    renderMap();
+  });
+
+  if (el.recenterBtn) {
+    el.recenterBtn.addEventListener("click", recenterOnPlayer);
+  }
+
   el.nearbyMap.classList.add("leaflet-active");
   requestAnimationFrame(() => leafletMap?.invalidateSize());
   return leafletMap;
+}
+
+function recenterOnPlayer() {
+  if (!leafletMap || !playerLocation) return;
+  leafletMap.flyTo([playerLocation.lat, playerLocation.lng], RECENTER_ZOOM, { duration: 0.7 });
+}
+
+function mapAnchor() {
+  // Anchor used to compute which POIs / battle sites to render. When the user
+  // pans away while zoomed in, the anchor follows the viewport so they can see
+  // content in whatever area they're exploring. Falls back to the player.
+  if (leafletMap && leafletMap.getZoom() >= NEARBY_ZOOM_THRESHOLD) {
+    const c = leafletMap.getCenter();
+    return { lat: c.lat, lng: c.lng };
+  }
+  return playerLocation;
 }
 
 function placementsKey(lat, lon, bucket) {
@@ -351,18 +386,22 @@ function ensureFreshPlacements() {
     currentPlacementsKey = key;
   }
 
-  const gridKey = getGridKey(playerLocation.lat, playerLocation.lng);
-  if (gridKey !== currentPoisCellKey) {
-    currentPois = computePoiPlacements(playerLocation.lat, playerLocation.lng, {
+  // POIs and battle sites follow the map's viewport center when zoomed in, so
+  // exploration reveals locations elsewhere. Spawn Fokemon stay anchored to the
+  // player's cell since they're explicitly "wild around you".
+  const anchor = mapAnchor() || playerLocation;
+  const anchorGridKey = getGridKey(anchor.lat, anchor.lng);
+  if (anchorGridKey !== currentPoisCellKey) {
+    currentPois = computePoiPlacements(anchor.lat, anchor.lng, {
       neighborhoodCells: 1,
     });
-    currentPoisCellKey = gridKey;
+    currentPoisCellKey = anchorGridKey;
   }
-  if (gridKey !== currentBattleSitesCellKey) {
-    currentBattleSites = computeBattleSitePlacements(playerLocation.lat, playerLocation.lng, {
+  if (anchorGridKey !== currentBattleSitesCellKey) {
+    currentBattleSites = computeBattleSitePlacements(anchor.lat, anchor.lng, {
       neighborhoodCells: 2,
     });
-    currentBattleSitesCellKey = gridKey;
+    currentBattleSitesCellKey = anchorGridKey;
     subscribeChampionUpdates();
   }
 }
@@ -659,26 +698,28 @@ function siteIconSignature(site) {
 function makeBattleSiteIcon(site, info) {
   const L = window.L;
   const name = battleSiteName(site.id);
+  const theme = siteTheme(site.id);
   const champion = info.champion;
-  let label;
-  if (champion) {
-    const card = cardsById.get(champion.cardId);
-    label = card ? `${card.name}` : "Champion";
-  } else {
-    label = "Vacant";
-  }
-  const ring = champion ? colorsFor(cardsById.get(champion.cardId) || { type: "Metal" }).accent : "#9aaabd";
+  const label = champion
+    ? (cardsById.get(champion.cardId)?.name || "Champion")
+    : theme.tag;
   return L.divIcon({
     className: "",
     html: `
-      <div class="battle-site-marker ${info.status} ${info.near ? "near" : ""}" style="--ring:${ring}">
+      <div
+        class="battle-site-marker ${info.status} ${info.near ? "near" : ""}"
+        style="--ring:${theme.color};--ring-accent:${theme.accent};"
+      >
         <span class="bs-banner">${escapeHtml(name)}</span>
-        <span class="bs-medal"><span class="bs-medal-inner">⚔</span></span>
+        <span class="bs-medal">
+          <span class="bs-medal-glyph" aria-hidden="true">${theme.glyph}</span>
+          ${champion ? `<span class="bs-medal-crossed" aria-hidden="true">⚔</span>` : ""}
+        </span>
         <small>${escapeHtml(label)}</small>
       </div>
     `,
-    iconSize: [86, 80],
-    iconAnchor: [43, 80],
+    iconSize: [86, 84],
+    iconAnchor: [43, 84],
   });
 }
 
@@ -704,6 +745,7 @@ function renderMap() {
       catchCircle.remove();
       catchCircle = null;
     }
+    updateRecenterButton();
     return;
   }
 
@@ -717,27 +759,38 @@ function renderMap() {
   const center = [playerLocation.lat, playerLocation.lng];
   if (!playerMarker) {
     playerMarker = L.marker(center, { icon: makePlayerIcon("YOU"), zIndexOffset: 1000 }).addTo(map);
-    map.setView(center, 18);
+    map.setView(center, RECENTER_ZOOM);
   } else {
     playerMarker.setLatLng(center);
   }
 
-  if (!catchCircle) {
-    catchCircle = L.circle(center, {
-      radius: CATCH_RANGE_METERS,
-      className: "catch-ring",
-      color: "#7cf0c6",
-      weight: 1,
-      opacity: 0.65,
-      fillColor: "#7cf0c6",
-      fillOpacity: 0.08,
-    }).addTo(map);
-  } else {
-    catchCircle.setLatLng(center);
+  // Below the threshold the map is in "world exploration" mode — only the
+  // player marker is shown so the viewer can scroll across a non-cluttered map.
+  const showNearby = map.getZoom() >= NEARBY_ZOOM_THRESHOLD;
+
+  if (showNearby) {
+    if (!catchCircle) {
+      catchCircle = L.circle(center, {
+        radius: CATCH_RANGE_METERS,
+        className: "catch-ring",
+        color: "#7cf0c6",
+        weight: 1,
+        opacity: 0.65,
+        fillColor: "#7cf0c6",
+        fillOpacity: 0.08,
+      }).addTo(map);
+    } else {
+      catchCircle.setLatLng(center);
+    }
+  } else if (catchCircle) {
+    catchCircle.remove();
+    catchCircle = null;
   }
 
   const wantedKeys = new Set();
-  const visiblePlacements = currentPlacements.filter((p) => !gridCaughtIds.has(p.card.id));
+  const visiblePlacements = showNearby
+    ? currentPlacements.filter((p) => !gridCaughtIds.has(p.card.id))
+    : [];
   visiblePlacements.forEach((p) => {
     const key = `${currentPlacementsKey}|${p.card.id}`;
     wantedKeys.add(key);
@@ -767,7 +820,8 @@ function renderMap() {
   }
 
   const wantedSiteKeys = new Set();
-  currentBattleSites.forEach((site) => {
+  const visibleSites = showNearby ? currentBattleSites : [];
+  visibleSites.forEach((site) => {
     wantedSiteKeys.add(site.id);
     const info = siteIconSignature(site);
     let marker = battleSiteMarkers.get(site.id);
@@ -796,7 +850,8 @@ function renderMap() {
   }
 
   const wantedPoiKeys = new Set();
-  currentPois.forEach((poi) => {
+  const visiblePois = showNearby ? currentPois : [];
+  visiblePois.forEach((poi) => {
     wantedPoiKeys.add(poi.id);
     const info = poiIconSignature(poi);
     let marker = poiMarkers.get(poi.id);
@@ -829,16 +884,18 @@ function renderMap() {
   }
 
   const seenTrainers = new Set();
-  for (const [name, pos] of trainerLocations) {
-    if (name === profile?.name) continue;
-    if (Date.now() - pos.ts > 30 * 60 * 1000) continue;
-    seenTrainers.add(name);
-    let marker = trainerMarkers.get(name);
-    if (!marker) {
-      marker = L.marker([pos.lat, pos.lng], { icon: makeTrainerIcon(name) }).addTo(map);
-      trainerMarkers.set(name, marker);
-    } else {
-      marker.setLatLng([pos.lat, pos.lng]);
+  if (showNearby) {
+    for (const [name, pos] of trainerLocations) {
+      if (name === profile?.name) continue;
+      if (Date.now() - pos.ts > 30 * 60 * 1000) continue;
+      seenTrainers.add(name);
+      let marker = trainerMarkers.get(name);
+      if (!marker) {
+        marker = L.marker([pos.lat, pos.lng], { icon: makeTrainerIcon(name) }).addTo(map);
+        trainerMarkers.set(name, marker);
+      } else {
+        marker.setLatLng([pos.lat, pos.lng]);
+      }
     }
   }
   for (const [name, marker] of trainerMarkers) {
@@ -846,6 +903,27 @@ function renderMap() {
       marker.remove();
       trainerMarkers.delete(name);
     }
+  }
+
+  updateRecenterButton(showNearby);
+}
+
+function updateRecenterButton(showNearby) {
+  if (!el.recenterBtn) return;
+  if (!playerLocation || !leafletMap) {
+    el.recenterBtn.classList.add("hidden");
+    if (el.mapFarHint) el.mapFarHint.classList.add("hidden");
+    return;
+  }
+  const L = window.L;
+  const inViewport = L
+    ? leafletMap.getBounds().contains(L.latLng(playerLocation.lat, playerLocation.lng))
+    : true;
+  const zoomedIn = showNearby ?? leafletMap.getZoom() >= NEARBY_ZOOM_THRESHOLD;
+  const awayFromHome = !inViewport || !zoomedIn;
+  el.recenterBtn.classList.toggle("hidden", !awayFromHome);
+  if (el.mapFarHint) {
+    el.mapFarHint.classList.toggle("hidden", zoomedIn);
   }
 }
 

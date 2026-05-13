@@ -1,10 +1,38 @@
 export const SPAWN_CELL_DEGREES = 0.001;
 export const POI_COOLDOWN_MS = 5 * 60 * 1000;
 export const BATTLE_SITE_NEIGHBORHOOD_CELLS = 2;
-export const BATTLE_SITE_DENSITY = 0.16;
+// Battle sites are placed in 3×3 cell macro blocks (~333m square). Exactly
+// one gym is guaranteed per non-ocean macro — this both bumps the count
+// slightly vs. pure-random rolls and spreads them more evenly.
+export const BATTLE_SITE_MACRO_SIZE = 3;
 export const MAX_TRAINING_BOOST_PER_STAT = 28;
 export const MAX_CHAMPION_DEFENSES = 5;
 export const CHAMPION_TTL_MS = 24 * 60 * 60 * 1000;
+
+// Conservative open-ocean exclusion boxes. Cells whose centre falls inside one
+// of these boxes get no POIs or battle sites — keeps mid-ocean clear without
+// risking false exclusions over coasts or islands.
+// Each entry is [minLat, maxLat, minLon, maxLon].
+export const OCEAN_EXCLUSIONS = [
+  [22, 48, -148, -130],   // North Pacific (US west coast ↔ Hawaii)
+  [-10, 18, -145, -115],  // Central Pacific (south of Hawaii, east of Polynesia)
+  [-48, -25, -125, -90],  // South Pacific (east of Polynesia ↔ South America)
+  [32, 48, -50, -32],     // North Atlantic (Bermuda ↔ Azores)
+  [-10, 10, -28, -18],    // Equatorial Atlantic (Brazil ↔ West Africa)
+  [-45, -22, -30, 5],     // South Atlantic
+  [-25, -8, 70, 88],      // Central Indian Ocean
+  [-48, -32, 58, 100],    // South Indian Ocean (south of Madagascar)
+  [85, 90, -180, 180],    // High Arctic Ocean
+];
+
+export function isInOceanExclusion(lat, lon) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
+  for (let i = 0; i < OCEAN_EXCLUSIONS.length; i++) {
+    const z = OCEAN_EXCLUSIONS[i];
+    if (lat >= z[0] && lat <= z[1] && lon >= z[2] && lon <= z[3]) return true;
+  }
+  return false;
+}
 
 export function computeCollectionStats(caught) {
   const uniqueIds = [...new Set((caught || []).map((c) => c.id))];
@@ -108,6 +136,9 @@ export function computePoiPlacements(
     for (let dlon = -neighborhoodCells; dlon <= neighborhoodCells; dlon++) {
       const latCell = latBaseCell + dlat;
       const lonCell = lonBaseCell + dlon;
+      const latBase = latCell * cellSizeDegrees - 90;
+      const lonBase = lonCell * cellSizeDegrees - 180;
+      if (isInOceanExclusion(latBase + cellSizeDegrees / 2, lonBase + cellSizeDegrees / 2)) continue;
       const cellKey = `${latCell}:${lonCell}`;
       const density = hashToUnitInterval(`poi-density|${cellKey}`);
       let count;
@@ -116,8 +147,6 @@ export function computePoiPlacements(
       else if (density < 0.94) count = 2;
       else count = 3;
 
-      const latBase = latCell * cellSizeDegrees - 90;
-      const lonBase = lonCell * cellSizeDegrees - 180;
       for (let i = 0; i < count; i++) {
         placements.push({
           id: `${cellKey}|${i}`,
@@ -144,29 +173,60 @@ export function computeBattleSitePlacements(
   {
     cellSizeDegrees = SPAWN_CELL_DEGREES,
     neighborhoodCells = BATTLE_SITE_NEIGHBORHOOD_CELLS,
-    density = BATTLE_SITE_DENSITY,
+    macroSize = BATTLE_SITE_MACRO_SIZE,
   } = {}
 ) {
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) return [];
   const placements = [];
+  const seen = new Set();
   const latBaseCell = Math.floor((lat + 90) / cellSizeDegrees);
   const lonBaseCell = Math.floor((lon + 180) / cellSizeDegrees);
 
-  for (let dlat = -neighborhoodCells; dlat <= neighborhoodCells; dlat++) {
-    for (let dlon = -neighborhoodCells; dlon <= neighborhoodCells; dlon++) {
+  // Expand the scan range so every macro overlapping the requested neighborhood
+  // gets evaluated even when the player sits near its edge.
+  const scan = neighborhoodCells + macroSize;
+  for (let dlat = -scan; dlat <= scan; dlat++) {
+    for (let dlon = -scan; dlon <= scan; dlon++) {
       const latCell = latBaseCell + dlat;
       const lonCell = lonBaseCell + dlon;
-      const cellKey = `${latCell}:${lonCell}`;
-      const roll = hashToUnitInterval(`battle-site|${cellKey}`);
-      if (roll >= density) continue;
-      const latBase = latCell * cellSizeDegrees - 90;
-      const lonBase = lonCell * cellSizeDegrees - 180;
+      const macroLat = Math.floor(latCell / macroSize);
+      const macroLon = Math.floor(lonCell / macroSize);
+      const macroKey = `${macroLat}:${macroLon}`;
+      if (seen.has(macroKey)) continue;
+
+      // Deterministically pick which cell inside this macro hosts the gym.
+      const slotCount = macroSize * macroSize;
+      const slot = Math.floor(hashToUnitInterval(`bs-macro|${macroKey}|slot`) * slotCount);
+      const slotLat = Math.floor(slot / macroSize);
+      const slotLon = slot % macroSize;
+      const chosenLatCell = macroLat * macroSize + slotLat;
+      const chosenLonCell = macroLon * macroSize + slotLon;
+
+      // Keep the scan tight: skip macros that wouldn't yield a gym in the
+      // requested neighborhood window anyway.
+      if (
+        Math.abs(chosenLatCell - latBaseCell) > neighborhoodCells ||
+        Math.abs(chosenLonCell - lonBaseCell) > neighborhoodCells
+      ) {
+        seen.add(macroKey);
+        continue;
+      }
+
+      const latBase = chosenLatCell * cellSizeDegrees - 90;
+      const lonBase = chosenLonCell * cellSizeDegrees - 180;
+      if (isInOceanExclusion(latBase + cellSizeDegrees / 2, lonBase + cellSizeDegrees / 2)) {
+        seen.add(macroKey);
+        continue;
+      }
+
+      const cellKey = `${chosenLatCell}:${chosenLonCell}`;
       placements.push({
         id: `bs|${cellKey}`,
         grid: cellKey,
         lat: latBase + hashToUnitInterval(`bs|${cellKey}|lat`) * cellSizeDegrees,
         lng: lonBase + hashToUnitInterval(`bs|${cellKey}|lng`) * cellSizeDegrees,
       });
+      seen.add(macroKey);
     }
   }
   return placements;
@@ -208,6 +268,28 @@ export function battleSiteName(siteId) {
   const noun = SITE_NOUNS[Math.floor(nameSeed(siteId, "noun", "9LM") * SITE_NOUNS.length)];
   const suffix = SITE_SUFFIXES[Math.floor(nameSeed(siteId, "suf", "kV3") * SITE_SUFFIXES.length)];
   return suffix ? `${adj} ${noun} ${suffix}` : `${adj} ${noun}`;
+}
+
+// Twelve distinct visual identities — each gym permanently picks one based on
+// its id, so the same gym looks the same every visit regardless of who holds it.
+export const SITE_THEMES = [
+  { tag: "Pyre",    color: "#ff7a45", accent: "#ffd2b3", glyph: "🔥" },
+  { tag: "Tide",    color: "#4cb8ff", accent: "#c4ecff", glyph: "🌊" },
+  { tag: "Grove",   color: "#6ddc8a", accent: "#c8ffd6", glyph: "🌿" },
+  { tag: "Storm",   color: "#b27cff", accent: "#e2d0ff", glyph: "⚡" },
+  { tag: "Frost",   color: "#9ee8ff", accent: "#dff7ff", glyph: "❄" },
+  { tag: "Shadow",  color: "#7c5fff", accent: "#cdc1ff", glyph: "🌙" },
+  { tag: "Cosmic",  color: "#ffd166", accent: "#fff0c2", glyph: "✦" },
+  { tag: "Forge",   color: "#d4a25a", accent: "#f1d8a8", glyph: "⚒" },
+  { tag: "Spirit",  color: "#ff8aa8", accent: "#ffd1de", glyph: "✧" },
+  { tag: "Crystal", color: "#7af0ff", accent: "#cef7ff", glyph: "◈" },
+  { tag: "Beast",   color: "#a8e85b", accent: "#dfffaa", glyph: "🐾" },
+  { tag: "Wind",    color: "#bcdcff", accent: "#e3f0ff", glyph: "🍃" },
+];
+
+export function siteTheme(siteId) {
+  const idx = Math.floor(nameSeed(siteId, "theme", "Th7") * SITE_THEMES.length);
+  return SITE_THEMES[Math.min(idx, SITE_THEMES.length - 1)];
 }
 
 export function clampBoost(value) {
