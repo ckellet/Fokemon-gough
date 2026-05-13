@@ -23,6 +23,9 @@ import {
   MAX_TRAINING_BOOST_PER_STAT,
   MAX_CHAMPION_DEFENSES,
   CHAMPION_TTL_MS,
+  isInOceanExclusion,
+  siteTheme,
+  SITE_THEMES,
 } from './app.logic.js';
 
 test('computeCollectionStats returns total and unique counts', () => {
@@ -158,6 +161,72 @@ test('computeBattleSitePlacements is sparser than POIs at default density', () =
     totalPoi += computePoiPlacements(lat, lon).length;
   }
   assert.ok(totalBs < totalPoi, `expected fewer battle sites than POIs; got ${totalBs} vs ${totalPoi}`);
+});
+
+test('isInOceanExclusion flags mid-ocean points and leaves land alone', () => {
+  // Mid-ocean points — should be excluded
+  assert.equal(isInOceanExclusion(0, -25), true, 'mid Equatorial Atlantic');
+  assert.equal(isInOceanExclusion(30, -140), true, 'mid North Pacific');
+  assert.equal(isInOceanExclusion(-35, -100), true, 'mid South Pacific');
+  assert.equal(isInOceanExclusion(-35, -15), true, 'mid South Atlantic');
+  assert.equal(isInOceanExclusion(-15, 80), true, 'mid Central Indian Ocean');
+  assert.equal(isInOceanExclusion(88, 30), true, 'High Arctic');
+
+  // Major populated cities — should NOT be excluded
+  assert.equal(isInOceanExclusion(51.5074, -0.1278), false, 'London');
+  assert.equal(isInOceanExclusion(40.7589, -73.9851), false, 'NYC');
+  assert.equal(isInOceanExclusion(35.6762, 139.6503), false, 'Tokyo');
+  assert.equal(isInOceanExclusion(37.7749, -122.4194), false, 'San Francisco');
+  assert.equal(isInOceanExclusion(-33.8688, 151.2093), false, 'Sydney');
+  assert.equal(isInOceanExclusion(21.3099, -157.8581), false, 'Honolulu');
+  assert.equal(isInOceanExclusion(64.1466, -21.9426), false, 'Reykjavik');
+  assert.equal(isInOceanExclusion(37.7412, -25.6756), false, 'Ponta Delgada (Azores)');
+});
+
+test('computePoiPlacements skips ocean exclusion zones', () => {
+  // Smack in the middle of the South Pacific
+  const ocean = computePoiPlacements(-35, -110, { neighborhoodCells: 2 });
+  assert.equal(ocean.length, 0, 'expected no POIs in mid South Pacific');
+});
+
+test('computeBattleSitePlacements skips ocean exclusion zones', () => {
+  // Mid North Pacific
+  const ocean = computeBattleSitePlacements(35, -140, { neighborhoodCells: 5 });
+  assert.equal(ocean.length, 0, 'expected no battle sites in mid North Pacific');
+});
+
+test('computeBattleSitePlacements distributes gyms evenly via macro cells', () => {
+  // Step across many cells in a non-ocean area; with 3×3 macros and 1 gym
+  // each, a 9×9 cell window should produce close to 9 gyms (much tighter than
+  // the old Poisson rolls allowed).
+  const counts = [];
+  for (let i = 0; i < 30; i++) {
+    const lat = 30 + i * 0.05;
+    const lon = -100 + i * 0.05;
+    counts.push(computeBattleSitePlacements(lat, lon, { neighborhoodCells: 4 }).length);
+  }
+  const min = Math.min(...counts);
+  const max = Math.max(...counts);
+  assert.ok(min >= 4, `expected every 9×9 window to have ≥4 gyms; got min ${min}`);
+  assert.ok(max <= 16, `expected every 9×9 window to have ≤16 gyms; got max ${max}`);
+});
+
+test('siteTheme is deterministic and returns a known theme', () => {
+  const a = siteTheme('bs|12345:67890');
+  const b = siteTheme('bs|12345:67890');
+  assert.deepEqual(a, b);
+  assert.ok(typeof a.tag === 'string' && a.tag.length > 0);
+  assert.ok(typeof a.color === 'string' && a.color.startsWith('#'));
+  assert.ok(typeof a.glyph === 'string' && a.glyph.length > 0);
+  assert.ok(SITE_THEMES.some((t) => t.tag === a.tag));
+});
+
+test('siteTheme covers many distinct themes across nearby ids', () => {
+  const tags = new Set();
+  for (let i = 0; i < 200; i++) {
+    tags.add(siteTheme(`bs|1000:${10000 + i}`).tag);
+  }
+  assert.ok(tags.size >= 8, `expected diverse themes across IDs; got ${tags.size}`);
 });
 
 test('battleSiteName produces stable, non-trivial names', () => {

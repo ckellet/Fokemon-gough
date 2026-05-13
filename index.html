@@ -83,6 +83,19 @@
               <div id="nearbyMap" class="map" aria-label="Nearby map"></div>
               <p id="mapHint" class="map-hint">Tap “Enable location” to start the world.</p>
               <p id="mapBucket" class="map-bucket" aria-live="polite"></p>
+              <button
+                id="recenterBtn"
+                class="map-recenter hidden"
+                type="button"
+                aria-label="Return to your location"
+                title="Return to your location"
+              >
+                <span class="map-recenter-icon" aria-hidden="true">📍</span>
+                <span class="map-recenter-label">Recenter</span>
+              </button>
+              <p id="mapFarHint" class="map-far-hint hidden" aria-live="polite">
+                Zoom in to reveal FokéCaches &amp; Gyms.
+              </p>
             </div>
             <div class="cards" id="cardsList"></div>
           </article>

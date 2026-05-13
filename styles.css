@@ -250,6 +250,56 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
   margin: 0;
 }
 .map-bucket:empty { display: none; }
+.map-recenter {
+  position: absolute;
+  right: .65rem;
+  bottom: .65rem;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: .4rem;
+  padding: .55rem .85rem;
+  border-radius: 999px;
+  border: 1px solid rgba(124, 240, 198, .55);
+  background: linear-gradient(135deg, rgba(124, 240, 198, .95), rgba(75, 183, 255, .95));
+  color: #04243a;
+  font-weight: 800;
+  letter-spacing: .03em;
+  font-size: .78rem;
+  cursor: pointer;
+  box-shadow: 0 10px 22px rgba(0, 0, 0, .35), 0 0 18px rgba(124, 240, 198, .35);
+  font-family: inherit;
+  transition: transform .15s ease, box-shadow .15s ease, opacity .2s ease;
+}
+.map-recenter:hover { transform: translateY(-1px); box-shadow: 0 14px 26px rgba(0, 0, 0, .4), 0 0 22px rgba(124, 240, 198, .45); }
+.map-recenter:active { transform: translateY(0); }
+.map-recenter.hidden { display: none; }
+.map-recenter-icon { font-size: 1rem; line-height: 1; }
+.map-far-hint {
+  position: absolute;
+  left: .55rem;
+  top: .55rem;
+  margin: 0;
+  padding: .3rem .65rem;
+  border-radius: 999px;
+  background: rgba(7, 11, 20, .82);
+  border: 1px solid var(--line);
+  color: #cdd7ee;
+  font-size: .7rem;
+  letter-spacing: .02em;
+  pointer-events: none;
+  z-index: 4;
+  max-width: calc(70% - 1rem);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.map-far-hint.hidden { display: none; }
+@media (max-width: 640px) {
+  .map-recenter { padding: .5rem .7rem; font-size: .72rem; }
+  .map-recenter-label { display: none; }
+  .map-far-hint { font-size: .66rem; padding: .3rem .6rem; }
+}
 .player-marker, .trainer-marker, .spawn-marker { display: grid; place-items: center; border-radius: 50%; font-weight: 700; color: #06263c; }
 .player-marker { width: 38px; height: 38px; font-size: .62rem; background: radial-gradient(circle, #d6ffff, #77f2d2); box-shadow: 0 0 18px rgba(119,242,210,.6); border: 2px solid rgba(255,255,255,.65); }
 .trainer-marker { width: 30px; height: 30px; font-size: .58rem; color: #f5f7ff; background: radial-gradient(circle, #6a7ff8, #243a95); border: 1px solid rgba(181, 194, 255, 0.7); box-shadow: 0 0 12px rgba(122, 149, 255, .55); }
@@ -551,9 +601,9 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
 .battle-site-marker {
   position: relative;
   width: 86px;
-  height: 80px;
+  height: 84px;
   display: grid;
-  grid-template-rows: auto 44px auto;
+  grid-template-rows: auto 48px auto;
   justify-items: center;
   align-items: end;
   gap: 2px;
@@ -574,22 +624,38 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
 }
 .battle-site-marker .bs-medal {
   position: relative;
-  width: 44px;
-  height: 44px;
+  width: 48px;
+  height: 48px;
   border-radius: 50%;
   background:
-    radial-gradient(circle at 30% 30%, rgba(255, 255, 255, .35), transparent 55%),
-    linear-gradient(135deg, var(--ring, #9aaabd), #2b3550);
+    radial-gradient(circle at 30% 28%, var(--ring-accent, rgba(255, 255, 255, .55)), transparent 60%),
+    linear-gradient(140deg, var(--ring, #9aaabd) 0%, var(--ring, #9aaabd) 55%, #1a2235 110%);
   border: 2px solid #0b1226;
-  box-shadow: 0 0 14px color-mix(in srgb, var(--ring, #9aaabd) 70%, transparent);
+  box-shadow:
+    0 0 16px color-mix(in srgb, var(--ring, #9aaabd) 75%, transparent),
+    inset 0 -6px 12px rgba(0, 0, 0, .25);
   display: grid;
   place-items: center;
 }
-.battle-site-marker .bs-medal-inner {
-  font-size: 1.1rem;
-  font-weight: 900;
-  color: #f5f7ff;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, .8);
+.battle-site-marker .bs-medal-glyph {
+  font-size: 1.4rem;
+  line-height: 1;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, .85));
+}
+.battle-site-marker .bs-medal-crossed {
+  position: absolute;
+  bottom: -4px;
+  right: -4px;
+  width: 18px;
+  height: 18px;
+  font-size: .7rem;
+  border-radius: 50%;
+  background: rgba(11, 18, 38, .92);
+  border: 1px solid rgba(255, 255, 255, .35);
+  color: #ffd166;
+  display: grid;
+  place-items: center;
+  text-shadow: 0 0 4px rgba(255, 209, 102, .6);
 }
 .battle-site-marker small {
   font-size: .56rem;
@@ -606,14 +672,19 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.battle-site-marker.vacant .bs-medal {
-  background: linear-gradient(135deg, #2b3550, #4d5a6a);
-  box-shadow: 0 0 14px rgba(154, 170, 189, .35);
+.battle-site-marker.vacant .bs-medal { opacity: .92; }
+.battle-site-marker.rival .bs-medal {
+  border-color: color-mix(in srgb, var(--ring) 65%, #ff7a8a 35%);
+  box-shadow:
+    0 0 20px color-mix(in srgb, var(--ring) 80%, transparent),
+    0 0 8px rgba(255, 122, 138, .6),
+    inset 0 -6px 12px rgba(0, 0, 0, .25);
 }
-.battle-site-marker.rival .bs-medal { box-shadow: 0 0 18px color-mix(in srgb, var(--ring) 80%, transparent); }
 .battle-site-marker.yours .bs-medal {
   border-color: #7cf0c6;
-  box-shadow: 0 0 18px rgba(124, 240, 198, .8);
+  box-shadow:
+    0 0 22px rgba(124, 240, 198, .8),
+    inset 0 -6px 12px rgba(0, 0, 0, .25);
 }
 .battle-site-marker.near .bs-medal { animation: site-pulse 1.6s ease-in-out infinite; }
 @keyframes site-pulse {
