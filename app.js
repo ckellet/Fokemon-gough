@@ -4630,10 +4630,10 @@ function openDebugLocationDialog() {
       <h2>Override location</h2>
       <p>Pin yourself to any coordinates for testing. Geolocation is suppressed until you clear it.</p>
       <label style="text-align:left;">Latitude
-        <input id="dbgLat" type="number" step="0.0001" value="${current.lat || 0}" />
+        <input id="dbgLat" type="text" inputmode="decimal" pattern="-?[0-9]*\\.?[0-9]*" autocomplete="off" value="${current.lat || 0}" />
       </label>
       <label style="text-align:left;">Longitude
-        <input id="dbgLng" type="number" step="0.0001" value="${current.lng || 0}" />
+        <input id="dbgLng" type="text" inputmode="decimal" pattern="-?[0-9]*\\.?[0-9]*" autocomplete="off" value="${current.lng || 0}" />
       </label>
       <div class="debug-presets">
         <button type="button" class="ghost" data-lat="51.5074" data-lng="-0.1278">London</button>
@@ -4695,6 +4695,43 @@ if (typeof document !== "undefined") {
       openDebugLocationDialog();
     }
   });
+
+  // Touch-friendly: 10 rapid taps on the location pill opens the debug dialog.
+  const pill = el.locationStatus;
+  if (pill) {
+    const TAP_TARGET = 10;
+    const TAP_WINDOW_MS = 2500;
+    let tapCount = 0;
+    let tapTimer = null;
+    let originalText = "";
+    function resetTaps() {
+      tapCount = 0;
+      if (tapTimer) { clearTimeout(tapTimer); tapTimer = null; }
+      if (originalText && pill.dataset.tapping === "1") {
+        pill.textContent = originalText;
+        pill.dataset.tapping = "0";
+      }
+    }
+    pill.style.cursor = "pointer";
+    pill.style.userSelect = "none";
+    pill.style.webkitUserSelect = "none";
+    pill.style.webkitTapHighlightColor = "transparent";
+    pill.addEventListener("click", () => {
+      if (tapCount === 0) originalText = pill.textContent;
+      tapCount += 1;
+      if (tapTimer) clearTimeout(tapTimer);
+      tapTimer = setTimeout(resetTaps, TAP_WINDOW_MS);
+      if (tapCount >= TAP_TARGET) {
+        resetTaps();
+        openDebugLocationDialog();
+        return;
+      }
+      if (tapCount >= 4) {
+        pill.dataset.tapping = "1";
+        pill.textContent = `Debug ${tapCount}/${TAP_TARGET}…`;
+      }
+    });
+  }
 }
 
 async function bootstrapLocation() {
