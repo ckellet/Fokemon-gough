@@ -26,6 +26,12 @@ import {
   isInOceanExclusion,
   siteTheme,
   SITE_THEMES,
+  makeInstanceUid,
+  migrateCaughtEntries,
+  availableInstances,
+  deployedInstanceAtSite,
+  mergeBoosts,
+  normalizeBoosts,
 } from './app.logic.js';
 
 test('computeCollectionStats returns total and unique counts', () => {
@@ -293,6 +299,69 @@ test('simulateBattle is deterministic for the same seed and produces a winner', 
   assert.deepEqual(one.log, two.log);
   assert.ok(one.winner === 'attacker' || one.winner === 'defender');
   assert.ok(one.log.length > 0);
+});
+
+test('makeInstanceUid produces unique tokens per call', () => {
+  const a = makeInstanceUid('voltlynx', 100);
+  const b = makeInstanceUid('voltlynx', 100);
+  assert.notEqual(a, b);
+  assert.ok(a.startsWith('voltlynx-100-'));
+});
+
+test('migrateCaughtEntries fills uid/boosts/deployedAt and preserves new fields', () => {
+  const legacy = [{ id: 'sparkit', ts: 1 }, { id: 'mossaur', ts: 2 }];
+  const migrated = migrateCaughtEntries(legacy);
+  for (const entry of migrated) {
+    assert.ok(typeof entry.uid === 'string' && entry.uid.length > 4);
+    assert.deepEqual(entry.boosts, { hp: 0, atk: 0, def: 0, spd: 0 });
+    assert.equal(entry.deployedAt, null);
+  }
+  // Running again is idempotent (preserves existing uid).
+  const again = migrateCaughtEntries(migrated);
+  assert.deepEqual(again.map((e) => e.uid), migrated.map((e) => e.uid));
+});
+
+test('migrateCaughtEntries normalizes deployedAt and boosts', () => {
+  const out = migrateCaughtEntries([
+    { id: 'sparkit', ts: 1, uid: 'u1', deployedAt: 'bs|123:456', boosts: { hp: -3, atk: 999, def: 5.4 } },
+  ]);
+  assert.equal(out[0].deployedAt, 'bs|123:456');
+  assert.equal(out[0].boosts.hp, 0);
+  assert.equal(out[0].boosts.atk, MAX_TRAINING_BOOST_PER_STAT);
+  assert.equal(out[0].boosts.def, 5);
+});
+
+test('availableInstances excludes deployed Fokemon', () => {
+  const caught = migrateCaughtEntries([
+    { id: 'sparkit', ts: 1, deployedAt: 'bs|1:1' },
+    { id: 'sparkit', ts: 2 },
+    { id: 'mossaur', ts: 3, deployedAt: 'bs|2:2' },
+  ]);
+  const free = availableInstances(caught);
+  assert.equal(free.length, 1);
+  assert.equal(free[0].id, 'sparkit');
+});
+
+test('deployedInstanceAtSite locates the instance pinned to a gym', () => {
+  const caught = migrateCaughtEntries([
+    { id: 'sparkit', ts: 1, deployedAt: 'bs|1:1' },
+    { id: 'mossaur', ts: 2 },
+  ]);
+  const found = deployedInstanceAtSite(caught, 'bs|1:1');
+  assert.ok(found && found.id === 'sparkit');
+  assert.equal(deployedInstanceAtSite(caught, 'nope'), null);
+});
+
+test('mergeBoosts adds and clamps within stat cap', () => {
+  const merged = mergeBoosts({ hp: 10, atk: 5, def: 0, spd: 0 }, { hp: 100, atk: 5 });
+  assert.equal(merged.hp, MAX_TRAINING_BOOST_PER_STAT);
+  assert.equal(merged.atk, 10);
+  assert.equal(merged.def, 0);
+});
+
+test('normalizeBoosts coerces invalid input to zero', () => {
+  assert.deepEqual(normalizeBoosts(null), { hp: 0, atk: 0, def: 0, spd: 0 });
+  assert.deepEqual(normalizeBoosts({ hp: 'x', atk: -5, def: 3, spd: 1.6 }), { hp: 0, atk: 0, def: 3, spd: 2 });
 });
 
 test('simulateBattle: stronger fokemon usually wins when types neutral', () => {

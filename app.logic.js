@@ -43,6 +43,62 @@ export function computeCollectionStats(caught) {
   };
 }
 
+export const EMPTY_BOOSTS = Object.freeze({ hp: 0, atk: 0, def: 0, spd: 0 });
+
+function randomToken() {
+  // Compact, collision-resistant-enough random token for client-only ids.
+  return Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 6);
+}
+
+export function makeInstanceUid(cardId, ts = Date.now()) {
+  return `${cardId}-${ts}-${randomToken()}`;
+}
+
+export function normalizeBoosts(raw) {
+  return {
+    hp: clampBoost(raw?.hp ?? 0),
+    atk: clampBoost(raw?.atk ?? 0),
+    def: clampBoost(raw?.def ?? 0),
+    spd: clampBoost(raw?.spd ?? 0),
+  };
+}
+
+export function migrateCaughtEntries(entries) {
+  // Assign uid/boosts/deployedAt to legacy entries while preserving any newer
+  // fields. Returns a new array; safe to call multiple times.
+  if (!Array.isArray(entries)) return [];
+  return entries.map((entry) => {
+    if (!entry || typeof entry !== "object") return entry;
+    const id = String(entry.id || "");
+    const ts = Number(entry.ts) || Date.now();
+    return {
+      id,
+      ts,
+      uid: entry.uid || makeInstanceUid(id, ts),
+      boosts: normalizeBoosts(entry.boosts),
+      deployedAt: entry.deployedAt ? String(entry.deployedAt) : null,
+    };
+  });
+}
+
+export function availableInstances(caught) {
+  return (caught || []).filter((c) => c && !c.deployedAt);
+}
+
+export function deployedInstanceAtSite(caught, siteId) {
+  if (!siteId) return null;
+  return (caught || []).find((c) => c && c.deployedAt === siteId) || null;
+}
+
+export function mergeBoosts(a, b) {
+  return normalizeBoosts({
+    hp: (a?.hp || 0) + (b?.hp || 0),
+    atk: (a?.atk || 0) + (b?.atk || 0),
+    def: (a?.def || 0) + (b?.def || 0),
+    spd: (a?.spd || 0) + (b?.spd || 0),
+  });
+}
+
 export function mergeRecentEvents(currentEvents, incomingEvent, maxItems = 100) {
   if (!incomingEvent || !incomingEvent.ts || !incomingEvent.trainer || !incomingEvent.card) {
     return currentEvents;
