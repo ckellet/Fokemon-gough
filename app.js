@@ -19,7 +19,16 @@ import {
   isPoiAvailable,
   POI_COOLDOWN_MS,
   SPAWN_CELL_DEGREES,
+  makeInstanceUid,
+  migrateCaughtEntries,
+  availableInstances,
+  deployedInstanceAtSite,
+  mergeBoosts,
+  normalizeBoosts,
 } from "./app.logic.js";
+
+const TRADE_RANGE_METERS = 200;
+const TRADE_REQUEST_TTL_MS = 5 * 60 * 1000;
 
 const SPAWN_INTERVAL_MS = 3 * 60 * 1000;
 const MAX_SPAWNS = 4;
@@ -358,6 +367,8 @@ const el = {
   modalLocationHelp: $("modalLocationHelp"),
   ballChip: $("ballChip"),
   ballCount: $("ballCount"),
+  tradeBtn: $("tradeBtn"),
+  tradeBadge: $("tradeIncomingBadge"),
 };
 
 let locationGranted = false;
@@ -372,12 +383,13 @@ function safeStorageGet(key, fallback) {
 }
 
 let profile = safeStorageGet("fokemon_profile", null);
-let caught = safeStorageGet("fokemon_caught", []);
+let caught = migrateCaughtEntries(safeStorageGet("fokemon_caught", []));
 let fokeBalls = safeStorageGet("fokemon_balls", STARTING_FOKEBALLS);
 if (!Number.isFinite(fokeBalls) || fokeBalls < 0) fokeBalls = STARTING_FOKEBALLS;
 const poiSpent = safeStorageGet("fokemon_poi_spent", {}) || {};
 const recentEvents = [];
 const caughtIds = new Set(caught.map((c) => c.id));
+const caughtByUid = new Map(caught.map((c) => [c.uid, c]));
 const gridCaughtIds = new Set();
 const trainerLocations = new Map();
 let playerLocation = null;
@@ -638,46 +650,92 @@ function statBars(card) {
   `;
 }
 
+function instanceStatRowsHtml(card, boosts) {
+  const rows = [
+    ["HP", card.hp ?? 0, boosts?.hp || 0, 140],
+    ["ATK", card.atk ?? 0, boosts?.atk || 0, 120],
+    ["DEF", card.def ?? 0, boosts?.def || 0, 120],
+    ["SPD", card.spd ?? 0, boosts?.spd || 0, 120],
+  ];
+  return `
+    <ul class="stats-list">
+      ${rows.map(([label, base, boost, max]) => {
+        const total = base + boost;
+        const pct = Math.max(4, Math.min(100, (total / max) * 100));
+        return `
+          <li>
+            <span class="stat-label">${label}</span>
+            <span class="stat-bar"><span class="stat-fill" style="width:${pct}%"></span></span>
+            <span class="stat-val">${total}${boost ? `<span class="stat-boost"> +${boost}</span>` : ""}</span>
+          </li>`;
+      }).join("")}
+    </ul>
+  `;
+}
+
 function renderCollection() {
   if (!el.caughtCount) return;
   el.caughtCount.textContent = caught.length;
-  const counts = new Map();
-  for (const c of caught) counts.set(c.id, (counts.get(c.id) || 0) + 1);
-  el.uniqueCount.textContent = counts.size;
+  const uniqueSpecies = new Set(caught.map((c) => c.id));
+  el.uniqueCount.textContent = uniqueSpecies.size;
 
-  if (!counts.size) {
-    el.collection.innerHTML = `<p class="empty-state">Catch a Fokemon to start your dex — each unique one flips to reveal stats.</p>`;
+  if (!caught.length) {
+    el.collection.innerHTML = `<p class="empty-state">Catch a Fokemon to start your dex — each individual gets its own card, stats, and training history.</p>`;
     return;
   }
 
-  const entries = [...counts].sort((a, b) => b[1] - a[1]);
-  el.collection.innerHTML = entries
-    .map(([id, n]) => {
-      const card = cardsById.get(id);
+  // Sort: species cluster, then strongest individual first (training matters).
+  const sorted = [...caught].sort((a, b) => {
+    if (a.id !== b.id) return a.id < b.id ? -1 : 1;
+    return instancePower(b) - instancePower(a);
+  });
+
+  // Number copies of each species so trainers can distinguish them at a glance.
+  const speciesCount = new Map();
+  for (const c of sorted) speciesCount.set(c.id, (speciesCount.get(c.id) || 0) + 1);
+  const seen = new Map();
+
+  el.collection.innerHTML = sorted
+    .map((entry) => {
+      const card = cardsById.get(entry.id);
       if (!card) return "";
       const colors = colorsFor(card);
-      const power = powerScore(card);
+      const power = instancePower(entry);
       const tier = powerTier(power);
+      const idx = (seen.get(entry.id) || 0) + 1;
+      seen.set(entry.id, idx);
+      const ofMany = speciesCount.get(entry.id);
+      const trained = (entry.boosts?.hp || 0) + (entry.boosts?.atk || 0) + (entry.boosts?.def || 0) + (entry.boosts?.spd || 0);
+      const deployed = !!entry.deployedAt;
+      const deployedLabel = deployed ? battleSiteName(entry.deployedAt) : "";
       return `
-        <div class="gallery-card" data-id="${escapeHtml(id)}" tabindex="0" role="button" aria-label="Flip ${escapeHtml(card.name)} card">
+        <div class="gallery-card${deployed ? " deployed" : ""}" data-uid="${escapeHtml(entry.uid)}" tabindex="0" role="button" aria-label="Flip ${escapeHtml(card.name)} card">
           <div class="flipper">
             <div class="face front">
-              <span class="count-pill" aria-label="Caught ${n} times">&times;${n}</span>
+              ${ofMany > 1 ? `<span class="count-pill" aria-label="Individual ${idx} of ${ofMany}">#${idx}/${ofMany}</span>` : ""}
+              ${deployed ? `<span class="deployed-pill" title="Deployed at ${escapeHtml(deployedLabel)}">🛡 At gym</span>` : ""}
               <canvas class="gallery-art" width="160" height="120" aria-hidden="true"></canvas>
               <div class="gallery-meta">
                 <strong>${escapeHtml(card.name)}</strong>
                 <span class="type-pill" style="background:${colors.accent};color:#061226;">${escapeHtml(card.type)}</span>
                 <span class="power-chip ${tier}" title="Power level">⚡ ${power}</span>
               </div>
+              ${trained ? `<span class="trained-badge" title="Training boosts">+${trained} trained</span>` : ""}
               <span class="flip-hint">Tap for stats</span>
             </div>
             <div class="face back">
               <header>
-                <strong>${escapeHtml(card.name)}</strong>
+                <strong>${escapeHtml(card.name)}${ofMany > 1 ? ` <small>#${idx}</small>` : ""}</strong>
                 <p class="rarity ${escapeHtml(card.rarity || "common")}">${escapeHtml(card.rarity || "common")} &bull; ${escapeHtml(card.type)}</p>
               </header>
-              ${statBars(card)}
+              ${instanceStatRowsHtml(card, entry.boosts)}
+              ${deployed
+                ? `<p class="instance-status">Deployed at <strong>${escapeHtml(deployedLabel)}</strong>.</p>`
+                : `<p class="instance-status">Available to deploy or trade.</p>`}
               <p class="flavor">${escapeHtml(card.flavor || "")}</p>
+              <div class="instance-actions">
+                <button type="button" class="ghost release-btn" data-uid="${escapeHtml(entry.uid)}" ${deployed ? "disabled title='Recall from gym first'" : ""}>Release</button>
+              </div>
             </div>
           </div>
         </div>
@@ -686,18 +744,40 @@ function renderCollection() {
     .join("");
 
   el.collection.querySelectorAll(".gallery-card").forEach((node) => {
-    const id = node.dataset.id;
-    const card = cardsById.get(id);
+    const uid = node.dataset.uid;
+    const entry = getInstance(uid);
+    if (!entry) return;
+    const card = cardsById.get(entry.id);
     const canvas = node.querySelector(".gallery-art");
     if (canvas && card) renderPortrait(canvas, card);
-    const toggle = () => node.classList.toggle("flipped");
+    const toggle = (ev) => {
+      // Don't flip if the user clicked an action button.
+      if (ev?.target && ev.target.closest(".instance-actions")) return;
+      node.classList.toggle("flipped");
+    };
     node.addEventListener("click", toggle);
     node.addEventListener("keydown", (ev) => {
       if (ev.key === "Enter" || ev.key === " ") {
         ev.preventDefault();
-        toggle();
+        toggle(ev);
       }
     });
+    const releaseBtn = node.querySelector(".release-btn");
+    if (releaseBtn) {
+      releaseBtn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        const targetUid = releaseBtn.dataset.uid;
+        const target = getInstance(targetUid);
+        if (!target) return;
+        const card2 = cardsById.get(target.id);
+        const label = card2 ? card2.name : "this Fokemon";
+        if (!confirm(`Release ${label}? This is permanent — its trained boosts will be lost.`)) return;
+        if (releaseInstance(targetUid)) {
+          renderCollection();
+          renderMap();
+        }
+      });
+    }
   });
 }
 
@@ -1111,17 +1191,89 @@ function publishGridCatch(card, ts) {
   gridCaughtNode.get(key).get(card.id).put({ cardId: card.id, ts });
 }
 
+function rebuildCaughtIndexes() {
+  caughtIds.clear();
+  caughtByUid.clear();
+  for (const c of caught) {
+    if (!c) continue;
+    caughtIds.add(c.id);
+    caughtByUid.set(c.uid, c);
+  }
+}
+
+function getInstance(uid) {
+  return uid ? caughtByUid.get(uid) || null : null;
+}
+
+function releaseInstance(uid) {
+  const entry = getInstance(uid);
+  if (!entry) return false;
+  if (entry.deployedAt) return false;
+  caught = caught.filter((c) => c.uid !== uid);
+  rebuildCaughtIndexes();
+  saveLocal();
+  return true;
+}
+
+function applyInstanceBoosts(uid, boosts) {
+  const entry = getInstance(uid);
+  if (!entry) return;
+  entry.boosts = normalizeBoosts({
+    hp: boosts?.hp ?? 0,
+    atk: boosts?.atk ?? 0,
+    def: boosts?.def ?? 0,
+    spd: boosts?.spd ?? 0,
+  });
+  saveLocal();
+}
+
+function markInstanceDeployed(uid, siteId) {
+  const entry = getInstance(uid);
+  if (!entry) return;
+  entry.deployedAt = siteId || null;
+  saveLocal();
+}
+
+function restoreInstanceHome(uid, mergedBoosts) {
+  const entry = getInstance(uid);
+  if (!entry) return;
+  if (mergedBoosts) entry.boosts = normalizeBoosts(mergedBoosts);
+  entry.deployedAt = null;
+  saveLocal();
+}
+
+function instancePower(entry) {
+  const card = cardsById.get(entry.id);
+  if (!card) return 0;
+  return (
+    (card.hp || 0) + (card.atk || 0) + (card.def || 0) + (card.spd || 0)
+    + (entry.boosts?.hp || 0)
+    + (entry.boosts?.atk || 0)
+    + (entry.boosts?.def || 0)
+    + (entry.boosts?.spd || 0)
+  );
+}
+
 function catchCard(card, placement) {
+  const ts = Date.now();
   const event = {
     trainer: profile.name,
     card: card.name,
-    ts: Date.now(),
+    ts,
     lat: placement?.lat ?? playerLocation?.lat ?? null,
     lng: placement?.lng ?? playerLocation?.lng ?? null,
   };
 
-  caught.push({ id: card.id, ts: event.ts });
+  const entry = {
+    id: card.id,
+    ts,
+    uid: makeInstanceUid(card.id, ts),
+    boosts: { hp: 0, atk: 0, def: 0, spd: 0 },
+    deployedAt: null,
+  };
+  caught.push(entry);
   caughtIds.add(card.id);
+  caughtByUid.set(entry.uid, entry);
   gridCaughtIds.add(card.id);
   saveLocal();
   renderCollection();
@@ -2764,12 +2916,23 @@ function refreshOpenSitePanel(siteId) {
 }
 
 function uniqueCollectionEntries() {
+  // Legacy helper kept around; new flows use availableInstances directly.
   const counts = new Map();
   for (const c of caught) counts.set(c.id, (counts.get(c.id) || 0) + 1);
   return [...counts.entries()]
     .map(([id, count]) => ({ card: cardsById.get(id), count }))
     .filter((e) => e.card)
     .sort((a, b) => (b.card.hp + b.card.atk + b.card.def + b.card.spd) - (a.card.hp + a.card.atk + a.card.def + a.card.spd));
+}
+
+function speciesIndexForInstance(uid) {
+  const entry = getInstance(uid);
+  if (!entry) return { idx: 1, total: 1 };
+  const siblings = caught
+    .filter((c) => c && c.id === entry.id)
+    .sort((a, b) => (a.ts || 0) - (b.ts || 0));
+  const idx = siblings.findIndex((c) => c.uid === uid);
+  return { idx: idx + 1, total: siblings.length };
 }
 
 function statRowHtml(label, base, boost, max) {
@@ -2785,21 +2948,30 @@ function statRowHtml(label, base, boost, max) {
 }
 
 function championPickerHtml(actionLabel) {
-  const entries = uniqueCollectionEntries();
-  if (!entries.length) {
+  const entries = availableInstances(caught);
+  if (!caught.length) {
     return `<p class="empty-state">Catch some Fokemon first — you can't deploy what you don't have.</p>`;
   }
+  if (!entries.length) {
+    return `<p class="empty-state">Every one of your Fokemon is already deployed at a gym. Recall one before sending another into the ring.</p>`;
+  }
+  // Sort by total power (with boosts) so the trained heavyweights are first.
+  entries.sort((a, b) => instancePower(b) - instancePower(a));
   return `
     <p class="picker-prompt">Pick your fighter to ${escapeHtml(actionLabel)}:</p>
     <div class="picker-grid">
-      ${entries.map(({ card, count }) => {
+      ${entries.map((entry) => {
+        const card = cardsById.get(entry.id);
+        if (!card) return "";
         const colors = colorsFor(card);
-        const total = card.hp + card.atk + card.def + card.spd;
+        const total = instancePower(entry);
+        const trained = (entry.boosts?.hp || 0) + (entry.boosts?.atk || 0) + (entry.boosts?.def || 0) + (entry.boosts?.spd || 0);
+        const { idx, total: of } = speciesIndexForInstance(entry.uid);
         return `
-          <button class="picker-card" data-card="${escapeHtml(card.id)}" style="--type-light:${colors.light};--type-dark:${colors.dark};--type-accent:${colors.accent};">
+          <button class="picker-card" data-uid="${escapeHtml(entry.uid)}" style="--type-light:${colors.light};--type-dark:${colors.dark};--type-accent:${colors.accent};">
             <span class="picker-power">⚡${total}</span>
-            <strong>${escapeHtml(card.name)}</strong>
-            <small>${escapeHtml(card.type)} • ×${count}</small>
+            <strong>${escapeHtml(card.name)}${of > 1 ? ` <small>#${idx}</small>` : ""}</strong>
+            <small>${escapeHtml(card.type)}${trained ? ` • +${trained} trained` : ""}</small>
           </button>
         `;
       }).join("")}
@@ -2861,20 +3033,25 @@ function openBattleSite(site) {
       if (inRange) {
         bodyEl.querySelectorAll(".picker-card").forEach((btn) => {
           btn.addEventListener("click", () => {
-            const cardId = btn.dataset.card;
-            const card = cardsById.get(cardId);
+            const uid = btn.dataset.uid;
+            const entry = getInstance(uid);
+            if (!entry || entry.deployedAt) return;
+            const card = cardsById.get(entry.id);
             if (!card) return;
             const champ = {
               trainer: profile.name,
               team: profile.team || "mint",
-              cardId,
-              boosts: { hp: 0, atk: 0, def: 0, spd: 0 },
+              cardId: entry.id,
+              instanceUid: entry.uid,
+              boosts: { ...entry.boosts },
               defenses: 0,
               placedAt: Date.now(),
               lastBattleAt: 0,
             };
+            markInstanceDeployed(entry.uid, site.id);
             championsBySite.set(site.id, champ);
             publishChampion(site.id, champ);
+            renderCollection();
             renderMap();
             render();
           });
@@ -2949,8 +3126,14 @@ function openBattleSite(site) {
         actions.querySelector(".action-train").disabled = true;
       }
       actions.querySelector(".action-recall").addEventListener("click", () => {
+        // Carry the gym's training boosts back home before clearing the deploy.
+        if (champion.instanceUid && getInstance(champion.instanceUid)) {
+          applyInstanceBoosts(champion.instanceUid, champion.boosts);
+          restoreInstanceHome(champion.instanceUid, champion.boosts);
+        }
         championsBySite.delete(site.id);
         publishChampionRemoved(site.id);
+        renderCollection();
         renderMap();
         render();
       });
@@ -2961,11 +3144,13 @@ function openBattleSite(site) {
       `;
       actions.querySelectorAll(".picker-card").forEach((btn) => {
         btn.addEventListener("click", () => {
-          const cardId = btn.dataset.card;
-          const card = cardsById.get(cardId);
+          const uid = btn.dataset.uid;
+          const entry = getInstance(uid);
+          if (!entry || entry.deployedAt) return;
+          const card = cardsById.get(entry.id);
           if (!card) return;
           close();
-          launchBattle(site, card, champion);
+          launchBattle(site, card, champion, entry);
         });
       });
     }
@@ -3714,6 +3899,12 @@ function launchTraining(site, champion) {
     };
     championsBySite.set(site.id, updated);
     publishChampion(site.id, updated);
+    // Mirror the latest training boosts onto the inventory instance so they
+    // persist if the gym is later defeated/retired and the Fokemon comes home.
+    if (updated.instanceUid && getInstance(updated.instanceUid)) {
+      applyInstanceBoosts(updated.instanceUid, updated.boosts);
+      renderCollection();
+    }
     renderMap();
 
     const lines = TRAINING_STAT_KEYS
@@ -3769,13 +3960,15 @@ function skillNameFor(card) {
   return SKILL_NAMES_BY_TYPE[card?.type] || "Power Strike";
 }
 
-function launchBattle(site, challengerCard, championBefore) {
+function launchBattle(site, challengerCard, championBefore, challengerInstance = null) {
   if (activeChallenge) return;
   if (!challengerCard) return;
   const champCard = cardsById.get(championBefore.cardId);
   if (!champCard) return;
 
-  const attackerStats = effectiveStats(challengerCard, null);
+  // Apply the challenger instance's accumulated training boosts in the fight.
+  const challengerBoosts = challengerInstance?.boosts || null;
+  const attackerStats = effectiveStats(challengerCard, challengerBoosts ? { boosts: challengerBoosts, defenses: 0 } : null);
   const defenderStats = effectiveStats(champCard, championBefore);
   const seed = seedFromStrings(
     site.id,
@@ -4415,11 +4608,17 @@ function launchBattle(site, challengerCard, championBefore) {
     if (challengerWon) {
       winnerName = profile?.name || "Challenger";
       const placedAt = Date.now();
+      // The challenger now occupies the gym — mark their inventory instance.
+      const challengerUid = challengerInstance?.uid || null;
+      if (challengerUid && getInstance(challengerUid)) {
+        markInstanceDeployed(challengerUid, site.id);
+      }
       const newChampion = {
         trainer: profile.name,
         team: profile.team || "mint",
         cardId: challengerCard.id,
-        boosts: { hp: 0, atk: 0, def: 0, spd: 0 },
+        instanceUid: challengerUid,
+        boosts: challengerInstance?.boosts ? { ...challengerInstance.boosts } : { hp: 0, atk: 0, def: 0, spd: 0 },
         defenses: 0,
         placedAt,
         lastBattleAt: placedAt,
@@ -4427,6 +4626,7 @@ function launchBattle(site, challengerCard, championBefore) {
       championsBySite.set(site.id, newChampion);
       publishChampion(site.id, newChampion);
       summary = `${escapeHtml(challengerCard.name)} dethroned ${escapeHtml(champCard.name)}. ${escapeHtml(profile?.name || "")} is the new champion of ${escapeHtml(battleSiteName(site.id))}!`;
+      renderCollection();
     } else {
       winnerName = championBefore.trainer;
       const updated = {
@@ -4820,6 +5020,7 @@ function normalizeChampion(raw) {
     trainer: String(raw.trainer),
     team: raw.team || "mint",
     cardId: String(raw.cardId),
+    instanceUid: raw.instanceUid ? String(raw.instanceUid) : null,
     boosts: {
       hp: clampBoost(raw?.boosts?.hp ?? 0),
       atk: clampBoost(raw?.boosts?.atk ?? 0),
@@ -4832,6 +5033,19 @@ function normalizeChampion(raw) {
   };
   if (!cardsById.has(champ.cardId)) return null;
   return champ;
+}
+
+function reclaimLostInstanceAtSite(siteId, lastChampionWeKnew) {
+  // If a local instance was deployed at this site but our ownership has ended
+  // (taken over, retired, or cleared), bring it back home so it can be
+  // redeployed elsewhere. Keeps boosts already mirrored from training.
+  const deployed = deployedInstanceAtSite(caught, siteId);
+  if (!deployed) return false;
+  const carryBoosts = lastChampionWeKnew?.trainer === profile?.name
+    ? lastChampionWeKnew.boosts
+    : deployed.boosts;
+  restoreInstanceHome(deployed.uid, carryBoosts);
+  return true;
 }
 
 function subscribeChampionUpdates() {
@@ -4849,27 +5063,40 @@ function subscribeChampionUpdates() {
     subscribedChampionSites.add(site.id);
     battleSitesNode.get(site.id).on((raw) => {
       const champ = normalizeChampion(raw);
+      const existing = championsBySite.get(site.id);
       if (!champ) {
         if (championsBySite.has(site.id)) {
           championsBySite.delete(site.id);
+          if (reclaimLostInstanceAtSite(site.id, existing)) renderCollection();
           renderMap();
           refreshOpenSitePanel(site.id);
+        } else if (reclaimLostInstanceAtSite(site.id, null)) {
+          renderCollection();
         }
         return;
       }
       if (isChampionRetired(champ)) {
         championsBySite.delete(site.id);
+        if (reclaimLostInstanceAtSite(site.id, champ)) renderCollection();
         // Auto-clear stale champion record so the site re-opens.
         try { battleSitesNode.get(site.id).put(null); } catch {}
         renderMap();
         refreshOpenSitePanel(site.id);
         return;
       }
-      const existing = championsBySite.get(site.id);
       const sig = JSON.stringify(champ);
       const existingSig = existing ? JSON.stringify(existing) : "";
       if (sig === existingSig) return;
       championsBySite.set(site.id, champ);
+      // If the gym's current occupant is no longer ours (or has a different
+      // instance uid than what we have parked there), pull the instance home.
+      const local = deployedInstanceAtSite(caught, site.id);
+      if (local) {
+        const stillMine = champ.trainer === profile?.name && champ.instanceUid === local.uid;
+        if (!stillMine) {
+          if (reclaimLostInstanceAtSite(site.id, existing)) renderCollection();
+        }
+      }
       renderMap();
       refreshOpenSitePanel(site.id);
     });
@@ -4883,6 +5110,7 @@ function publishChampion(siteId, champion) {
       trainer: champion.trainer,
       team: champion.team,
       cardId: champion.cardId,
+      instanceUid: champion.instanceUid || null,
       boosts: { ...champion.boosts },
       defenses: champion.defenses,
       placedAt: champion.placedAt,
@@ -4901,6 +5129,522 @@ function publishBattleEvent(event) {
   try { battleEventsNode.set(event); } catch {}
 }
 
+// ===========================================================================
+// Trading
+// ---------------------------------------------------------------------------
+// Two trainers within TRADE_RANGE_METERS can swap a specific instance each.
+// State lives under `fokemon/trades/<requestId>` on GUN. A request goes:
+//   pending (waiting for recipient)
+//   → countered (recipient picked their side and accepted)
+//   → completed (originator confirms; both sides apply the swap locally)
+//   → cancelled (either side bails)
+// Each peer is responsible for applying the swap to its OWN inventory once it
+// observes the matching status — there is no global atomic commit, but the
+// public datastore + range requirement make abuse easier to spot than fix.
+// ===========================================================================
+
+let tradesNode = null;
+const tradeRequests = new Map(); // requestId -> normalized request
+const appliedTrades = new Set();
+let openTradeRequestId = null;
+let openTradeRefresh = null;
+
+function makeRequestId() {
+  return `trade-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function packInstanceForTrade(entry) {
+  if (!entry) return null;
+  return {
+    uid: entry.uid,
+    cardId: entry.id,
+    boosts: { ...(entry.boosts || {}) },
+    caughtAt: entry.ts || 0,
+  };
+}
+
+function normalizeTradeOffer(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  if (!raw.uid || !raw.cardId) return null;
+  if (!cardsById.has(String(raw.cardId))) return null;
+  return {
+    uid: String(raw.uid),
+    cardId: String(raw.cardId),
+    boosts: normalizeBoosts(raw.boosts),
+    caughtAt: Number(raw.caughtAt) || 0,
+  };
+}
+
+function normalizeTradeRequest(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  if (!raw.id || !raw.from || !raw.to) return null;
+  const offer = normalizeTradeOffer(raw.offer);
+  if (!offer) return null;
+  const counter = raw.counterOffer ? normalizeTradeOffer(raw.counterOffer) : null;
+  const status = String(raw.status || "pending");
+  return {
+    id: String(raw.id),
+    from: String(raw.from),
+    to: String(raw.to),
+    offer,
+    counterOffer: counter,
+    status,
+    createdAt: Number(raw.createdAt) || Date.now(),
+    updatedAt: Number(raw.updatedAt) || Date.now(),
+    lat: Number(raw.lat) || null,
+    lng: Number(raw.lng) || null,
+  };
+}
+
+function publishTradeRequest(req) {
+  if (!tradesNode) return;
+  try {
+    tradesNode.get(req.id).put({
+      id: req.id,
+      from: req.from,
+      to: req.to,
+      offer: req.offer ? { ...req.offer, boosts: { ...req.offer.boosts } } : null,
+      counterOffer: req.counterOffer ? { ...req.counterOffer, boosts: { ...req.counterOffer.boosts } } : null,
+      status: req.status,
+      createdAt: req.createdAt,
+      updatedAt: Date.now(),
+      lat: req.lat ?? null,
+      lng: req.lng ?? null,
+    });
+  } catch {}
+}
+
+function nearbyTrainerEntries() {
+  if (!playerLocation) return [];
+  const out = [];
+  for (const [name, loc] of trainerLocations.entries()) {
+    if (!loc || !name || name === profile?.name) continue;
+    if (!Number.isFinite(loc.lat) || !Number.isFinite(loc.lng)) continue;
+    const dist = distanceMeters(playerLocation, loc);
+    if (dist > TRADE_RANGE_METERS) continue;
+    if (Date.now() - (loc.ts || 0) > 15 * 60 * 1000) continue;
+    out.push({ name, distance: Math.round(dist), lat: loc.lat, lng: loc.lng, ts: loc.ts });
+  }
+  out.sort((a, b) => a.distance - b.distance);
+  return out;
+}
+
+function pendingIncomingTrades() {
+  return [...tradeRequests.values()].filter((req) => {
+    if (req.to !== profile?.name) return false;
+    if (req.status === "completed" || req.status === "cancelled") return false;
+    if (Date.now() - req.createdAt > TRADE_REQUEST_TTL_MS) return false;
+    return true;
+  });
+}
+
+function applyIncomingCompletedTrade(req) {
+  // I'm the originator and the counterparty has countered+accepted. Add their
+  // instance to my inventory and remove what I offered. Idempotent via appliedTrades.
+  if (!req.counterOffer) return;
+  if (appliedTrades.has(req.id)) return;
+  appliedTrades.add(req.id);
+  // Remove my offered instance (might already be gone if deployed elsewhere or released).
+  if (req.offer && getInstance(req.offer.uid)) {
+    caught = caught.filter((c) => c.uid !== req.offer.uid);
+  }
+  // Add their offered instance into my inventory.
+  const card = cardsById.get(req.counterOffer.cardId);
+  if (card) {
+    const ts = Date.now();
+    const newEntry = {
+      id: card.id,
+      ts,
+      uid: req.counterOffer.uid || makeInstanceUid(card.id, ts),
+      boosts: normalizeBoosts(req.counterOffer.boosts),
+      deployedAt: null,
+    };
+    caught.push(newEntry);
+  }
+  rebuildCaughtIndexes();
+  saveLocal();
+  renderCollection();
+  renderMap();
+}
+
+function applyAcceptedTradeAsRecipient(req) {
+  // I'm the recipient and have countered with my own instance — finalize swap
+  // by removing what I offered and adding what they offered.
+  if (appliedTrades.has(req.id)) return;
+  appliedTrades.add(req.id);
+  if (req.counterOffer && getInstance(req.counterOffer.uid)) {
+    caught = caught.filter((c) => c.uid !== req.counterOffer.uid);
+  }
+  const card = cardsById.get(req.offer.cardId);
+  if (card) {
+    const ts = Date.now();
+    const newEntry = {
+      id: card.id,
+      ts,
+      uid: req.offer.uid || makeInstanceUid(card.id, ts),
+      boosts: normalizeBoosts(req.offer.boosts),
+      deployedAt: null,
+    };
+    caught.push(newEntry);
+  }
+  rebuildCaughtIndexes();
+  saveLocal();
+  renderCollection();
+  renderMap();
+}
+
+function subscribeTrades() {
+  if (!tradesNode) return;
+  tradesNode.map().on((raw, id) => {
+    if (!raw) {
+      if (tradeRequests.has(id)) {
+        tradeRequests.delete(id);
+        renderTradeBadge();
+        refreshOpenTradeModal();
+      }
+      return;
+    }
+    const req = normalizeTradeRequest({ ...raw, id });
+    if (!req) return;
+    if (req.from !== profile?.name && req.to !== profile?.name) return;
+    tradeRequests.set(req.id, req);
+
+    // Auto-apply on the right side once status flips:
+    if (req.status === "countered" && req.from === profile?.name) {
+      // Wait for me (originator) to confirm via modal — no auto-apply.
+    }
+    if (req.status === "completed") {
+      if (req.from === profile?.name) applyIncomingCompletedTrade(req);
+      else if (req.to === profile?.name) applyAcceptedTradeAsRecipient(req);
+    }
+    renderTradeBadge();
+    refreshOpenTradeModal();
+  });
+}
+
+function renderTradeBadge() {
+  if (!el.tradeBadge) return;
+  const pending = pendingIncomingTrades().length;
+  if (pending > 0) {
+    el.tradeBadge.textContent = String(pending);
+    el.tradeBadge.classList.remove("hidden");
+  } else {
+    el.tradeBadge.classList.add("hidden");
+  }
+}
+
+function refreshOpenTradeModal() {
+  if (!openTradeRequestId && typeof openTradeRefresh !== "function") return;
+  if (typeof openTradeRefresh === "function") openTradeRefresh();
+}
+
+function offerSummaryHtml(offer) {
+  if (!offer) return "<em>Nothing offered</em>";
+  const card = cardsById.get(offer.cardId);
+  if (!card) return "<em>Unknown Fokemon</em>";
+  const trained = (offer.boosts?.hp || 0) + (offer.boosts?.atk || 0) + (offer.boosts?.def || 0) + (offer.boosts?.spd || 0);
+  const colors = colorsFor(card);
+  return `
+    <div class="trade-offer-card" style="--type-light:${colors.light};--type-dark:${colors.dark};--type-accent:${colors.accent};">
+      <strong>${escapeHtml(card.name)}</strong>
+      <span class="type-pill" style="background:${colors.accent};color:#061226;">${escapeHtml(card.type)}</span>
+      ${instanceStatRowsHtml(card, offer.boosts)}
+      ${trained ? `<small>Trained +${trained}</small>` : `<small>Untrained</small>`}
+    </div>
+  `;
+}
+
+function openTradeModal(initialRequestId = null) {
+  if (activeChallenge) return;
+  if (openTradeRequestId) return;
+
+  const overlay = document.createElement("div");
+  overlay.className = "battle-site-modal trade-modal";
+  overlay.innerHTML = `
+    <div class="site-card trade-card" role="dialog" aria-modal="true" aria-label="Trade with trainers">
+      <header class="site-head">
+        <div>
+          <p class="eyebrow">Peer trade</p>
+          <h3>Nearby trainers</h3>
+        </div>
+        <button class="ghost trade-close" aria-label="Close">Close</button>
+      </header>
+      <div class="trade-body"></div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const bodyEl = overlay.querySelector(".trade-body");
+  const closeBtn = overlay.querySelector(".trade-close");
+  openTradeRequestId = initialRequestId || "list";
+
+  function close() {
+    overlay.remove();
+    openTradeRequestId = null;
+    openTradeRefresh = null;
+    document.removeEventListener("keydown", onKey);
+  }
+  function onKey(ev) { if (ev.key === "Escape") close(); }
+  closeBtn.addEventListener("click", close);
+  overlay.addEventListener("click", (ev) => { if (ev.target === overlay) close(); });
+  document.addEventListener("keydown", onKey);
+
+  function renderList() {
+    const nearby = nearbyTrainerEntries();
+    const incoming = pendingIncomingTrades();
+    const myOutgoing = [...tradeRequests.values()].filter((r) =>
+      r.from === profile?.name && r.status !== "completed" && r.status !== "cancelled"
+    );
+
+    bodyEl.innerHTML = `
+      ${incoming.length ? `
+        <section class="trade-section">
+          <h4>Incoming trade requests</h4>
+          <ul class="trade-list">
+            ${incoming.map((req) => `
+              <li>
+                <span><strong>${escapeHtml(req.from)}</strong> offers a ${escapeHtml(cardsById.get(req.offer.cardId)?.name || "Fokemon")}</span>
+                <button type="button" class="primary view-trade" data-id="${escapeHtml(req.id)}">Review</button>
+              </li>
+            `).join("")}
+          </ul>
+        </section>
+      ` : ""}
+      ${myOutgoing.length ? `
+        <section class="trade-section">
+          <h4>Your pending offers</h4>
+          <ul class="trade-list">
+            ${myOutgoing.map((req) => `
+              <li>
+                <span>To <strong>${escapeHtml(req.to)}</strong> — ${escapeHtml(req.status)}</span>
+                <button type="button" class="ghost view-trade" data-id="${escapeHtml(req.id)}">Review</button>
+              </li>
+            `).join("")}
+          </ul>
+        </section>
+      ` : ""}
+      <section class="trade-section">
+        <h4>Nearby trainers (≤ ${TRADE_RANGE_METERS}m)</h4>
+        ${nearby.length ? `
+          <ul class="trade-list">
+            ${nearby.map((t) => `
+              <li>
+                <span><strong>${escapeHtml(t.name)}</strong> &mdash; ${t.distance}m away</span>
+                <button type="button" class="primary start-trade" data-name="${escapeHtml(t.name)}">Trade</button>
+              </li>
+            `).join("")}
+          </ul>
+        ` : `<p class="empty-state">No trainers in range. Trade is unlocked when another player catches a Fokemon within ${TRADE_RANGE_METERS}m of you.</p>`}
+      </section>
+    `;
+
+    bodyEl.querySelectorAll(".start-trade").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        renderOffer(btn.dataset.name);
+      });
+    });
+    bodyEl.querySelectorAll(".view-trade").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        renderRequest(btn.dataset.id);
+      });
+    });
+  }
+
+  function renderOffer(recipientName) {
+    const available = availableInstances(caught);
+    if (!available.length) {
+      bodyEl.innerHTML = `
+        <p><a href="#" class="back-link">&larr; Back</a></p>
+        <p class="empty-state">You don't have any Fokemon free to trade. Recall one from a gym first.</p>
+      `;
+      bodyEl.querySelector(".back-link").addEventListener("click", (ev) => { ev.preventDefault(); renderList(); });
+      return;
+    }
+    bodyEl.innerHTML = `
+      <p><a href="#" class="back-link">&larr; Back</a></p>
+      <h4>Offer a Fokemon to <strong>${escapeHtml(recipientName)}</strong></h4>
+      <p class="picker-prompt">Pick the individual you want to send:</p>
+      <div class="picker-grid">
+        ${available.map((entry) => {
+          const card = cardsById.get(entry.id);
+          if (!card) return "";
+          const colors = colorsFor(card);
+          const total = instancePower(entry);
+          const trained = (entry.boosts?.hp || 0) + (entry.boosts?.atk || 0) + (entry.boosts?.def || 0) + (entry.boosts?.spd || 0);
+          const { idx, total: of } = speciesIndexForInstance(entry.uid);
+          return `
+            <button class="picker-card" data-uid="${escapeHtml(entry.uid)}" style="--type-light:${colors.light};--type-dark:${colors.dark};--type-accent:${colors.accent};">
+              <span class="picker-power">⚡${total}</span>
+              <strong>${escapeHtml(card.name)}${of > 1 ? ` <small>#${idx}</small>` : ""}</strong>
+              <small>${escapeHtml(card.type)}${trained ? ` • +${trained} trained` : ""}</small>
+            </button>
+          `;
+        }).join("")}
+      </div>
+    `;
+    bodyEl.querySelector(".back-link").addEventListener("click", (ev) => { ev.preventDefault(); renderList(); });
+    bodyEl.querySelectorAll(".picker-card").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const uid = btn.dataset.uid;
+        const entry = getInstance(uid);
+        if (!entry || entry.deployedAt) return;
+        const req = {
+          id: makeRequestId(),
+          from: profile.name,
+          to: recipientName,
+          offer: packInstanceForTrade(entry),
+          counterOffer: null,
+          status: "pending",
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          lat: playerLocation?.lat ?? null,
+          lng: playerLocation?.lng ?? null,
+        };
+        tradeRequests.set(req.id, req);
+        publishTradeRequest(req);
+        renderRequest(req.id);
+      });
+    });
+  }
+
+  function renderRequest(reqId) {
+    const req = tradeRequests.get(reqId);
+    if (!req) { renderList(); return; }
+    const card = cardsById.get(req.offer.cardId);
+    const counterCard = req.counterOffer ? cardsById.get(req.counterOffer.cardId) : null;
+    const iAmFrom = req.from === profile?.name;
+    const iAmTo = req.to === profile?.name;
+
+    let actionsHtml = "";
+    if (req.status === "pending" && iAmTo) {
+      // Recipient picks their counter-offer.
+      const available = availableInstances(caught);
+      if (!available.length) {
+        actionsHtml = `<p class="empty-state">You have no Fokemon free to offer back. Recall one from a gym first.</p>
+          <button type="button" class="ghost reject-trade">Decline</button>`;
+      } else {
+        actionsHtml = `
+          <p class="picker-prompt">Offer one of yours in return:</p>
+          <div class="picker-grid">
+            ${available.map((entry) => {
+              const c = cardsById.get(entry.id);
+              if (!c) return "";
+              const colors = colorsFor(c);
+              const total = instancePower(entry);
+              const trained = (entry.boosts?.hp || 0) + (entry.boosts?.atk || 0) + (entry.boosts?.def || 0) + (entry.boosts?.spd || 0);
+              const { idx, total: of } = speciesIndexForInstance(entry.uid);
+              return `
+                <button class="picker-card" data-uid="${escapeHtml(entry.uid)}" style="--type-light:${colors.light};--type-dark:${colors.dark};--type-accent:${colors.accent};">
+                  <span class="picker-power">⚡${total}</span>
+                  <strong>${escapeHtml(c.name)}${of > 1 ? ` <small>#${idx}</small>` : ""}</strong>
+                  <small>${escapeHtml(c.type)}${trained ? ` • +${trained} trained` : ""}</small>
+                </button>
+              `;
+            }).join("")}
+          </div>
+          <div class="trade-actions">
+            <button type="button" class="ghost reject-trade">Decline</button>
+          </div>
+        `;
+      }
+    } else if (req.status === "countered" && iAmFrom) {
+      actionsHtml = `
+        <div class="trade-actions">
+          <button type="button" class="primary confirm-trade">Confirm swap</button>
+          <button type="button" class="ghost cancel-trade">Cancel</button>
+        </div>
+      `;
+    } else if (req.status === "completed") {
+      actionsHtml = `<p class="trade-result success">Trade complete — check your collection.</p>`;
+    } else if (req.status === "cancelled") {
+      actionsHtml = `<p class="trade-result fail">Trade cancelled.</p>`;
+    } else if (req.status === "pending" && iAmFrom) {
+      actionsHtml = `
+        <p class="trade-status">Waiting for ${escapeHtml(req.to)} to respond…</p>
+        <div class="trade-actions">
+          <button type="button" class="ghost cancel-trade">Cancel</button>
+        </div>
+      `;
+    } else if (req.status === "countered" && iAmTo) {
+      actionsHtml = `<p class="trade-status">Waiting for ${escapeHtml(req.from)} to confirm…</p>
+        <div class="trade-actions">
+          <button type="button" class="ghost cancel-trade">Cancel</button>
+        </div>`;
+    }
+
+    bodyEl.innerHTML = `
+      <p><a href="#" class="back-link">&larr; Back</a></p>
+      <section class="trade-summary">
+        <div class="trade-side">
+          <p class="trade-side-label">${escapeHtml(req.from)} offers</p>
+          ${offerSummaryHtml(req.offer)}
+        </div>
+        <span class="trade-arrow">⇄</span>
+        <div class="trade-side">
+          <p class="trade-side-label">${escapeHtml(req.to)} ${req.counterOffer ? "offers" : "to respond"}</p>
+          ${req.counterOffer ? offerSummaryHtml(req.counterOffer) : `<p class="empty-state">Waiting…</p>`}
+        </div>
+      </section>
+      <section class="trade-actions-section">
+        ${actionsHtml}
+      </section>
+    `;
+    bodyEl.querySelector(".back-link")?.addEventListener("click", (ev) => { ev.preventDefault(); renderList(); });
+
+    bodyEl.querySelectorAll(".picker-card").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const uid = btn.dataset.uid;
+        const entry = getInstance(uid);
+        if (!entry || entry.deployedAt) return;
+        const updated = {
+          ...req,
+          counterOffer: packInstanceForTrade(entry),
+          status: "countered",
+          updatedAt: Date.now(),
+        };
+        tradeRequests.set(req.id, updated);
+        publishTradeRequest(updated);
+        renderRequest(req.id);
+      });
+    });
+    bodyEl.querySelector(".confirm-trade")?.addEventListener("click", () => {
+      const finalized = { ...req, status: "completed", updatedAt: Date.now() };
+      tradeRequests.set(req.id, finalized);
+      publishTradeRequest(finalized);
+      // Apply locally so the originator's inventory updates immediately.
+      applyIncomingCompletedTrade(finalized);
+      renderRequest(req.id);
+    });
+    bodyEl.querySelector(".cancel-trade")?.addEventListener("click", () => {
+      const cancelled = { ...req, status: "cancelled", updatedAt: Date.now() };
+      tradeRequests.set(req.id, cancelled);
+      publishTradeRequest(cancelled);
+      renderRequest(req.id);
+    });
+    bodyEl.querySelector(".reject-trade")?.addEventListener("click", () => {
+      const cancelled = { ...req, status: "cancelled", updatedAt: Date.now() };
+      tradeRequests.set(req.id, cancelled);
+      publishTradeRequest(cancelled);
+      renderList();
+    });
+  }
+
+  openTradeRefresh = () => {
+    // If a tracked request gets a new status update behind the scenes, refresh the view.
+    if (openTradeRequestId && openTradeRequestId !== "list" && tradeRequests.has(openTradeRequestId)) {
+      renderRequest(openTradeRequestId);
+    } else {
+      renderList();
+    }
+  };
+
+  if (initialRequestId && tradeRequests.has(initialRequestId)) {
+    renderRequest(initialRequestId);
+  } else {
+    renderList();
+  }
+}
+
 function initGun() {
   if (typeof window === "undefined" || typeof window.Gun !== "function") return;
   try {
@@ -4910,9 +5654,11 @@ function initGun() {
     gridCaughtNode = root.get("caughtByGrid");
     battleSitesNode = root.get("battleSites");
     battleEventsNode = root.get("battleEvents");
+    tradesNode = root.get("trades");
     connectFeed();
     connectGridCaught();
     subscribeChampionUpdates();
+    subscribeTrades();
   } catch {
     eventsNode = FALLBACK_EVENTS_NODE;
   }
@@ -4933,6 +5679,7 @@ function enterGame() {
   renderCards();
   renderMap();
   renderCollection();
+  renderTradeBadge();
   connectFeed();
   updateBucketLabel();
   renderDebugChip();
@@ -4964,6 +5711,13 @@ if (el.enableLocation) {
   });
 }
 
+if (el.tradeBtn) {
+  el.tradeBtn.addEventListener("click", () => {
+    if (openTradeRequestId) return;
+    openTradeModal();
+  });
+}
+
 
 initGun();
 
@@ -4988,5 +5742,6 @@ if (typeof setInterval === "function") {
       if (anyChange) renderMap();
     }
     updateBucketLabel();
+    renderTradeBadge();
   }, 1000);
 }
