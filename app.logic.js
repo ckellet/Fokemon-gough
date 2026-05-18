@@ -43,6 +43,120 @@ export function computeCollectionStats(caught) {
   };
 }
 
+// Collection view: sorting + duplicate grouping ----------------------------
+
+// Sort options surfaced in the collection toolbar. `key` is persisted; `label`
+// is the single source of truth for the UI dropdown.
+export const COLLECTION_SORTS = [
+  { key: "recent", label: "Recently caught" },
+  { key: "oldest", label: "Oldest first" },
+  { key: "power", label: "Power (strongest)" },
+  { key: "hp", label: "HP (highest)" },
+  { key: "name", label: "Name (A–Z)" },
+  { key: "type", label: "Type" },
+  { key: "rarity", label: "Rarity" },
+];
+
+const RARITY_RANK = { epic: 0, rare: 1, common: 2 };
+
+function entryPower(entry, card) {
+  if (!card) return 0;
+  const b = entry?.boosts || EMPTY_BOOSTS;
+  return (
+    (card.hp || 0) + (card.atk || 0) + (card.def || 0) + (card.spd || 0)
+    + (b.hp || 0) + (b.atk || 0) + (b.def || 0) + (b.spd || 0)
+  );
+}
+
+function entryHp(entry, card) {
+  return (card?.hp || 0) + (entry?.boosts?.hp || 0);
+}
+
+function nameCmp(a, b) {
+  return String(a?.name || a?.id || "").localeCompare(String(b?.name || b?.id || ""));
+}
+
+// Comparator over species groups. Date sorts use the group's newest/oldest
+// catch; stat sorts use the strongest individual (the representative).
+function groupComparator(sortKey) {
+  return (A, B) => {
+    const a = A.representative, b = B.representative;
+    const ca = A.card, cb = B.card;
+    switch (sortKey) {
+      case "oldest":
+        return (A.oldestTs - B.oldestTs) || nameCmp(ca, cb);
+      case "power":
+        return (entryPower(b, cb) - entryPower(a, ca)) || nameCmp(ca, cb);
+      case "hp":
+        return (entryHp(b, cb) - entryHp(a, ca)) || nameCmp(ca, cb);
+      case "name":
+        return nameCmp(ca, cb);
+      case "type":
+        return String(ca?.type || "").localeCompare(String(cb?.type || "")) || nameCmp(ca, cb);
+      case "rarity":
+        return ((RARITY_RANK[ca?.rarity] ?? 9) - (RARITY_RANK[cb?.rarity] ?? 9)) || nameCmp(ca, cb);
+      case "recent":
+      default:
+        return (B.newestTs - A.newestTs) || nameCmp(ca, cb);
+    }
+  };
+}
+
+// Group caught entries by species and order them for display.
+//   caught   - array of caught instance entries
+//   lookup   - (id) => card definition (or undefined)
+//   sortKey  - one of COLLECTION_SORTS keys
+// Returns an ordered array of groups:
+//   { id, card, members, representative, count, newestTs, oldestTs }
+// `members` is ordered strongest-first; `representative` is members[0].
+export function groupCollection(caught, lookup, sortKey = "recent") {
+  const get = typeof lookup === "function"
+    ? lookup
+    : (id) => (lookup && typeof lookup.get === "function" ? lookup.get(id) : undefined);
+  const byId = new Map();
+  for (const entry of caught || []) {
+    if (!byId.has(entry.id)) byId.set(entry.id, []);
+    byId.get(entry.id).push(entry);
+  }
+  const groups = [];
+  for (const [id, members] of byId) {
+    const card = get(id) || null;
+    const ordered = [...members].sort(
+      (a, b) => (entryPower(b, card) - entryPower(a, card)) || ((b.ts || 0) - (a.ts || 0))
+    );
+    const tsValues = members.map((m) => m.ts || 0);
+    groups.push({
+      id,
+      card,
+      members: ordered,
+      representative: ordered[0],
+      count: members.length,
+      newestTs: tsValues.length ? Math.max(...tsValues) : 0,
+      oldestTs: tsValues.length ? Math.min(...tsValues) : 0,
+    });
+  }
+  groups.sort(groupComparator(sortKey));
+  return groups;
+}
+
+// Flatten ordered groups into the linear sequence the immersive viewer pages
+// through: each group's members in strongest-first order.
+export function flattenCollectionGroups(groups) {
+  const out = [];
+  for (const g of groups || []) {
+    g.members.forEach((entry, indexInGroup) => {
+      out.push({
+        entry,
+        speciesId: g.id,
+        indexInGroup,
+        groupCount: g.count,
+        isRepresentative: indexInGroup === 0,
+      });
+    });
+  }
+  return out;
+}
+
 export const EMPTY_BOOSTS = Object.freeze({ hp: 0, atk: 0, def: 0, spd: 0 });
 
 function randomToken() {

@@ -129,6 +129,13 @@
                 <small>Unique cards</small>
               </div>
             </div>
+            <div class="collection-toolbar">
+              <label class="sort-control">
+                <span>Sort</span>
+                <select id="collectionSort" aria-label="Sort collection"></select>
+              </label>
+              <button type="button" id="expandAllBtn" class="ghost toolbar-btn" aria-pressed="false">Expand all</button>
+            </div>
             <div id="collection" class="collection"></div>
           </article>
         </div>
@@ -142,6 +149,19 @@
         <p id="locationModalBody">FokéGo spawns wild Fokemon around you — we need your live location to plot them on the map and let you walk up to catch them.</p>
         <button id="enableLocation" type="button">Enable location</button>
         <small id="modalLocationHelp"></small>
+      </div>
+    </div>
+
+    <div id="cardViewer" class="card-viewer hidden" role="dialog" aria-modal="true" aria-label="Card viewer">
+      <div class="cv-backdrop" data-cv-close></div>
+      <button type="button" class="cv-close" id="cvClose" aria-label="Close viewer">✕</button>
+      <button type="button" class="cv-nav cv-prev" id="cvPrev" aria-label="Previous card">‹</button>
+      <div class="cv-stage" id="cvStage"></div>
+      <button type="button" class="cv-nav cv-next" id="cvNext" aria-label="Next card">›</button>
+      <div class="cv-footer">
+        <span class="cv-counter" id="cvCounter"></span>
+        <span class="cv-hint">Tap card to flip · swipe or arrows to browse</span>
+        <button type="button" class="cv-motion" id="cvMotion" hidden>Enable tilt</button>
       </div>
     </div>
 
