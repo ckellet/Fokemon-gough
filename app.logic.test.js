@@ -2,6 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   computeCollectionStats,
+  COLLECTION_SORTS,
+  groupCollection,
+  flattenCollectionGroups,
   computePoiPlacements,
   computeSpawnPlacements,
   computeSpawnSlots,
@@ -373,4 +376,79 @@ test('simulateBattle: stronger fokemon usually wins when types neutral', () => {
     if (res.winner === 'attacker') strongWins += 1;
   }
   assert.ok(strongWins >= 26, `expected dominant winner most of the time, got ${strongWins}/30`);
+});
+
+// --- collection sorting + grouping -----------------------------------------
+
+const COLL_CARDS = {
+  volt: { id: 'volt', name: 'VoltLynx', type: 'Electric', rarity: 'rare', hp: 58, atk: 72, def: 44, spd: 88 }, // base 262
+  moss: { id: 'moss', name: 'Mossaur', type: 'Leaf', rarity: 'common', hp: 84, atk: 56, def: 70, spd: 38 }, // base 248
+  vulp: { id: 'vulp', name: 'Vulpyre', type: 'Fire', rarity: 'epic', hp: 62, atk: 92, def: 50, spd: 86 }, // base 290
+};
+const collLookup = (id) => COLL_CARDS[id];
+const collCaught = () => [
+  { id: 'volt', uid: 'v1', ts: 1000, boosts: { hp: 0, atk: 0, def: 0, spd: 0 } },
+  { id: 'volt', uid: 'v2', ts: 3000, boosts: { hp: 10, atk: 0, def: 0, spd: 0 } }, // strongest volt: power 272, hp 68
+  { id: 'volt', uid: 'v3', ts: 2000, boosts: { hp: 0, atk: 0, def: 0, spd: 0 } },
+  { id: 'moss', uid: 'm1', ts: 5000, boosts: { hp: 0, atk: 0, def: 0, spd: 0 } },
+  { id: 'vulp', uid: 'p1', ts: 4000, boosts: { hp: 0, atk: 0, def: 0, spd: 0 } },
+];
+const groupIds = (groups) => groups.map((g) => g.id);
+
+test('COLLECTION_SORTS exposes the expected sort keys', () => {
+  assert.deepEqual(
+    COLLECTION_SORTS.map((s) => s.key),
+    ['recent', 'oldest', 'power', 'hp', 'name', 'type', 'rarity']
+  );
+  for (const s of COLLECTION_SORTS) assert.ok(typeof s.label === 'string' && s.label.length);
+});
+
+test('groupCollection clusters duplicates with the strongest as representative', () => {
+  const groups = groupCollection(collCaught(), collLookup, 'name');
+  const volt = groups.find((g) => g.id === 'volt');
+  assert.equal(volt.count, 3);
+  assert.equal(volt.representative.uid, 'v2'); // boosted = strongest
+  // members ordered strongest-first, ties broken by newest ts
+  assert.deepEqual(volt.members.map((m) => m.uid), ['v2', 'v3', 'v1']);
+  assert.equal(volt.newestTs, 3000);
+  assert.equal(volt.oldestTs, 1000);
+});
+
+test('groupCollection sorts by power, hp, recent, oldest, name and rarity', () => {
+  const cc = collCaught();
+  assert.deepEqual(groupIds(groupCollection(cc, collLookup, 'power')), ['vulp', 'volt', 'moss']);
+  assert.deepEqual(groupIds(groupCollection(cc, collLookup, 'hp')), ['moss', 'volt', 'vulp']);
+  assert.deepEqual(groupIds(groupCollection(cc, collLookup, 'recent')), ['moss', 'vulp', 'volt']);
+  assert.deepEqual(groupIds(groupCollection(cc, collLookup, 'oldest')), ['volt', 'vulp', 'moss']);
+  assert.deepEqual(groupIds(groupCollection(cc, collLookup, 'name')), ['moss', 'volt', 'vulp']);
+  assert.deepEqual(groupIds(groupCollection(cc, collLookup, 'rarity')), ['vulp', 'volt', 'moss']);
+});
+
+test('groupCollection accepts a Map lookup and tolerates unknown cards', () => {
+  const map = new Map(Object.entries(COLL_CARDS));
+  const groups = groupCollection(
+    [...collCaught(), { id: 'ghost', uid: 'g1', ts: 9000, boosts: {} }],
+    map,
+    'recent'
+  );
+  assert.equal(groups.length, 4);
+  const ghost = groups.find((g) => g.id === 'ghost');
+  assert.equal(ghost.card, null);
+  assert.equal(ghost.count, 1);
+});
+
+test('flattenCollectionGroups yields a rep-first linear sequence', () => {
+  const groups = groupCollection(collCaught(), collLookup, 'name');
+  const flat = flattenCollectionGroups(groups);
+  assert.deepEqual(flat.map((f) => f.entry.uid), ['m1', 'v2', 'v3', 'v1', 'p1']);
+  const v3 = flat.find((f) => f.entry.uid === 'v3');
+  assert.equal(v3.isRepresentative, false);
+  assert.equal(v3.indexInGroup, 1);
+  assert.equal(v3.groupCount, 3);
+  assert.equal(flat.find((f) => f.entry.uid === 'v2').isRepresentative, true);
+});
+
+test('groupCollection handles empty input', () => {
+  assert.deepEqual(groupCollection([], collLookup, 'recent'), []);
+  assert.deepEqual(flattenCollectionGroups([]), []);
 });

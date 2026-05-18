@@ -406,35 +406,43 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
 }
 .empty-state { margin: .2rem 0; color: var(--muted); }
 
+/* Collection toolbar (sort + expand all) */
+.collection-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .6rem;
+  margin: .25rem 0 1rem;
+}
+.collection-toolbar .sort-control {
+  display: inline-flex;
+  align-items: center;
+  gap: .5rem;
+  color: var(--muted);
+  font-size: .8rem;
+}
+.collection-toolbar .sort-control span {
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  font-size: .68rem;
+}
+.collection-toolbar select {
+  padding: .45rem .7rem;
+  font-size: .85rem;
+}
+.collection-toolbar .toolbar-btn {
+  padding: .45rem .8rem;
+  font-size: .8rem;
+}
+.collection-toolbar .toolbar-btn[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Grid tile — a compact, tappable card that opens the immersive viewer */
 .gallery-card {
-  perspective: 1100px;
-  height: 260px;
-  cursor: pointer;
-  background: transparent;
-  border: none;
-  padding: 0;
-  outline: none;
-}
-.gallery-card:focus-visible .flipper {
-  box-shadow: 0 0 0 2px var(--accent);
-  border-radius: 16px;
-}
-
-.gallery-card .flipper {
   position: relative;
-  width: 100%;
-  height: 100%;
-  transform-style: preserve-3d;
-  transition: transform 0.6s cubic-bezier(.2, .8, .2, 1);
-}
-
-.gallery-card.flipped .flipper { transform: rotateY(180deg); }
-
-.gallery-card .face {
-  position: absolute;
-  inset: 0;
-  backface-visibility: hidden;
-  -webkit-backface-visibility: hidden;
+  cursor: pointer;
   border-radius: 16px;
   border: 1px solid var(--line);
   background: linear-gradient(165deg, rgba(28, 38, 70, .85), rgba(8, 14, 30, .92));
@@ -442,28 +450,65 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: .35rem;
-  box-shadow: 0 12px 36px rgba(0, 0, 0, .35);
+  gap: .45rem;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, .32);
+  transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+  outline: none;
 }
-
-.gallery-card .face.front {
-  justify-content: space-between;
+.gallery-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, .42);
+  border-color: rgba(255, 255, 255, .22);
 }
-
-.gallery-card .face.back {
-  transform: rotateY(180deg);
-  align-items: stretch;
-  justify-content: flex-start;
-  gap: .55rem;
+.gallery-card:focus-visible {
+  box-shadow: 0 0 0 2px var(--accent), 0 12px 30px rgba(0, 0, 0, .32);
 }
+.gallery-card.deployed { border-color: rgba(124, 240, 198, .4); }
 
-.gallery-card .face.back header {
-  display: flex;
-  flex-direction: column;
-  gap: .15rem;
+/* Deck look when a species has duplicates collapsed behind it */
+.gallery-card.stacked::before,
+.gallery-card.stacked::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: linear-gradient(165deg, rgba(24, 32, 60, .8), rgba(6, 11, 24, .9));
+  z-index: -1;
 }
+.gallery-card.stacked::before { transform: translate(5px, 6px) rotate(1.4deg); }
+.gallery-card.stacked::after  { transform: translate(10px, 12px) rotate(2.8deg); }
 
-.gallery-card .face.back header strong { font-size: 1rem; }
+.gallery-card.member {
+  border-style: dashed;
+  border-color: rgba(255, 255, 255, .14);
+}
+.gallery-card.member.collapsed { display: none; }
+
+.stack-badge {
+  position: absolute;
+  top: .55rem;
+  left: .55rem;
+  background: rgba(124, 240, 198, .22);
+  border: 1px solid rgba(124, 240, 198, .55);
+  color: #d8fff0;
+  font-size: .72rem;
+  padding: .12rem .5rem;
+  border-radius: 999px;
+  font-weight: 800;
+}
+.expand-btn {
+  margin-top: .15rem;
+  padding: .35rem .7rem;
+  font-size: .72rem;
+  border-radius: 999px;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--text);
+}
+.expand-btn:hover { border-color: var(--accent); color: var(--accent); }
+/* In a tile the stack badge owns the top-left, so push deployed to the right */
+.gallery-card .deployed-pill { top: .55rem; left: auto; right: .55rem; }
 
 .gallery-art {
   width: 100%;
@@ -1339,4 +1384,236 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
 @media (max-width: 560px) {
   .trade-summary { grid-template-columns: 1fr; }
   .trade-arrow { transform: rotate(90deg); }
+}
+
+/* ===========================================================================
+   Immersive card viewer — a virtual representation of a physical trading card
+   =========================================================================== */
+.card-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+.card-viewer.hidden { display: none; }
+.cv-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(3, 6, 14, .82);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.cv-stage {
+  position: relative;
+  z-index: 1;
+  perspective: 1300px;
+  width: min(380px, 86vw);
+}
+
+.cv-card {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 5 / 7;
+  max-height: 82vh;
+  transform-style: preserve-3d;
+  transform: rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg));
+  transition: transform .16s ease-out;
+  cursor: pointer;
+  --holo: 0;
+  --mx: 50%;
+  --my: 50%;
+}
+.cv-card.rarity-epic   { --holo: .60; }
+.cv-card.rarity-rare   { --holo: .34; }
+.cv-card.rarity-common { --holo: .15; }
+
+.cv-flipper {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  transform-style: preserve-3d;
+  transition: transform .6s cubic-bezier(.2, .8, .2, 1);
+}
+.cv-card.flipped .cv-flipper { transform: rotateY(180deg); }
+
+.cv-face {
+  position: absolute;
+  inset: 0;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  border-radius: 20px;
+  overflow: hidden;
+  border: 2px solid var(--cv-edge, rgba(255, 255, 255, .25));
+  background: linear-gradient(165deg, rgba(30, 40, 74, .96), rgba(7, 12, 26, .98));
+  box-shadow:
+    0 30px 70px rgba(0, 0, 0, .6),
+    0 0 0 1px rgba(255, 255, 255, .04) inset,
+    0 0 38px var(--cv-glow, rgba(124, 240, 198, .25));
+  display: flex;
+  flex-direction: column;
+  padding: 1rem .95rem;
+  gap: .6rem;
+}
+.cv-face.back { transform: rotateY(180deg); }
+
+/* Holographic foil + moving glare, layered over each face */
+.cv-holo,
+.cv-glare {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: 18px;
+}
+.cv-holo {
+  opacity: var(--holo, 0);
+  mix-blend-mode: color-dodge;
+  background:
+    repeating-linear-gradient(115deg,
+      transparent 0 6%, rgba(255, 255, 255, .10) 7.5%, transparent 9% 15%),
+    conic-gradient(from 0deg at var(--mx) var(--my),
+      #ffe66d, #ff8fab, #b57cff, #4ea9ff, #7cf0c6, #ffe66d);
+  transition: opacity .2s ease;
+}
+.cv-glare {
+  background: radial-gradient(circle at var(--mx) var(--my),
+    rgba(255, 255, 255, .42), rgba(255, 255, 255, 0) 46%);
+  mix-blend-mode: overlay;
+}
+
+.cv-body {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: .6rem;
+}
+
+/* Card front */
+.cv-front-head { display: flex; align-items: flex-start; justify-content: space-between; gap: .5rem; }
+.cv-front-head h2 { margin: 0; font-size: 1.15rem; line-height: 1.1; }
+.cv-front-head .rarity { margin: .2rem 0 0; }
+.cv-art {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  border-radius: 14px;
+  background: linear-gradient(160deg, rgba(112, 124, 180, .2), rgba(8, 14, 30, .6));
+  border: 1px solid rgba(255, 255, 255, .08);
+}
+.cv-badges { display: flex; flex-wrap: wrap; gap: .35rem; align-items: center; }
+.cv-statline {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: .4rem;
+  text-align: center;
+}
+.cv-statline div {
+  background: rgba(255, 255, 255, .05);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: .35rem .2rem;
+}
+.cv-statline span { display: block; font-weight: 800; font-size: .95rem; color: var(--text); }
+.cv-statline small { color: var(--muted); font-size: .58rem; letter-spacing: .08em; }
+.cv-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: .66rem;
+  color: var(--muted);
+  letter-spacing: .03em;
+}
+
+/* Card back */
+.cv-face.back { gap: .55rem; }
+.cv-face.back header strong { font-size: 1.05rem; }
+.cv-face.back .stats-list { margin-top: .2rem; }
+.cv-face.back .flavor { margin: auto 0 .2rem; }
+.cv-face.back .instance-actions { margin-top: .2rem; }
+.cv-back-tip {
+  text-align: center;
+  font-size: .6rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .12em;
+}
+
+/* Controls */
+.cv-close {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  z-index: 3;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, .08);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-size: 1.1rem;
+  line-height: 1;
+}
+.cv-close:hover { background: rgba(255, 255, 255, .16); }
+.cv-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 2;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, .08);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-size: 1.6rem;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.cv-nav:hover { background: rgba(255, 255, 255, .18); }
+.cv-nav[disabled] { opacity: .3; cursor: not-allowed; }
+.cv-prev { left: max(1rem, 4vw); }
+.cv-next { right: max(1rem, 4vw); }
+.cv-footer {
+  position: absolute;
+  bottom: 1.1rem;
+  left: 0;
+  right: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: .3rem;
+}
+.cv-counter { font-weight: 800; color: var(--text); font-size: .9rem; letter-spacing: .05em; }
+.cv-hint { font-size: .66rem; color: var(--muted); letter-spacing: .06em; text-transform: uppercase; }
+.cv-motion {
+  margin-top: .2rem;
+  padding: .35rem .8rem;
+  font-size: .72rem;
+  border-radius: 999px;
+  background: transparent;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+}
+
+@media (max-width: 560px) {
+  .cv-nav { width: 44px; height: 44px; font-size: 1.3rem; }
+  .cv-prev { left: .4rem; }
+  .cv-next { right: .4rem; }
+  .cv-stage { width: min(340px, 82vw); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cv-card { transition: none; transform: none !important; }
+  .cv-flipper { transition: transform .2s linear; }
+  .cv-holo, .cv-glare { display: none; }
+  .gallery-card { transition: none; }
 }

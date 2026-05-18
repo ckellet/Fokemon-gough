@@ -25,6 +25,9 @@ import {
   deployedInstanceAtSite,
   mergeBoosts,
   normalizeBoosts,
+  COLLECTION_SORTS,
+  groupCollection,
+  flattenCollectionGroups,
 } from "./app.logic.js";
 
 const TRADE_RANGE_METERS = 200;
@@ -362,6 +365,15 @@ const el = {
   caughtCount: $("caughtCount"),
   uniqueCount: $("uniqueCount"),
   collection: $("collection"),
+  collectionSort: $("collectionSort"),
+  expandAllBtn: $("expandAllBtn"),
+  cardViewer: $("cardViewer"),
+  cvStage: $("cvStage"),
+  cvPrev: $("cvPrev"),
+  cvNext: $("cvNext"),
+  cvClose: $("cvClose"),
+  cvCounter: $("cvCounter"),
+  cvMotion: $("cvMotion"),
   reset: $("resetProfile"),
   locationModal: $("locationModal"),
   modalLocationHelp: $("modalLocationHelp"),
@@ -372,6 +384,19 @@ const el = {
 };
 
 let locationGranted = false;
+
+// Collection view state
+const COLLECTION_SORT_KEY = "fokemon_collection_sort";
+const VALID_SORTS = new Set(COLLECTION_SORTS.map((s) => s.key));
+let collectionSort = "recent";
+try {
+  const stored = localStorage.getItem(COLLECTION_SORT_KEY);
+  if (stored && VALID_SORTS.has(stored)) collectionSort = stored;
+} catch {}
+const expandedSpecies = new Set(); // species ids whose duplicates are revealed
+let viewerOrder = []; // [{ entry, speciesId, indexInGroup, groupCount }]
+let viewerIndex = 0;
+let viewerFlipped = false;
 
 function safeStorageGet(key, fallback) {
   try {
@@ -673,6 +698,33 @@ function instanceStatRowsHtml(card, boosts) {
   `;
 }
 
+function formatCaughtDate(ts) {
+  if (!ts) return "";
+  try {
+    return new Date(ts).toLocaleDateString(undefined, {
+      year: "numeric", month: "short", day: "numeric",
+    });
+  } catch {
+    return "";
+  }
+}
+
+function syncCollectionToolbar(multiSpeciesIds) {
+  if (el.collectionSort && !el.collectionSort.options.length) {
+    el.collectionSort.innerHTML = COLLECTION_SORTS
+      .map((s) => `<option value="${s.key}">${escapeHtml(s.label)}</option>`)
+      .join("");
+  }
+  if (el.collectionSort) el.collectionSort.value = collectionSort;
+  if (el.expandAllBtn) {
+    const hasMulti = multiSpeciesIds.size > 0;
+    el.expandAllBtn.hidden = !hasMulti;
+    const allOpen = hasMulti && [...multiSpeciesIds].every((id) => expandedSpecies.has(id));
+    el.expandAllBtn.textContent = allOpen ? "Collapse all" : "Expand all";
+    el.expandAllBtn.setAttribute("aria-pressed", allOpen ? "true" : "false");
+  }
+}
+
 function renderCollection() {
   if (!el.caughtCount) return;
   el.caughtCount.textContent = caught.length;
@@ -681,65 +733,62 @@ function renderCollection() {
 
   if (!caught.length) {
     el.collection.innerHTML = `<p class="empty-state">Catch a Fokemon to start your dex — each individual gets its own card, stats, and training history.</p>`;
+    viewerOrder = [];
+    syncCollectionToolbar(new Set());
     return;
   }
 
-  // Sort: species cluster, then strongest individual first (training matters).
-  const sorted = [...caught].sort((a, b) => {
-    if (a.id !== b.id) return a.id < b.id ? -1 : 1;
-    return instancePower(b) - instancePower(a);
-  });
+  const groups = groupCollection(caught, cardsById, collectionSort);
+  viewerOrder = flattenCollectionGroups(groups);
+  const vindexByUid = new Map(viewerOrder.map((v, i) => [v.entry.uid, i]));
+  const multiSpeciesIds = new Set(groups.filter((g) => g.count > 1).map((g) => g.id));
+  syncCollectionToolbar(multiSpeciesIds);
 
-  // Number copies of each species so trainers can distinguish them at a glance.
-  const speciesCount = new Map();
-  for (const c of sorted) speciesCount.set(c.id, (speciesCount.get(c.id) || 0) + 1);
-  const seen = new Map();
-
-  el.collection.innerHTML = sorted
-    .map((entry) => {
-      const card = cardsById.get(entry.id);
+  el.collection.innerHTML = groups
+    .map((group) => {
+      const card = group.card;
       if (!card) return "";
-      const colors = colorsFor(card);
-      const power = instancePower(entry);
-      const tier = powerTier(power);
-      const idx = (seen.get(entry.id) || 0) + 1;
-      seen.set(entry.id, idx);
-      const ofMany = speciesCount.get(entry.id);
-      const trained = (entry.boosts?.hp || 0) + (entry.boosts?.atk || 0) + (entry.boosts?.def || 0) + (entry.boosts?.spd || 0);
-      const deployed = !!entry.deployedAt;
-      const deployedLabel = deployed ? battleSiteName(entry.deployedAt) : "";
-      return `
-        <div class="gallery-card${deployed ? " deployed" : ""}" data-uid="${escapeHtml(entry.uid)}" tabindex="0" role="button" aria-label="Flip ${escapeHtml(card.name)} card">
-          <div class="flipper">
-            <div class="face front">
-              ${ofMany > 1 ? `<span class="count-pill" aria-label="Individual ${idx} of ${ofMany}">#${idx}/${ofMany}</span>` : ""}
-              ${deployed ? `<span class="deployed-pill" title="Deployed at ${escapeHtml(deployedLabel)}">🛡 At gym</span>` : ""}
-              <canvas class="gallery-art" width="160" height="120" aria-hidden="true"></canvas>
-              <div class="gallery-meta">
-                <strong>${escapeHtml(card.name)}</strong>
-                <span class="type-pill" style="background:${colors.accent};color:#061226;">${escapeHtml(card.type)}</span>
-                <span class="power-chip ${tier}" title="Power level">⚡ ${power}</span>
-              </div>
-              ${trained ? `<span class="trained-badge" title="Training boosts">+${trained} trained</span>` : ""}
-              <span class="flip-hint">Tap for stats</span>
-            </div>
-            <div class="face back">
-              <header>
-                <strong>${escapeHtml(card.name)}${ofMany > 1 ? ` <small>#${idx}</small>` : ""}</strong>
-                <p class="rarity ${escapeHtml(card.rarity || "common")}">${escapeHtml(card.rarity || "common")} &bull; ${escapeHtml(card.type)}</p>
-              </header>
-              ${instanceStatRowsHtml(card, entry.boosts)}
-              ${deployed
-                ? `<p class="instance-status">Deployed at <strong>${escapeHtml(deployedLabel)}</strong>.</p>`
-                : `<p class="instance-status">Available to deploy or trade.</p>`}
-              <p class="flavor">${escapeHtml(card.flavor || "")}</p>
-              <div class="instance-actions">
-                <button type="button" class="ghost release-btn" data-uid="${escapeHtml(entry.uid)}" ${deployed ? "disabled title='Recall from gym first'" : ""}>Release</button>
-              </div>
-            </div>
+      const isMulti = group.count > 1;
+      const expanded = isMulti && expandedSpecies.has(group.id);
+      return group.members
+        .map((entry, memberIdx) => {
+          const isRep = memberIdx === 0;
+          // Non-representatives of a multi-group are emitted but hidden until
+          // the species is expanded (so expand just reveals existing tiles).
+          const colors = colorsFor(card);
+          const power = instancePower(entry);
+          const tier = powerTier(power);
+          const trained = (entry.boosts?.hp || 0) + (entry.boosts?.atk || 0) + (entry.boosts?.def || 0) + (entry.boosts?.spd || 0);
+          const deployed = !!entry.deployedAt;
+          const deployedLabel = deployed ? battleSiteName(entry.deployedAt) : "";
+          const totalHp = (card.hp || 0) + (entry.boosts?.hp || 0);
+          const vindex = vindexByUid.get(entry.uid) ?? 0;
+          const classes = ["gallery-card"];
+          if (deployed) classes.push("deployed");
+          if (isRep && isMulti) classes.push("stacked");
+          if (!isRep) classes.push("member");
+          if (isMulti && !isRep && !expanded) classes.push("collapsed");
+          const numLabel = isMulti ? `#${memberIdx + 1}/${group.count}` : "";
+          return `
+        <div class="${classes.join(" ")}" data-uid="${escapeHtml(entry.uid)}" data-species="${escapeHtml(group.id)}" data-vindex="${vindex}" tabindex="0" role="button" aria-label="Open ${escapeHtml(card.name)}${numLabel ? " " + numLabel : ""} card">
+          ${isMulti ? `<span class="stack-badge" title="${group.count} ${escapeHtml(card.name)}">${isRep ? `×${group.count}` : escapeHtml(numLabel)}</span>` : ""}
+          ${deployed ? `<span class="deployed-pill" title="Deployed at ${escapeHtml(deployedLabel)}">At gym</span>` : ""}
+          <canvas class="gallery-art" width="160" height="120" aria-hidden="true"></canvas>
+          <div class="gallery-meta">
+            <strong>${escapeHtml(card.name)}</strong>
+            <span class="type-pill" style="background:${colors.accent};color:#061226;">${escapeHtml(card.type)}</span>
           </div>
-        </div>
-      `;
+          <div class="gallery-meta" style="flex-direction:row;gap:.4rem;">
+            <span class="power-chip ${tier}" title="Power level">⚡ ${power}</span>
+            <span class="power-chip" title="Hit points">❤ ${totalHp}</span>
+          </div>
+          ${trained ? `<span class="trained-badge" title="Training boosts">+${trained} trained</span>` : ""}
+          ${isRep && isMulti
+            ? `<button type="button" class="expand-btn" data-species="${escapeHtml(group.id)}" aria-expanded="${expanded ? "true" : "false"}">${expanded ? "Collapse" : `Show all ${group.count}`}</button>`
+            : ""}
+        </div>`;
+        })
+        .join("");
     })
     .join("");
 
@@ -750,35 +799,300 @@ function renderCollection() {
     const card = cardsById.get(entry.id);
     const canvas = node.querySelector(".gallery-art");
     if (canvas && card) renderPortrait(canvas, card);
-    const toggle = (ev) => {
-      // Don't flip if the user clicked an action button.
-      if (ev?.target && ev.target.closest(".instance-actions")) return;
-      node.classList.toggle("flipped");
+
+    const open = (ev) => {
+      if (ev?.target && ev.target.closest(".expand-btn")) return;
+      const vindex = Number(node.dataset.vindex) || 0;
+      openCardViewer(vindex);
     };
-    node.addEventListener("click", toggle);
+    node.addEventListener("click", open);
     node.addEventListener("keydown", (ev) => {
       if (ev.key === "Enter" || ev.key === " ") {
         ev.preventDefault();
-        toggle(ev);
+        open(ev);
       }
     });
-    const releaseBtn = node.querySelector(".release-btn");
-    if (releaseBtn) {
-      releaseBtn.addEventListener("click", (ev) => {
+
+    const expandBtn = node.querySelector(".expand-btn");
+    if (expandBtn) {
+      expandBtn.addEventListener("click", (ev) => {
         ev.stopPropagation();
-        const targetUid = releaseBtn.dataset.uid;
-        const target = getInstance(targetUid);
-        if (!target) return;
-        const card2 = cardsById.get(target.id);
-        const label = card2 ? card2.name : "this Fokemon";
-        if (!confirm(`Release ${label}? This is permanent — its trained boosts will be lost.`)) return;
-        if (releaseInstance(targetUid)) {
-          renderCollection();
-          renderMap();
-        }
+        const sid = expandBtn.dataset.species;
+        if (expandedSpecies.has(sid)) expandedSpecies.delete(sid);
+        else expandedSpecies.add(sid);
+        renderCollection();
       });
     }
   });
+}
+
+/* ---------------------------------------------------------------------------
+   Immersive card viewer — a virtual representation of the physical card
+   ------------------------------------------------------------------------- */
+let cardViewerInited = false;
+let cvCardEl = null;
+let cvReturnFocus = null;
+let cvGesture = null; // { x, y, moved, swiped }
+const prefersReducedMotion = () =>
+  typeof window !== "undefined" &&
+  window.matchMedia &&
+  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+function cardViewerHtml(view) {
+  const entry = view.entry;
+  const card = cardsById.get(entry.id);
+  if (!card) return "";
+  const colors = colorsFor(card);
+  const power = instancePower(entry);
+  const tier = powerTier(power);
+  const rarity = card.rarity || "common";
+  const trained = (entry.boosts?.hp || 0) + (entry.boosts?.atk || 0) + (entry.boosts?.def || 0) + (entry.boosts?.spd || 0);
+  const deployed = !!entry.deployedAt;
+  const deployedLabel = deployed ? battleSiteName(entry.deployedAt) : "";
+  const numLabel = view.groupCount > 1 ? `#${view.indexInGroup + 1} of ${view.groupCount}` : "";
+  const stat = (label, base, boost) => `
+    <div><span>${base + (boost || 0)}${boost ? `<small class="stat-boost"> +${boost}</small>` : ""}</span><small>${label}</small></div>`;
+  return `
+    <div class="cv-card rarity-${escapeHtml(rarity)}"
+         style="--cv-edge:${colors.accent};--cv-glow:${colors.accent}55;"
+         data-uid="${escapeHtml(entry.uid)}" tabindex="0">
+      <div class="cv-flipper">
+        <div class="cv-face front">
+          <div class="cv-holo"></div><div class="cv-glare"></div>
+          <div class="cv-body">
+            <div class="cv-front-head">
+              <h2>${escapeHtml(card.name)}</h2>
+              <span class="type-pill" style="background:${colors.accent};color:#061226;">${escapeHtml(card.type)}</span>
+            </div>
+            <p class="rarity ${escapeHtml(rarity)}">${escapeHtml(rarity)}${numLabel ? ` &bull; ${escapeHtml(numLabel)}` : ""}</p>
+            <canvas class="cv-art" width="320" height="240" aria-hidden="true"></canvas>
+            <div class="cv-badges">
+              <span class="power-chip ${tier}" title="Power level">⚡ ${power}</span>
+              ${trained ? `<span class="trained-badge">+${trained} trained</span>` : ""}
+              ${deployed ? `<span class="deployed-pill" style="position:static;">At ${escapeHtml(deployedLabel)}</span>` : ""}
+            </div>
+            <div class="cv-statline">
+              ${stat("HP", card.hp || 0, entry.boosts?.hp)}
+              ${stat("ATK", card.atk || 0, entry.boosts?.atk)}
+              ${stat("DEF", card.def || 0, entry.boosts?.def)}
+              ${stat("SPD", card.spd || 0, entry.boosts?.spd)}
+            </div>
+            <div class="cv-foot">
+              <span>${escapeHtml(formatCaughtDate(entry.ts))}</span>
+              <span>Tap to flip</span>
+            </div>
+          </div>
+        </div>
+        <div class="cv-face back">
+          <div class="cv-holo"></div><div class="cv-glare"></div>
+          <div class="cv-body">
+            <header>
+              <strong>${escapeHtml(card.name)}${numLabel ? ` <small>${escapeHtml(numLabel)}</small>` : ""}</strong>
+              <p class="rarity ${escapeHtml(rarity)}">${escapeHtml(rarity)} &bull; ${escapeHtml(card.type)}</p>
+            </header>
+            ${instanceStatRowsHtml(card, entry.boosts)}
+            <p class="instance-status">${deployed
+              ? `Deployed at <strong>${escapeHtml(deployedLabel)}</strong>.`
+              : "Available to deploy or trade."}</p>
+            <p class="flavor">${escapeHtml(card.flavor || "")}</p>
+            <div class="instance-actions">
+              <button type="button" class="ghost cv-release" data-uid="${escapeHtml(entry.uid)}" ${deployed ? "disabled title='Recall from gym first'" : ""}>Release</button>
+            </div>
+            <p class="cv-back-tip">Caught ${escapeHtml(formatCaughtDate(entry.ts))} · tap to flip back</p>
+          </div>
+        </div>
+      </div>
+    </div>`;
+}
+
+function renderCardViewer() {
+  if (!el.cvStage) return;
+  if (!viewerOrder.length) { closeCardViewer(); return; }
+  viewerIndex = Math.max(0, Math.min(viewerIndex, viewerOrder.length - 1));
+  const view = viewerOrder[viewerIndex];
+  el.cvStage.innerHTML = cardViewerHtml(view);
+  cvCardEl = el.cvStage.querySelector(".cv-card");
+  if (cvCardEl && viewerFlipped) cvCardEl.classList.add("flipped");
+  // Reset tilt each card.
+  if (cvCardEl) {
+    cvCardEl.style.setProperty("--rx", "0deg");
+    cvCardEl.style.setProperty("--ry", "0deg");
+    cvCardEl.style.setProperty("--mx", "50%");
+    cvCardEl.style.setProperty("--my", "50%");
+  }
+  const card = cardsById.get(view.entry.id);
+  const canvas = el.cvStage.querySelector(".cv-art");
+  if (canvas && card) renderPortrait(canvas, card);
+
+  if (el.cvCounter) el.cvCounter.textContent = `${viewerIndex + 1} / ${viewerOrder.length}`;
+  if (el.cvPrev) el.cvPrev.disabled = viewerIndex === 0;
+  if (el.cvNext) el.cvNext.disabled = viewerIndex === viewerOrder.length - 1;
+
+  const releaseBtn = el.cvStage.querySelector(".cv-release");
+  if (releaseBtn) {
+    releaseBtn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const targetUid = releaseBtn.dataset.uid;
+      const target = getInstance(targetUid);
+      if (!target) return;
+      const c = cardsById.get(target.id);
+      const label = c ? c.name : "this Fokemon";
+      if (!confirm(`Release ${label}? This is permanent — its trained boosts will be lost.`)) return;
+      if (releaseInstance(targetUid)) {
+        renderCollection();
+        renderMap();
+        if (!viewerOrder.length) { closeCardViewer(); return; }
+        viewerFlipped = false;
+        renderCardViewer();
+      }
+    });
+  }
+}
+
+function applyViewerTilt(clientX, clientY) {
+  if (!cvCardEl || prefersReducedMotion()) return;
+  const rect = cvCardEl.getBoundingClientRect();
+  const px = (clientX - rect.left) / rect.width;  // 0..1
+  const py = (clientY - rect.top) / rect.height;  // 0..1
+  const max = 12;
+  const ry = (px - 0.5) * 2 * max;
+  const rx = -(py - 0.5) * 2 * max;
+  cvCardEl.style.setProperty("--ry", `${ry.toFixed(2)}deg`);
+  cvCardEl.style.setProperty("--rx", `${rx.toFixed(2)}deg`);
+  cvCardEl.style.setProperty("--mx", `${(px * 100).toFixed(1)}%`);
+  cvCardEl.style.setProperty("--my", `${(py * 100).toFixed(1)}%`);
+}
+
+function resetViewerTilt() {
+  if (!cvCardEl) return;
+  cvCardEl.style.setProperty("--rx", "0deg");
+  cvCardEl.style.setProperty("--ry", "0deg");
+  cvCardEl.style.setProperty("--mx", "50%");
+  cvCardEl.style.setProperty("--my", "50%");
+}
+
+function navigateViewer(delta) {
+  const next = viewerIndex + delta;
+  if (next < 0 || next >= viewerOrder.length) return;
+  viewerIndex = next;
+  viewerFlipped = false;
+  renderCardViewer();
+}
+
+function openCardViewer(index) {
+  if (!el.cardViewer || !viewerOrder.length) return;
+  initCardViewer();
+  viewerIndex = Math.max(0, Math.min(index || 0, viewerOrder.length - 1));
+  viewerFlipped = false;
+  cvReturnFocus = document.activeElement;
+  el.cardViewer.classList.remove("hidden");
+  document.body.style.overflow = "hidden";
+  renderCardViewer();
+  if (el.cvClose) el.cvClose.focus();
+}
+
+function closeCardViewer() {
+  if (!el.cardViewer) return;
+  el.cardViewer.classList.add("hidden");
+  document.body.style.overflow = "";
+  if (cvReturnFocus && typeof cvReturnFocus.focus === "function") {
+    try { cvReturnFocus.focus(); } catch {}
+  }
+  cvReturnFocus = null;
+}
+
+function viewerIsOpen() {
+  return el.cardViewer && !el.cardViewer.classList.contains("hidden");
+}
+
+function initCardViewer() {
+  if (cardViewerInited || !el.cardViewer) return;
+  cardViewerInited = true;
+
+  el.cvPrev?.addEventListener("click", () => navigateViewer(-1));
+  el.cvNext?.addEventListener("click", () => navigateViewer(1));
+  el.cvClose?.addEventListener("click", closeCardViewer);
+  el.cardViewer.querySelectorAll("[data-cv-close]").forEach((n) =>
+    n.addEventListener("click", closeCardViewer)
+  );
+
+  document.addEventListener("keydown", (ev) => {
+    if (!viewerIsOpen()) return;
+    if (ev.key === "Escape") { ev.preventDefault(); closeCardViewer(); }
+    else if (ev.key === "ArrowLeft") { ev.preventDefault(); navigateViewer(-1); }
+    else if (ev.key === "ArrowRight") { ev.preventDefault(); navigateViewer(1); }
+    else if (ev.key === "Enter" || ev.key === " ") {
+      if (ev.target && ev.target.closest && ev.target.closest(".cv-card")) {
+        ev.preventDefault();
+        viewerFlipped = !viewerFlipped;
+        cvCardEl?.classList.toggle("flipped", viewerFlipped);
+      }
+    }
+  });
+
+  // Pointer: tilt + tap-to-flip + horizontal swipe to navigate.
+  el.cvStage.addEventListener("pointermove", (ev) => {
+    if (cvGesture && cvGesture.swiped) return;
+    applyViewerTilt(ev.clientX, ev.clientY);
+  });
+  el.cvStage.addEventListener("pointerleave", resetViewerTilt);
+  el.cvStage.addEventListener("pointerdown", (ev) => {
+    cvGesture = { x: ev.clientX, y: ev.clientY, moved: false, swiped: false };
+  });
+  el.cvStage.addEventListener("pointermove", (ev) => {
+    if (!cvGesture) return;
+    const dx = ev.clientX - cvGesture.x;
+    const dy = ev.clientY - cvGesture.y;
+    if (Math.abs(dx) > 6 || Math.abs(dy) > 6) cvGesture.moved = true;
+    if (!cvGesture.swiped && Math.abs(dx) > 55 && Math.abs(dx) > Math.abs(dy) * 1.4) {
+      cvGesture.swiped = true;
+      resetViewerTilt();
+      navigateViewer(dx < 0 ? 1 : -1);
+    }
+  });
+  const endGesture = (ev) => {
+    if (!cvGesture) return;
+    const wasSwipe = cvGesture.swiped;
+    const moved = cvGesture.moved;
+    cvGesture = null;
+    if (wasSwipe || moved) return;
+    // A clean tap on the card flips it (ignore taps on buttons).
+    if (ev.target && ev.target.closest && ev.target.closest(".cv-card") &&
+        !ev.target.closest("button")) {
+      viewerFlipped = !viewerFlipped;
+      cvCardEl?.classList.toggle("flipped", viewerFlipped);
+    }
+  };
+  el.cvStage.addEventListener("pointerup", endGesture);
+  el.cvStage.addEventListener("pointercancel", () => { cvGesture = null; });
+
+  // Device-motion tilt (mobile). iOS 13+ needs an explicit permission tap.
+  const attachOrientation = () => {
+    window.addEventListener("deviceorientation", (ev) => {
+      if (!viewerIsOpen() || !cvCardEl || prefersReducedMotion()) return;
+      if (ev.gamma == null || ev.beta == null) return;
+      const ry = Math.max(-14, Math.min(14, ev.gamma * 0.45));
+      const rx = Math.max(-14, Math.min(14, (ev.beta - 45) * 0.3));
+      cvCardEl.style.setProperty("--ry", `${ry.toFixed(2)}deg`);
+      cvCardEl.style.setProperty("--rx", `${(-rx).toFixed(2)}deg`);
+      cvCardEl.style.setProperty("--mx", `${(50 + ry * 2).toFixed(1)}%`);
+      cvCardEl.style.setProperty("--my", `${(50 + rx * 2).toFixed(1)}%`);
+    });
+  };
+  const DOE = typeof window !== "undefined" ? window.DeviceOrientationEvent : null;
+  if (DOE && typeof DOE.requestPermission === "function") {
+    if (el.cvMotion) {
+      el.cvMotion.hidden = false;
+      el.cvMotion.addEventListener("click", async () => {
+        try {
+          const res = await DOE.requestPermission();
+          if (res === "granted") { attachOrientation(); el.cvMotion.hidden = true; }
+        } catch {}
+      });
+    }
+  } else if (DOE) {
+    attachOrientation();
+  }
 }
 
 function renderFeed() {
@@ -5819,7 +6133,29 @@ function enterGame() {
   connectFeed();
   updateBucketLabel();
   renderDebugChip();
+  initCardViewer();
   bootstrapLocation();
+}
+
+if (el.collectionSort) {
+  el.collectionSort.addEventListener("change", () => {
+    const val = el.collectionSort.value;
+    if (!VALID_SORTS.has(val)) return;
+    collectionSort = val;
+    try { localStorage.setItem(COLLECTION_SORT_KEY, val); } catch {}
+    renderCollection();
+  });
+}
+
+if (el.expandAllBtn) {
+  el.expandAllBtn.addEventListener("click", () => {
+    const groups = groupCollection(caught, cardsById, collectionSort);
+    const multi = groups.filter((g) => g.count > 1).map((g) => g.id);
+    const allOpen = multi.length > 0 && multi.every((id) => expandedSpecies.has(id));
+    if (allOpen) expandedSpecies.clear();
+    else multi.forEach((id) => expandedSpecies.add(id));
+    renderCollection();
+  });
 }
 
 if (el.form) {
