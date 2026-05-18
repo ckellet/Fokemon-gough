@@ -1448,7 +1448,8 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
   border-radius: 20px;
   overflow: hidden;
   border: 2px solid var(--cv-edge, rgba(255, 255, 255, .25));
-  background: linear-gradient(165deg, rgba(30, 40, 74, .96), rgba(7, 12, 26, .98));
+  /* Fully opaque so the reverse side never bleeds through the card. */
+  background: linear-gradient(165deg, #1d2747, #060b18);
   box-shadow:
     0 30px 70px rgba(0, 0, 0, .6),
     0 0 0 1px rgba(255, 255, 255, .04) inset,
@@ -1458,7 +1459,10 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
   padding: 1rem .95rem;
   gap: .6rem;
 }
-.cv-face.back { transform: rotateY(180deg); }
+/* Push each face a hair along its own normal so the two coplanar faces
+   can't z-fight or show through one another. */
+.cv-face.front { transform: translateZ(1px); }
+.cv-face.back { transform: rotateY(180deg) translateZ(1px); }
 
 /* Holographic foil + moving glare, layered over each face */
 .cv-holo,
@@ -1479,9 +1483,12 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
   transition: opacity .2s ease;
 }
 .cv-glare {
-  background: radial-gradient(circle at var(--mx) var(--my),
-    rgba(255, 255, 255, .42), rgba(255, 255, 255, 0) 46%);
-  mix-blend-mode: overlay;
+  background: radial-gradient(135% 95% at var(--mx) var(--my),
+    rgba(255, 255, 255, .26),
+    rgba(255, 255, 255, .07) 34%,
+    rgba(255, 255, 255, 0) 64%);
+  mix-blend-mode: soft-light;
+  transition: background-position .12s linear;
 }
 
 .cv-body {
