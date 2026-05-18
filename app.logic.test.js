@@ -35,6 +35,8 @@ import {
   deployedInstanceAtSite,
   mergeBoosts,
   normalizeBoosts,
+  serializeTradeOffer,
+  parseTradeOffer,
   mergeTrainerLocation,
   TRADE_DISCOVERY_TTL_MS,
   PRESENCE_TTL_MS,
@@ -66,6 +68,41 @@ test('presence windows: trade discovery is tighter than the map window', () => {
   assert.equal(TRADE_DISCOVERY_TTL_MS, 15 * 60 * 1000);
   assert.equal(PRESENCE_TTL_MS, 30 * 60 * 1000);
   assert.ok(TRADE_DISCOVERY_TTL_MS < PRESENCE_TTL_MS);
+});
+
+test('trade offer survives the GUN wire as a JSON string round-trip', () => {
+  const offer = { uid: 'VoltLynx#abc', cardId: 'VoltLynx', boosts: { hp: 3, atk: 2, def: 0, spd: 1 }, caughtAt: 1700 };
+  const wire = serializeTradeOffer(offer);
+  assert.equal(typeof wire, 'string');
+  // What the *receiving* peer gets from tradesNode.map().on() is this string.
+  const decoded = parseTradeOffer(wire);
+  assert.deepEqual(decoded, {
+    uid: 'VoltLynx#abc',
+    cardId: 'VoltLynx',
+    boosts: { hp: 3, atk: 2, def: 0, spd: 1 },
+    caughtAt: 1700,
+  });
+});
+
+test('parseTradeOffer rejects an unresolved GUN link node (the original bug)', () => {
+  // GUN .map().on() hands nested objects over as link references, never data.
+  assert.equal(parseTradeOffer({ '#': 'fokemon/trades/trade-1/offer' }), null);
+  assert.equal(parseTradeOffer({ '#': 'soul', _: { '#': 'soul' } }), null);
+});
+
+test('parseTradeOffer accepts a plain object (local echo / legacy record)', () => {
+  const decoded = parseTradeOffer({ uid: 'u1', cardId: 'AquaPup', boosts: { hp: 1 }, caughtAt: 5 });
+  assert.equal(decoded.uid, 'u1');
+  assert.equal(decoded.cardId, 'AquaPup');
+  assert.deepEqual(decoded.boosts, { hp: 1, atk: 0, def: 0, spd: 0 });
+});
+
+test('trade offer serialization is null-safe on junk input', () => {
+  assert.equal(serializeTradeOffer(null), null);
+  assert.equal(serializeTradeOffer({ cardId: 'X' }), null); // no uid
+  assert.equal(parseTradeOffer(null), null);
+  assert.equal(parseTradeOffer('not json{'), null);
+  assert.equal(parseTradeOffer('{"cardId":"X"}'), null); // no uid
 });
 
 test('mergeTrainerLocation accepts a fresh signal when nothing is stored', () => {

@@ -25,6 +25,8 @@ import {
   deployedInstanceAtSite,
   mergeBoosts,
   normalizeBoosts,
+  serializeTradeOffer,
+  parseTradeOffer,
   COLLECTION_SORTS,
   groupCollection,
   flattenCollectionGroups,
@@ -5545,7 +5547,20 @@ function publishBattleEvent(event) {
 
 let tradesNode = null;
 const tradeRequests = new Map(); // requestId -> normalized request
-const appliedTrades = new Set();
+// Which trade ids have already been applied to MY inventory. Persisted: a
+// completed trade lives in GUN forever, so subscribeTrades re-emits it on
+// every reload — without a durable guard the swap would re-apply each refresh
+// and keep re-adding the received Fokémon. Bounded so it can't grow forever.
+const APPLIED_TRADES_KEY = "fokemon_applied_trades";
+const appliedTrades = new Set(
+  (Array.isArray(safeStorageGet(APPLIED_TRADES_KEY, [])) ? safeStorageGet(APPLIED_TRADES_KEY, []) : []).map(String)
+);
+function rememberAppliedTrade(id) {
+  appliedTrades.add(id);
+  try {
+    localStorage.setItem(APPLIED_TRADES_KEY, JSON.stringify([...appliedTrades].slice(-400)));
+  } catch {}
+}
 const notifiedTradeKeys = new Set(); // `${id}:${status}` already surfaced as a toast
 const locallyCancelledTrades = new Set(); // ids I cancelled/declined myself
 let openTradeRequestId = null;
@@ -5570,15 +5585,13 @@ function packInstanceForTrade(entry) {
 }
 
 function normalizeTradeOffer(raw) {
-  if (!raw || typeof raw !== "object") return null;
-  if (!raw.uid || !raw.cardId) return null;
-  if (!cardsById.has(String(raw.cardId))) return null;
-  return {
-    uid: String(raw.uid),
-    cardId: String(raw.cardId),
-    boosts: normalizeBoosts(raw.boosts),
-    caughtAt: Number(raw.caughtAt) || 0,
-  };
+  // `raw` is whatever GUN handed us: the JSON-string wire format on a peer, or
+  // a plain object for a local echo. parseTradeOffer fixes the shape; we only
+  // add the card-existence gate (it needs the live card index).
+  const offer = parseTradeOffer(raw);
+  if (!offer) return null;
+  if (!cardsById.has(offer.cardId)) return null;
+  return offer;
 }
 
 function normalizeTradeRequest(raw) {
@@ -5605,12 +5618,16 @@ function normalizeTradeRequest(raw) {
 function publishTradeRequest(req) {
   if (!tradesNode) return;
   try {
+    // offer/counterOffer go on the wire as JSON *strings*, not nested objects:
+    // GUN's tradesNode.map().on() never resolves nested child nodes, so an
+    // object here would reach peers as an unresolved link and the request
+    // would be silently dropped. Strings sync verbatim. See app.logic.js.
     tradesNode.get(req.id).put({
       id: req.id,
       from: req.from,
       to: req.to,
-      offer: req.offer ? { ...req.offer, boosts: { ...req.offer.boosts } } : null,
-      counterOffer: req.counterOffer ? { ...req.counterOffer, boosts: { ...req.counterOffer.boosts } } : null,
+      offer: serializeTradeOffer(req.offer),
+      counterOffer: req.counterOffer ? serializeTradeOffer(req.counterOffer) : null,
       status: req.status,
       createdAt: req.createdAt,
       updatedAt: Date.now(),
@@ -5644,12 +5661,27 @@ function pendingIncomingTrades() {
   });
 }
 
+// Finished trades stay in GUN, so they survive a refresh — surface the recent
+// ones so a completed/cancelled swap leaves a visible trace instead of
+// silently vanishing from the lobby.
+const RECENT_TRADE_WINDOW_MS = 24 * 60 * 60 * 1000;
+function recentFinishedTrades(max = 6) {
+  const me = profile?.name;
+  return [...tradeRequests.values()]
+    .filter((r) =>
+      (r.from === me || r.to === me) &&
+      (r.status === "completed" || r.status === "cancelled") &&
+      Date.now() - (r.updatedAt || r.createdAt) <= RECENT_TRADE_WINDOW_MS)
+    .sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt))
+    .slice(0, max);
+}
+
 function applyIncomingCompletedTrade(req) {
   // I'm the originator and the counterparty has countered+accepted. Add their
   // instance to my inventory and remove what I offered. Idempotent via appliedTrades.
   if (!req.counterOffer) return;
   if (appliedTrades.has(req.id)) return;
-  appliedTrades.add(req.id);
+  rememberAppliedTrade(req.id);
   // Remove my offered instance (might already be gone if deployed elsewhere or released).
   if (req.offer && getInstance(req.offer.uid)) {
     caught = caught.filter((c) => c.uid !== req.offer.uid);
@@ -5677,7 +5709,7 @@ function applyAcceptedTradeAsRecipient(req) {
   // I'm the recipient and have countered with my own instance — finalize swap
   // by removing what I offered and adding what they offered.
   if (appliedTrades.has(req.id)) return;
-  appliedTrades.add(req.id);
+  rememberAppliedTrade(req.id);
   if (req.counterOffer && getInstance(req.counterOffer.uid)) {
     caught = caught.filter((c) => c.uid !== req.counterOffer.uid);
   }
@@ -5849,20 +5881,112 @@ function maybeNotifyTrade(req) {
   }
 }
 
-function offerSummaryHtml(offer) {
-  if (!offer) return "<em>Nothing offered</em>";
+// Completion animations should fire once, not on every background re-render.
+const celebratedTrades = new Set();
+
+function trainerHue(name) {
+  return seedFromStrings(String(name || "?")) % 360;
+}
+
+// A chunky coloured trainer badge — a stand-in "avatar" so trainers feel like
+// characters, not rows in a list. Colour is stable per name.
+function trainerOrbHtml(name, size = "md") {
+  const initial = (String(name || "?").trim()[0] || "?").toUpperCase();
+  return `<span class="trainer-orb orb-${size}" style="--orb-h:${trainerHue(name)}deg" aria-hidden="true">${escapeHtml(initial)}</span>`;
+}
+
+// Three-stop progress ribbon so a player can always see WHERE in the swap they
+// are. `active` is the 1-based current step; `complete` lights every node.
+function tradeRailHtml(active, { complete = false, cancelled = false } = {}) {
+  const steps = ["Send yours", "Trade back", "Seal it"];
+  let html = `<div class="trade-rail${cancelled ? " is-cancelled" : ""}" aria-hidden="true">`;
+  steps.forEach((label, i) => {
+    const n = i + 1;
+    const done = !cancelled && (complete || n < active);
+    const now = !cancelled && !complete && n === active;
+    if (i > 0) html += `<i class="rail-link${!cancelled && (complete || active >= n) ? " lit" : ""}"></i>`;
+    html += `<span class="rail-node ${done ? "done" : now ? "now" : "off"}"><b>${done ? "✓" : n}</b><em>${label}</em></span>`;
+  });
+  return html + "</div>";
+}
+
+// A cartoon speech bubble paired with the speaker's orb.
+function tradeTalkHtml(name, html, mood = "neutral") {
+  return `<div class="trade-talk mood-${mood}">${trainerOrbHtml(name, "sm")}<div class="trade-bubble">${html}</div></div>`;
+}
+
+const liveDots = `<span class="live-dots"><i></i><i></i><i></i></span>`;
+
+// A virtual trading card — the same foil/rarity language as the immersive card
+// viewer, shrunk to fit two-up on the trade table. `offer` is a packed trade
+// offer ({uid,cardId,boosts}); null/missing renders a face-down "?" slot.
+function tradeMiniCard(offer, opts = {}) {
+  const { waitingLabel = "Waiting…", pop = false } = opts;
+  if (!offer) {
+    return `<div class="tcard tcard-ghost"><span class="tcard-foil"></span><span class="tcard-q">?</span><span class="tcard-wait">${escapeHtml(waitingLabel)}</span></div>`;
+  }
   const card = cardsById.get(offer.cardId);
-  if (!card) return "<em>Unknown Fokemon</em>";
-  const trained = (offer.boosts?.hp || 0) + (offer.boosts?.atk || 0) + (offer.boosts?.def || 0) + (offer.boosts?.spd || 0);
+  if (!card) {
+    return `<div class="tcard tcard-ghost"><span class="tcard-q">?</span><span class="tcard-wait">Unknown Fokémon</span></div>`;
+  }
   const colors = colorsFor(card);
+  const b = offer.boosts || {};
+  const trained = (b.hp || 0) + (b.atk || 0) + (b.def || 0) + (b.spd || 0);
+  const si = speciesIndexForInstance(offer.uid);
+  const dex = si && si.total > 1 ? ` <span class="tcard-dex">#${si.idx}</span>` : "";
   return `
-    <div class="trade-offer-card" style="--type-light:${colors.light};--type-dark:${colors.dark};--type-accent:${colors.accent};">
-      <strong>${escapeHtml(card.name)}</strong>
-      <span class="type-pill" style="background:${colors.accent};color:#061226;">${escapeHtml(card.type)}</span>
+    <div class="tcard rarity-${card.rarity || "common"}${pop ? " tcard-pop" : ""}" style="--type-light:${colors.light};--type-dark:${colors.dark};--type-accent:${colors.accent};">
+      <span class="tcard-foil"></span>
+      <span class="tcard-glare"></span>
+      <header class="tcard-head">
+        <strong>${escapeHtml(card.name)}${dex}</strong>
+        <span class="type-pill" style="background:${colors.accent};color:#061226;">${escapeHtml(card.type)}</span>
+      </header>
+      <canvas class="tcard-art" data-card="${escapeHtml(card.id)}" width="260" height="150" aria-hidden="true"></canvas>
       ${instanceStatRowsHtml(card, offer.boosts)}
-      ${trained ? `<small>Trained +${trained}</small>` : `<small>Untrained</small>`}
-    </div>
-  `;
+      <footer class="tcard-foot">
+        ${trained
+          ? `<span class="tcard-ribbon">★ Trained +${trained}</span>`
+          : `<span class="tcard-ribbon plain">Wild &amp; untrained</span>`}
+      </footer>
+    </div>`;
+}
+
+// A pickable card button (same face as tradeMiniCard, plus a power tag).
+function tradePickCardHtml(entry) {
+  const card = cardsById.get(entry.id);
+  if (!card) return "";
+  const colors = colorsFor(card);
+  const power = instancePower(entry);
+  const b = entry.boosts || {};
+  const trained = (b.hp || 0) + (b.atk || 0) + (b.def || 0) + (b.spd || 0);
+  const si = speciesIndexForInstance(entry.uid);
+  const dex = si && si.total > 1 ? ` <span class="tcard-dex">#${si.idx}</span>` : "";
+  return `
+    <button type="button" class="tcard tcard-pick rarity-${card.rarity || "common"}" data-uid="${escapeHtml(entry.uid)}" style="--type-light:${colors.light};--type-dark:${colors.dark};--type-accent:${colors.accent};">
+      <span class="tcard-foil"></span>
+      <span class="tcard-glare"></span>
+      <span class="tcard-power">⚡ ${power}</span>
+      <header class="tcard-head">
+        <strong>${escapeHtml(card.name)}${dex}</strong>
+        <span class="type-pill" style="background:${colors.accent};color:#061226;">${escapeHtml(card.type)}</span>
+      </header>
+      <canvas class="tcard-art" data-card="${escapeHtml(card.id)}" width="260" height="140" aria-hidden="true"></canvas>
+      ${instanceStatRowsHtml(card, entry.boosts)}
+      <span class="tcard-send">${trained ? `★ +${trained} · ` : ""}Tap to send →</span>
+    </button>`;
+}
+
+// Paint the actual creature onto every card canvas after the markup is in the
+// DOM (deferred a frame so the canvas has a measured size).
+function hydrateTradeArt(root) {
+  if (!root) return;
+  requestAnimationFrame(() => {
+    root.querySelectorAll("canvas.tcard-art[data-card]").forEach((cv) => {
+      const card = cardsById.get(cv.dataset.card);
+      if (card) try { renderPortrait(cv, card); } catch {}
+    });
+  });
 }
 
 function openTradeModal(initialRequestId = null, options = {}) {
@@ -5874,12 +5998,12 @@ function openTradeModal(initialRequestId = null, options = {}) {
   overlay.className = "battle-site-modal trade-modal";
   overlay.innerHTML = `
     <div class="site-card trade-card" role="dialog" aria-modal="true" aria-label="Trade with trainers">
-      <header class="site-head">
+      <header class="site-head trade-head">
         <div>
-          <p class="eyebrow">Peer trade</p>
-          <h3>Nearby trainers</h3>
+          <p class="eyebrow">🤝 Trade Station</p>
+          <h3>Swap a Fokémon</h3>
         </div>
-        <button class="ghost trade-close" aria-label="Close">Close</button>
+        <button class="ghost trade-close" aria-label="Close">✕</button>
       </header>
       <div class="trade-body"></div>
     </div>
@@ -5901,6 +6025,12 @@ function openTradeModal(initialRequestId = null, options = {}) {
   overlay.addEventListener("click", (ev) => { if (ev.target === overlay) close(); });
   document.addEventListener("keydown", onKey);
 
+  function paint(html) {
+    bodyEl.innerHTML = html;
+    hydrateTradeArt(bodyEl);
+    bodyEl.querySelector(".trade-back")?.addEventListener("click", (ev) => { ev.preventDefault(); renderList(); });
+  }
+
   function renderList() {
     openTradeRequestId = "list";
     const nearby = nearbyTrainerEntries();
@@ -5909,99 +6039,132 @@ function openTradeModal(initialRequestId = null, options = {}) {
       r.from === profile?.name && r.status !== "completed" && r.status !== "cancelled"
     );
 
-    bodyEl.innerHTML = `
-      ${incoming.length ? `
-        <section class="trade-section">
-          <h4>Incoming trade requests</h4>
-          <ul class="trade-list">
-            ${incoming.map((req) => `
-              <li>
-                <span><strong>${escapeHtml(req.from)}</strong> offers a ${escapeHtml(cardsById.get(req.offer.cardId)?.name || "Fokemon")}</span>
-                <button type="button" class="primary view-trade" data-id="${escapeHtml(req.id)}">Review</button>
-              </li>
-            `).join("")}
-          </ul>
-        </section>
-      ` : ""}
-      ${myOutgoing.length ? `
-        <section class="trade-section">
-          <h4>Your pending offers</h4>
-          <ul class="trade-list">
-            ${myOutgoing.map((req) => `
-              <li>
-                <span>To <strong>${escapeHtml(req.to)}</strong> — ${escapeHtml(req.status)}</span>
-                <button type="button" class="ghost view-trade" data-id="${escapeHtml(req.id)}">Review</button>
-              </li>
-            `).join("")}
-          </ul>
-        </section>
-      ` : ""}
-      <section class="trade-section">
-        <h4>Nearby trainers (≤ ${TRADE_RANGE_METERS}m)</h4>
-        ${nearby.length ? `
-          <ul class="trade-list">
-            ${nearby.map((t) => `
-              <li>
-                <span><strong>${escapeHtml(t.name)}</strong> &mdash; ${t.distance}m away</span>
-                <button type="button" class="primary start-trade" data-name="${escapeHtml(t.name)}">Trade</button>
-              </li>
-            `).join("")}
-          </ul>
-        ` : `<p class="empty-state">No trainers in range. Other players appear here once they're active within ${TRADE_RANGE_METERS}m of you.</p>`}
-      </section>
-    `;
+    const incomingHtml = incoming.length ? `
+      <section class="trade-group">
+        <h4 class="trade-group-title hot">⚡ Someone wants to trade!</h4>
+        <div class="trade-tiles">
+          ${incoming.map((req) => {
+            const cn = cardsById.get(req.offer.cardId)?.name || "a Fokémon";
+            return `
+              <div class="trade-tile tile-hot">
+                ${trainerOrbHtml(req.from)}
+                <div class="tile-text">
+                  <strong>${escapeHtml(req.from)}</strong>
+                  <span>offers their <b>${escapeHtml(cn)}</b></span>
+                </div>
+                <button type="button" class="trade-cta trade-open" data-id="${escapeHtml(req.id)}">Open&nbsp;→</button>
+              </div>`;
+          }).join("")}
+        </div>
+      </section>` : "";
 
-    bodyEl.querySelectorAll(".start-trade").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        renderOffer(btn.dataset.name);
-      });
-    });
-    bodyEl.querySelectorAll(".view-trade").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        renderRequest(btn.dataset.id);
-      });
-    });
+    const outgoingHtml = myOutgoing.length ? `
+      <section class="trade-group">
+        <h4 class="trade-group-title">📤 Your offers</h4>
+        <div class="trade-tiles">
+          ${myOutgoing.map((req) => {
+            const yourMove = req.status === "countered";
+            const chip = yourMove
+              ? `<span class="tile-chip go">Your move!</span>`
+              : `<span class="tile-chip wait">Waiting${liveDots}</span>`;
+            return `
+              <div class="trade-tile">
+                ${trainerOrbHtml(req.to)}
+                <div class="tile-text">
+                  <strong>${escapeHtml(req.to)}</strong>
+                  ${chip}
+                </div>
+                <button type="button" class="trade-cta ghost trade-open" data-id="${escapeHtml(req.id)}">View</button>
+              </div>`;
+          }).join("")}
+        </div>
+      </section>` : "";
+
+    const recent = recentFinishedTrades();
+    const recentHtml = recent.length ? `
+      <section class="trade-group">
+        <h4 class="trade-group-title">🕘 Recent trades</h4>
+        <div class="trade-tiles">
+          ${recent.map((r) => {
+            const me = profile?.name;
+            const other = r.from === me ? r.to : r.from;
+            const done = r.status === "completed";
+            const gotOffer = r.from === me ? r.counterOffer : r.offer;
+            const gotName = gotOffer ? (cardsById.get(gotOffer.cardId)?.name || "a Fokémon") : "a Fokémon";
+            return `
+              <div class="trade-tile${done ? "" : " tile-faded"}">
+                ${trainerOrbHtml(other)}
+                <div class="tile-text">
+                  <strong>${escapeHtml(other)}</strong>
+                  <span>${done ? `🤝 You got <b>${escapeHtml(gotName)}</b>` : "😕 Called off"}</span>
+                </div>
+                <button type="button" class="trade-cta ghost trade-open" data-id="${escapeHtml(r.id)}">View</button>
+              </div>`;
+          }).join("")}
+        </div>
+      </section>` : "";
+
+    const nearbyHtml = nearby.length ? `
+      <div class="trade-tiles">
+        ${nearby.map((t) => `
+          <div class="trade-tile">
+            ${trainerOrbHtml(t.name)}
+            <div class="tile-text">
+              <strong>${escapeHtml(t.name)}</strong>
+              <span class="tile-dist"><i class="ping"></i>${t.distance}m away</span>
+            </div>
+            <button type="button" class="trade-cta trade-start" data-name="${escapeHtml(t.name)}">Trade</button>
+          </div>`).join("")}
+      </div>`
+      : `
+      <div class="trade-radar">
+        <div class="radar-scope"><span class="radar-sweep"></span><span class="radar-blip b1"></span><span class="radar-blip b2"></span></div>
+        <p class="radar-title">Scanning for trainers…</p>
+        <p class="radar-sub">Nobody's within <b>${TRADE_RANGE_METERS}m</b> right now. Open Fokémon on another phone close by — they'll pop up here the moment they're in range.</p>
+      </div>`;
+
+    paint(`
+      ${incomingHtml}
+      ${outgoingHtml}
+      <section class="trade-group">
+        <h4 class="trade-group-title">🛰️ Trainers near you <span class="title-note">≤ ${TRADE_RANGE_METERS}m</span></h4>
+        ${nearbyHtml}
+      </section>
+      ${recentHtml}
+    `);
+
+    bodyEl.querySelectorAll(".trade-start").forEach((btn) =>
+      btn.addEventListener("click", () => renderOffer(btn.dataset.name)));
+    bodyEl.querySelectorAll(".trade-open").forEach((btn) =>
+      btn.addEventListener("click", () => renderRequest(btn.dataset.id)));
   }
 
   function renderOffer(recipientName) {
     openTradeRequestId = "list";
     const available = availableInstances(caught);
     if (!available.length) {
-      bodyEl.innerHTML = `
-        <p><a href="#" class="back-link">&larr; Back</a></p>
-        <p class="empty-state">You don't have any Fokemon free to trade. Recall one from a gym first.</p>
-      `;
-      bodyEl.querySelector(".back-link").addEventListener("click", (ev) => { ev.preventDefault(); renderList(); });
+      paint(`
+        <button type="button" class="trade-back">‹ Back</button>
+        <div class="trade-empty">
+          <span class="empty-emoji">🎒</span>
+          <p><b>Your bench is empty!</b></p>
+          <p class="muted">Every Fokémon you own is deployed at a gym. Recall one first, then come back to trade.</p>
+        </div>
+      `);
       return;
     }
-    bodyEl.innerHTML = `
-      <p><a href="#" class="back-link">&larr; Back</a></p>
-      <h4>Offer a Fokemon to <strong>${escapeHtml(recipientName)}</strong></h4>
-      <p class="picker-prompt">Pick the individual you want to send:</p>
-      <div class="picker-grid">
-        ${available.map((entry) => {
-          const card = cardsById.get(entry.id);
-          if (!card) return "";
-          const colors = colorsFor(card);
-          const total = instancePower(entry);
-          const trained = (entry.boosts?.hp || 0) + (entry.boosts?.atk || 0) + (entry.boosts?.def || 0) + (entry.boosts?.spd || 0);
-          const { idx, total: of } = speciesIndexForInstance(entry.uid);
-          return `
-            <button class="picker-card" data-uid="${escapeHtml(entry.uid)}" style="--type-light:${colors.light};--type-dark:${colors.dark};--type-accent:${colors.accent};">
-              <span class="picker-power">⚡${total}</span>
-              <strong>${escapeHtml(card.name)}${of > 1 ? ` <small>#${idx}</small>` : ""}</strong>
-              <small>${escapeHtml(card.type)}${trained ? ` • +${trained} trained` : ""}</small>
-            </button>
-          `;
-        }).join("")}
+    paint(`
+      <button type="button" class="trade-back">‹ Back</button>
+      ${tradeTalkHtml(recipientName, `Pick the Fokémon you want to send to <b>${escapeHtml(recipientName)}</b>!`, "happy")}
+      <div class="trade-picker">
+        ${available.map((entry) => tradePickCardHtml(entry)).join("")}
       </div>
-    `;
-    bodyEl.querySelector(".back-link").addEventListener("click", (ev) => { ev.preventDefault(); renderList(); });
-    bodyEl.querySelectorAll(".picker-card").forEach((btn) => {
+    `);
+    bodyEl.querySelectorAll(".tcard-pick").forEach((btn) => {
       btn.addEventListener("click", () => {
-        const uid = btn.dataset.uid;
-        const entry = getInstance(uid);
+        const entry = getInstance(btn.dataset.uid);
         if (!entry || entry.deployedAt) return;
+        btn.classList.add("tcard-chosen");
         const req = {
           id: makeRequestId(),
           from: profile.name,
@@ -6025,104 +6188,111 @@ function openTradeModal(initialRequestId = null, options = {}) {
     const req = tradeRequests.get(reqId);
     if (!req) { renderList(); return; }
     openTradeRequestId = reqId;
-    const card = cardsById.get(req.offer.cardId);
-    const counterCard = req.counterOffer ? cardsById.get(req.counterOffer.cardId) : null;
     const iAmFrom = req.from === profile?.name;
     const iAmTo = req.to === profile?.name;
+    const me = profile?.name;
+    const them = iAmFrom ? req.to : req.from;
 
-    let actionsHtml = "";
+    // --- The pending recipient still owes a counter: show their picker. ---
     if (req.status === "pending" && iAmTo) {
-      // Recipient picks their counter-offer.
       const available = availableInstances(caught);
+      const fromCardName = cardsById.get(req.offer.cardId)?.name || "a Fokémon";
       if (!available.length) {
-        actionsHtml = `<p class="empty-state">You have no Fokemon free to offer back. Recall one from a gym first.</p>
-          <button type="button" class="ghost reject-trade">Decline</button>`;
+        paint(`
+          <button type="button" class="trade-back">‹ Back</button>
+          ${tradeRailHtml(2)}
+          ${tradeTalkHtml(req.from, `<b>${escapeHtml(req.from)}</b> offered you a <b>${escapeHtml(fromCardName)}</b> — but every Fokémon you own is at a gym. Recall one to trade back.`, "sad")}
+          <div class="trade-cards"><div class="trade-slot">${tradeMiniCard(req.offer)}</div></div>
+          <div class="trade-actions"><button type="button" class="trade-cta danger trade-decline">Decline</button></div>
+        `);
       } else {
-        actionsHtml = `
-          <p class="picker-prompt">Offer one of yours in return:</p>
-          <div class="picker-grid">
-            ${available.map((entry) => {
-              const c = cardsById.get(entry.id);
-              if (!c) return "";
-              const colors = colorsFor(c);
-              const total = instancePower(entry);
-              const trained = (entry.boosts?.hp || 0) + (entry.boosts?.atk || 0) + (entry.boosts?.def || 0) + (entry.boosts?.spd || 0);
-              const { idx, total: of } = speciesIndexForInstance(entry.uid);
-              return `
-                <button class="picker-card" data-uid="${escapeHtml(entry.uid)}" style="--type-light:${colors.light};--type-dark:${colors.dark};--type-accent:${colors.accent};">
-                  <span class="picker-power">⚡${total}</span>
-                  <strong>${escapeHtml(c.name)}${of > 1 ? ` <small>#${idx}</small>` : ""}</strong>
-                  <small>${escapeHtml(c.type)}${trained ? ` • +${trained} trained` : ""}</small>
-                </button>
-              `;
-            }).join("")}
+        paint(`
+          <button type="button" class="trade-back">‹ Back</button>
+          ${tradeRailHtml(2)}
+          ${tradeTalkHtml(req.from, `<b>${escapeHtml(req.from)}</b> threw down a <b>${escapeHtml(fromCardName)}</b>! Pick one of yours to trade back 👇`, "happy")}
+          <div class="trade-cards">
+            <div class="trade-slot"><span class="slot-name">${escapeHtml(req.from)}</span>${tradeMiniCard(req.offer)}</div>
+            <span class="trade-swap-icon">⇄</span>
+            <div class="trade-slot"><span class="slot-name">You</span><div class="slot-empty">Pick below 👇</div></div>
           </div>
-          <div class="trade-actions">
-            <button type="button" class="ghost reject-trade">Decline</button>
+          <div class="trade-picker">
+            ${available.map((entry) => tradePickCardHtml(entry)).join("")}
           </div>
-        `;
+          <div class="trade-actions"><button type="button" class="trade-cta danger trade-decline">Decline trade</button></div>
+        `);
+        bodyEl.querySelectorAll(".tcard-pick").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            const entry = getInstance(btn.dataset.uid);
+            if (!entry || entry.deployedAt) return;
+            const updated = { ...req, counterOffer: packInstanceForTrade(entry), status: "countered", updatedAt: Date.now() };
+            tradeRequests.set(req.id, updated);
+            publishTradeRequest(updated);
+            renderRequest(req.id);
+          });
+        });
       }
-    } else if (req.status === "countered" && iAmFrom) {
-      actionsHtml = `
-        <div class="trade-actions">
-          <button type="button" class="primary confirm-trade">Confirm swap</button>
-          <button type="button" class="ghost cancel-trade">Cancel</button>
-        </div>
-      `;
-    } else if (req.status === "completed") {
-      actionsHtml = `<p class="trade-result success">Trade complete — check your collection.</p>`;
-    } else if (req.status === "cancelled") {
-      actionsHtml = `<p class="trade-result fail">Trade cancelled.</p>`;
-    } else if (req.status === "pending" && iAmFrom) {
-      actionsHtml = `
-        <p class="trade-status">Waiting for ${escapeHtml(req.to)} to respond…</p>
-        <div class="trade-actions">
-          <button type="button" class="ghost cancel-trade">Cancel</button>
-        </div>
-      `;
-    } else if (req.status === "countered" && iAmTo) {
-      actionsHtml = `<p class="trade-status">Waiting for ${escapeHtml(req.from)} to confirm…</p>
-        <div class="trade-actions">
-          <button type="button" class="ghost cancel-trade">Cancel</button>
-        </div>`;
+      wireTradeButtons(req);
+      return;
     }
 
-    bodyEl.innerHTML = `
-      <p><a href="#" class="back-link">&larr; Back</a></p>
-      <section class="trade-summary">
-        <div class="trade-side">
-          <p class="trade-side-label">${escapeHtml(req.from)} offers</p>
-          ${offerSummaryHtml(req.offer)}
-        </div>
-        <span class="trade-arrow">⇄</span>
-        <div class="trade-side">
-          <p class="trade-side-label">${escapeHtml(req.to)} ${req.counterOffer ? "offers" : "to respond"}</p>
-          ${req.counterOffer ? offerSummaryHtml(req.counterOffer) : `<p class="empty-state">Waiting…</p>`}
-        </div>
-      </section>
-      <section class="trade-actions-section">
-        ${actionsHtml}
-      </section>
-    `;
-    bodyEl.querySelector(".back-link")?.addEventListener("click", (ev) => { ev.preventDefault(); renderList(); });
+    // --- Everything else: the two-card "trade table". ---
+    let railStep = 2, railOpts = {};
+    let bubble = "";
+    let actions = "";
+    let tableClass = "";
 
-    bodyEl.querySelectorAll(".picker-card").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const uid = btn.dataset.uid;
-        const entry = getInstance(uid);
-        if (!entry || entry.deployedAt) return;
-        const updated = {
-          ...req,
-          counterOffer: packInstanceForTrade(entry),
-          status: "countered",
-          updatedAt: Date.now(),
-        };
-        tradeRequests.set(req.id, updated);
-        publishTradeRequest(updated);
-        renderRequest(req.id);
-      });
-    });
-    bodyEl.querySelector(".confirm-trade")?.addEventListener("click", () => {
+    if (req.status === "completed") {
+      railOpts = { complete: true };
+      const gainedCard = iAmFrom ? cardsById.get(req.counterOffer?.cardId) : cardsById.get(req.offer?.cardId);
+      const gained = gainedCard?.name || "a new Fokémon";
+      const fresh = !celebratedTrades.has(req.id);
+      celebratedTrades.add(req.id);
+      tableClass = fresh ? "is-swapping" : "is-swapped";
+      bubble = `<div class="trade-banner">🎉 <b>Trade complete!</b><span><b>${escapeHtml(gained)}</b> is now yours — it's in your collection.</span></div>`;
+      actions = `<button type="button" class="trade-cta big trade-done">Awesome! 🎈</button>`;
+    } else if (req.status === "cancelled") {
+      railOpts = { cancelled: true };
+      bubble = `<div class="trade-banner sad">😕 <b>Trade called off.</b><span>No Fokémon changed hands.</span></div>`;
+      actions = `<button type="button" class="trade-cta trade-back">‹ Back to trainers</button>`;
+    } else if (req.status === "pending" && iAmFrom) {
+      railStep = 2;
+      bubble = tradeTalkHtml(req.to, `Sent! Waiting for <b>${escapeHtml(req.to)}</b> to pick a card to trade back${liveDots}`, "wait");
+      actions = `<button type="button" class="trade-cta danger trade-cancel">Cancel offer</button>`;
+    } else if (req.status === "countered" && iAmFrom) {
+      railStep = 3;
+      const cn = cardsById.get(req.counterOffer?.cardId)?.name || "a Fokémon";
+      bubble = tradeTalkHtml(req.to, `<b>${escapeHtml(req.to)}</b> wants to trade their <b>${escapeHtml(cn)}</b> for yours. Seal the deal? 🤝`, "happy");
+      actions = `
+        <button type="button" class="trade-cta big trade-confirm">✓ Confirm swap</button>
+        <button type="button" class="trade-cta ghost trade-cancel">Cancel</button>`;
+    } else if (req.status === "countered" && iAmTo) {
+      railStep = 3;
+      bubble = tradeTalkHtml(req.from, `Card locked in! Waiting for <b>${escapeHtml(req.from)}</b> to seal the swap${liveDots}`, "wait");
+      actions = `<button type="button" class="trade-cta danger trade-cancel">Cancel</button>`;
+    }
+
+    const mineOffer = iAmTo ? req.counterOffer : req.offer;
+    const theirsOffer = iAmTo ? req.offer : req.counterOffer;
+    const myLabel = me ? escapeHtml(me) : "You";
+    const theirLabel = escapeHtml(them);
+
+    paint(`
+      <button type="button" class="trade-back">‹ Back</button>
+      ${tradeRailHtml(railStep, railOpts)}
+      ${bubble}
+      <div class="trade-table ${tableClass}">
+        <div class="trade-slot slot-mine"><span class="slot-name">${myLabel}</span>${tradeMiniCard(mineOffer, { waitingLabel: "You haven't picked yet" })}</div>
+        <span class="trade-swap-icon" aria-hidden="true">⇄</span>
+        <div class="trade-slot slot-theirs"><span class="slot-name">${theirLabel}</span>${tradeMiniCard(theirsOffer, { waitingLabel: `Waiting for ${escapeHtml(them)}…` })}</div>
+        <span class="spark-burst" aria-hidden="true">${"<i></i>".repeat(8)}</span>
+      </div>
+      <div class="trade-actions">${actions}</div>
+    `);
+    wireTradeButtons(req);
+  }
+
+  function wireTradeButtons(req) {
+    bodyEl.querySelector(".trade-confirm")?.addEventListener("click", () => {
       const finalized = { ...req, status: "completed", updatedAt: Date.now() };
       tradeRequests.set(req.id, finalized);
       publishTradeRequest(finalized);
@@ -6130,30 +6300,33 @@ function openTradeModal(initialRequestId = null, options = {}) {
       applyIncomingCompletedTrade(finalized);
       renderRequest(req.id);
     });
-    bodyEl.querySelector(".cancel-trade")?.addEventListener("click", () => {
+    bodyEl.querySelector(".trade-cancel")?.addEventListener("click", () => {
       const cancelled = { ...req, status: "cancelled", updatedAt: Date.now() };
       locallyCancelledTrades.add(req.id);
       tradeRequests.set(req.id, cancelled);
       publishTradeRequest(cancelled);
       renderRequest(req.id);
     });
-    bodyEl.querySelector(".reject-trade")?.addEventListener("click", () => {
+    bodyEl.querySelector(".trade-decline")?.addEventListener("click", () => {
       const cancelled = { ...req, status: "cancelled", updatedAt: Date.now() };
       locallyCancelledTrades.add(req.id);
       tradeRequests.set(req.id, cancelled);
       publishTradeRequest(cancelled);
       renderList();
     });
+    bodyEl.querySelector(".trade-done")?.addEventListener("click", close);
   }
 
   function renderOutOfRange(name) {
     openTradeRequestId = "list";
-    bodyEl.innerHTML = `
-      <p><a href="#" class="back-link">&larr; Back</a></p>
-      <h4>${escapeHtml(name)} is out of range</h4>
-      <p class="empty-state">You need to be within ${TRADE_RANGE_METERS}m of <strong>${escapeHtml(name)}</strong> (and they must have been active recently) to trade. Move closer and try again.</p>
-    `;
-    bodyEl.querySelector(".back-link").addEventListener("click", (ev) => { ev.preventDefault(); renderList(); });
+    paint(`
+      <button type="button" class="trade-back">‹ Back</button>
+      <div class="trade-empty">
+        <span class="empty-emoji">📡</span>
+        <p><b>${escapeHtml(name)} is too far away!</b></p>
+        <p class="muted">You need to be within <b>${TRADE_RANGE_METERS}m</b> of ${escapeHtml(name)} (and they must have been active recently). Walk closer and try again.</p>
+      </div>
+    `);
   }
 
   openTradeRefresh = () => {
