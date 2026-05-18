@@ -913,13 +913,7 @@ function renderCardViewer() {
   el.cvStage.innerHTML = cardViewerHtml(view);
   cvCardEl = el.cvStage.querySelector(".cv-card");
   if (cvCardEl && viewerFlipped) cvCardEl.classList.add("flipped");
-  // Reset tilt each card.
-  if (cvCardEl) {
-    cvCardEl.style.setProperty("--rx", "0deg");
-    cvCardEl.style.setProperty("--ry", "0deg");
-    cvCardEl.style.setProperty("--mx", "50%");
-    cvCardEl.style.setProperty("--my", "50%");
-  }
+  setViewerOrientation(0, 0); // reset tilt + resting highlight
   const card = cardsById.get(view.entry.id);
   const canvas = el.cvStage.querySelector(".cv-art");
   if (canvas && card) renderPortrait(canvas, card);
@@ -949,34 +943,78 @@ function renderCardViewer() {
   }
 }
 
+// Apply card rotation, and derive the foil highlight position from the
+// resulting angle (a notional fixed overhead light reflecting off the tilted
+// card) rather than from the cursor — so the sheen sweeps with the card's
+// orientation instead of sitting glued under the pointer.
+function setViewerOrientation(rx, ry) {
+  if (!cvCardEl) return;
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  cvCardEl.style.setProperty("--rx", `${rx.toFixed(2)}deg`);
+  cvCardEl.style.setProperty("--ry", `${ry.toFixed(2)}deg`);
+  const mx = clamp(50 - ry * 1.8, 15, 85);
+  const my = clamp(32 + rx * 1.8, 12, 78);
+  cvCardEl.style.setProperty("--mx", `${mx.toFixed(1)}%`);
+  cvCardEl.style.setProperty("--my", `${my.toFixed(1)}%`);
+}
+
 function applyViewerTilt(clientX, clientY) {
-  if (!cvCardEl || prefersReducedMotion()) return;
+  if (!cvCardEl || cvNavigating || prefersReducedMotion()) return;
   const rect = cvCardEl.getBoundingClientRect();
   const px = (clientX - rect.left) / rect.width;  // 0..1
   const py = (clientY - rect.top) / rect.height;  // 0..1
   const max = 12;
-  const ry = (px - 0.5) * 2 * max;
-  const rx = -(py - 0.5) * 2 * max;
-  cvCardEl.style.setProperty("--ry", `${ry.toFixed(2)}deg`);
-  cvCardEl.style.setProperty("--rx", `${rx.toFixed(2)}deg`);
-  cvCardEl.style.setProperty("--mx", `${(px * 100).toFixed(1)}%`);
-  cvCardEl.style.setProperty("--my", `${(py * 100).toFixed(1)}%`);
+  setViewerOrientation(-(py - 0.5) * 2 * max, (px - 0.5) * 2 * max);
 }
 
 function resetViewerTilt() {
-  if (!cvCardEl) return;
-  cvCardEl.style.setProperty("--rx", "0deg");
-  cvCardEl.style.setProperty("--ry", "0deg");
-  cvCardEl.style.setProperty("--mx", "50%");
-  cvCardEl.style.setProperty("--my", "50%");
+  setViewerOrientation(0, 0);
 }
+
+let cvNavigating = false;
 
 function navigateViewer(delta) {
   const next = viewerIndex + delta;
-  if (next < 0 || next >= viewerOrder.length) return;
-  viewerIndex = next;
-  viewerFlipped = false;
-  renderCardViewer();
+  if (next < 0 || next >= viewerOrder.length || cvNavigating) return;
+  const dir = delta > 0 ? 1 : -1;
+  const stage = el.cvStage;
+  if (prefersReducedMotion() || !stage) {
+    viewerIndex = next;
+    viewerFlipped = false;
+    renderCardViewer();
+    return;
+  }
+  // Slide the outgoing card off, swap, then slide the new one in from the
+  // opposite edge so the change is unmistakable.
+  // Sequenced with setTimeout + a forced reflow (not requestAnimationFrame):
+  // rAF is starved when the tab isn't painting, which would otherwise leave
+  // the card stuck off-screen. Timers always fire, so the card always lands.
+  cvNavigating = true;
+  stage.style.transition = "transform .16s ease, opacity .16s ease";
+  stage.style.transform = `translateX(${-dir * 55}%)`;
+  stage.style.opacity = "0";
+  setTimeout(() => {
+    viewerIndex = next;
+    viewerFlipped = false;
+    renderCardViewer();
+    // Drop the incoming card in on the opposite edge with no transition,
+    // then commit that placement with a synchronous reflow.
+    stage.style.transition = "none";
+    stage.style.transform = `translateX(${dir * 55}%)`;
+    stage.style.opacity = "0";
+    void stage.offsetWidth;
+    setTimeout(() => {
+      stage.style.transition = "transform .22s ease, opacity .22s ease";
+      stage.style.transform = "translateX(0)";
+      stage.style.opacity = "1";
+      setTimeout(() => {
+        stage.style.transition = "";
+        stage.style.transform = "";
+        stage.style.opacity = "";
+        cvNavigating = false;
+      }, 240);
+    }, 20);
+  }, 160);
 }
 
 function openCardViewer(index) {
@@ -1069,14 +1107,11 @@ function initCardViewer() {
   // Device-motion tilt (mobile). iOS 13+ needs an explicit permission tap.
   const attachOrientation = () => {
     window.addEventListener("deviceorientation", (ev) => {
-      if (!viewerIsOpen() || !cvCardEl || prefersReducedMotion()) return;
+      if (!viewerIsOpen() || !cvCardEl || cvNavigating || prefersReducedMotion()) return;
       if (ev.gamma == null || ev.beta == null) return;
       const ry = Math.max(-14, Math.min(14, ev.gamma * 0.45));
       const rx = Math.max(-14, Math.min(14, (ev.beta - 45) * 0.3));
-      cvCardEl.style.setProperty("--ry", `${ry.toFixed(2)}deg`);
-      cvCardEl.style.setProperty("--rx", `${(-rx).toFixed(2)}deg`);
-      cvCardEl.style.setProperty("--mx", `${(50 + ry * 2).toFixed(1)}%`);
-      cvCardEl.style.setProperty("--my", `${(50 + rx * 2).toFixed(1)}%`);
+      setViewerOrientation(-rx, ry);
     });
   };
   const DOE = typeof window !== "undefined" ? window.DeviceOrientationEvent : null;
