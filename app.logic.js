@@ -9,6 +9,15 @@ export const MAX_TRAINING_BOOST_PER_STAT = 28;
 export const MAX_CHAMPION_DEFENSES = 5;
 export const CHAMPION_TTL_MS = 24 * 60 * 60 * 1000;
 
+// How long a trainer stays on the map / discoverable for trading after their
+// last location signal (catch event OR presence heartbeat). Two windows,
+// matching what the UI already used inline before presence existed:
+//   - TRADE_DISCOVERY_TTL_MS: still selectable as a nearby trade partner.
+//   - PRESENCE_TTL_MS: still drawn as a map marker (the more forgiving one,
+//     also the cutoff below which we don't even bother storing a location).
+export const TRADE_DISCOVERY_TTL_MS = 15 * 60 * 1000;
+export const PRESENCE_TTL_MS = 30 * 60 * 1000;
+
 // Conservative open-ocean exclusion boxes. Cells whose centre falls inside one
 // of these boxes get no POIs or battle sites — keeps mid-ocean clear without
 // risking false exclusions over coasts or islands.
@@ -226,6 +235,35 @@ export function mergeRecentEvents(currentEvents, incomingEvent, maxItems = 100) 
   const merged = [...currentEvents, incomingEvent];
   if (merged.length > maxItems) return merged.slice(merged.length - maxItems);
   return merged;
+}
+
+// Decide how an incoming location signal should update the in-memory
+// trainerLocations entry for one trainer. Used for BOTH catch events and
+// presence heartbeats so the two stay consistent:
+//   - Newest timestamp wins, so a late-arriving stale catch event can never
+//     clobber a fresh presence heartbeat (or vice versa).
+//   - Anything already older than ttlMs is dropped — it would never be shown
+//     anyway, and this keeps the map from accumulating ancient trainers when
+//     a peer replays a long-dormant presence record on connect.
+// Returns the entry to keep (the existing one unchanged when nothing should
+// change, a new entry when it should update, or null when there's nothing
+// worth storing). Pure: callers diff by reference to decide whether to redraw.
+export function mergeTrainerLocation(existing, incoming, now = Date.now(), ttlMs = PRESENCE_TTL_MS) {
+  if (!incoming) return existing ?? null;
+  // Reject nullish coords explicitly: a catch event may publish lat/lng:null,
+  // and Number(null) === 0 would otherwise drop the trainer onto null island.
+  if (incoming.lat == null || incoming.lng == null || incoming.ts == null) {
+    return existing ?? null;
+  }
+  const lat = Number(incoming.lat);
+  const lng = Number(incoming.lng);
+  const ts = Number(incoming.ts);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || !Number.isFinite(ts)) {
+    return existing ?? null;
+  }
+  if (now - ts > ttlMs) return existing ?? null;
+  if (existing && Number.isFinite(existing.ts) && existing.ts >= ts) return existing;
+  return { lat, lng, ts };
 }
 
 export function getGridKey(lat, lon, cellSizeDegrees = SPAWN_CELL_DEGREES) {

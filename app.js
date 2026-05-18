@@ -28,10 +28,18 @@ import {
   COLLECTION_SORTS,
   groupCollection,
   flattenCollectionGroups,
+  mergeTrainerLocation,
+  TRADE_DISCOVERY_TTL_MS,
+  PRESENCE_TTL_MS,
 } from "./app.logic.js";
 
 const TRADE_RANGE_METERS = 200;
 const TRADE_REQUEST_TTL_MS = 5 * 60 * 1000;
+// Idle trainers publish a lightweight {lat,lng,ts} heartbeat this often so
+// they stay discoverable for trading even when not catching anything. One
+// node per trainer, written with .put() (overwrite, not .set()/append), so
+// presence never grows the datastore the way the events feed would.
+const PRESENCE_HEARTBEAT_MS = 45 * 1000;
 
 const SPAWN_INTERVAL_MS = 3 * 60 * 1000;
 const MAX_SPAWNS = 4;
@@ -58,6 +66,8 @@ let gridCaughtNode = null;
 let lastGridKey = null;
 let battleSitesNode = null;
 let battleEventsNode = null;
+let presenceNode = null;
+let lastPresenceSentAt = 0;
 
 const cards = [
   // Electric ----------------------------------------------------------------
@@ -1450,7 +1460,7 @@ function renderMap() {
   if (showNearby) {
     for (const [name, pos] of trainerLocations) {
       if (name === profile?.name) continue;
-      if (Date.now() - pos.ts > 30 * 60 * 1000) continue;
+      if (Date.now() - pos.ts > PRESENCE_TTL_MS) continue;
       seenTrainers.add(name);
       let marker = trainerMarkers.get(name);
       if (!marker) {
@@ -5044,6 +5054,9 @@ function onPositionUpdate(pos) {
   renderMap();
   renderCards();
   updateBucketLabel();
+  // Become discoverable for trading promptly on the first fix instead of
+  // waiting up to a full heartbeat; throttled so a chatty GPS watch can't spam.
+  publishPresence();
 }
 
 function onPositionError(err) {
@@ -5300,8 +5313,10 @@ function connectFeed() {
     );
     if (alreadyThere) return;
     recentEvents.push(event);
-    if (event.lat && event.lng && event.trainer !== profile?.name) {
-      trainerLocations.set(event.trainer, { lat: event.lat, lng: event.lng, ts: event.ts });
+    if (event.trainer && event.trainer !== profile?.name) {
+      const prev = trainerLocations.get(event.trainer);
+      const merged = mergeTrainerLocation(prev, event);
+      if (merged && merged !== prev) trainerLocations.set(event.trainer, merged);
     }
     if (recentEvents.length > 100) recentEvents.shift();
     renderFeed();
@@ -5326,6 +5341,40 @@ function connectGridCaught() {
       renderCards();
       renderMap();
     }
+  });
+}
+
+// Presence: a single overwrite-in-place node per trainer keyed by name. This
+// publishes the same coarse lat/lng a catch event already exposes on the
+// public feed — no new privacy surface — but keeps idle trainers visible for
+// trading. Like trades/champions there's no auth, so a name can be spoofed;
+// the public datastore + the on-map range gate make that easier to spot than
+// to prevent, consistent with the rest of the multiplayer model.
+function publishPresence(force = false) {
+  if (!presenceNode || !profile?.name || !playerLocation) return;
+  const now = Date.now();
+  // The periodic heartbeat forces a write; opportunistic callers (e.g. a
+  // noisy GPS watch) are throttled so we don't hammer the relay.
+  if (!force && now - lastPresenceSentAt < PRESENCE_HEARTBEAT_MS) return;
+  lastPresenceSentAt = now;
+  try {
+    presenceNode.get(profile.name).put({
+      lat: playerLocation.lat,
+      lng: playerLocation.lng,
+      ts: now,
+    });
+  } catch {}
+}
+
+function subscribePresence() {
+  if (!presenceNode) return;
+  presenceNode.map().on((raw, name) => {
+    if (!raw || !name || name === profile?.name) return;
+    const prev = trainerLocations.get(name);
+    const merged = mergeTrainerLocation(prev, raw);
+    if (!merged || merged === prev) return;
+    trainerLocations.set(name, merged);
+    renderMap();
   });
 }
 
@@ -5544,7 +5593,7 @@ function nearbyTrainerEntries() {
     if (!Number.isFinite(loc.lat) || !Number.isFinite(loc.lng)) continue;
     const dist = distanceMeters(playerLocation, loc);
     if (dist > TRADE_RANGE_METERS) continue;
-    if (Date.now() - (loc.ts || 0) > 15 * 60 * 1000) continue;
+    if (Date.now() - (loc.ts || 0) > TRADE_DISCOVERY_TTL_MS) continue;
     out.push({ name, distance: Math.round(dist), lat: loc.lat, lng: loc.lng, ts: loc.ts });
   }
   out.sort((a, b) => a.distance - b.distance);
@@ -5863,7 +5912,7 @@ function openTradeModal(initialRequestId = null, options = {}) {
               </li>
             `).join("")}
           </ul>
-        ` : `<p class="empty-state">No trainers in range. Trade is unlocked when another player catches a Fokemon within ${TRADE_RANGE_METERS}m of you.</p>`}
+        ` : `<p class="empty-state">No trainers in range. Other players appear here once they're active within ${TRADE_RANGE_METERS}m of you.</p>`}
       </section>
     `;
 
@@ -6105,10 +6154,12 @@ function initGun() {
     battleSitesNode = root.get("battleSites");
     battleEventsNode = root.get("battleEvents");
     tradesNode = root.get("trades");
+    presenceNode = root.get("presence");
     connectFeed();
     connectGridCaught();
     subscribeChampionUpdates();
     subscribeTrades();
+    subscribePresence();
   } catch {
     eventsNode = FALLBACK_EVENTS_NODE;
   }
@@ -6216,4 +6267,8 @@ if (typeof setInterval === "function") {
     updateBucketLabel();
     renderTradeBadge();
   }, 1000);
+
+  // Idle heartbeat: keeps this trainer discoverable for trading even when
+  // they aren't catching anything. Forced (bypasses the publish throttle).
+  setInterval(() => publishPresence(true), PRESENCE_HEARTBEAT_MS);
 }
