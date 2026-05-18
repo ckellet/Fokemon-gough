@@ -858,6 +858,7 @@ function cardViewerHtml(view) {
   const power = instancePower(entry);
   const tier = powerTier(power);
   const rarity = card.rarity || "common";
+  const typeClass = `type-${String(card.type || "spirit").toLowerCase()}`;
   const trained = (entry.boosts?.hp || 0) + (entry.boosts?.atk || 0) + (entry.boosts?.def || 0) + (entry.boosts?.spd || 0);
   const deployed = !!entry.deployedAt;
   const deployedLabel = deployed ? battleSiteName(entry.deployedAt) : "";
@@ -865,7 +866,7 @@ function cardViewerHtml(view) {
   const stat = (label, base, boost) => `
     <div><span>${base + (boost || 0)}${boost ? `<small class="stat-boost"> +${boost}</small>` : ""}</span><small>${label}</small></div>`;
   return `
-    <div class="cv-card rarity-${escapeHtml(rarity)}"
+    <div class="cv-card rarity-${escapeHtml(rarity)} ${typeClass}"
          style="--cv-edge:${colors.accent};--cv-glow:${colors.accent}55;"
          data-uid="${escapeHtml(entry.uid)}" tabindex="0">
       <div class="cv-flipper">
@@ -955,19 +956,47 @@ function renderCardViewer() {
   }
 }
 
-// Apply card rotation, and derive the foil highlight position from the
-// resulting angle (a notional fixed overhead light reflecting off the tilted
-// card) rather than from the cursor — so the sheen sweeps with the card's
-// orientation instead of sitting glued under the pointer.
-function setViewerOrientation(rx, ry) {
+// Drive the holographic layers from a tilt angle (a notional overhead light
+// reflecting off the card) rather than the raw cursor, so the foil and glare
+// sweep with the card's orientation.
+//   --mx/--my : glare focal point (the bright "wet" highlight)
+//   --bx/--by : rainbow-foil sweep position. Repeating bands — no convergence
+//               point — and the resting value is deliberately OFF-centre so
+//               the foil never shows a seam parked mid-card on load.
+//   --fc      : 0..1 distance-from-rest, used to swell the glare on tilt.
+function setViewerHolo(rx, ry) {
   if (!cvCardEl) return;
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const mx = clamp(50 - ry * 1.8, 12, 88);
+  const my = clamp(34 + rx * 1.8, 10, 84);
+  const bx = clamp(30 - ry * 4.6, -45, 135);
+  const by = clamp(26 + rx * 4.6, -45, 135);
+  const fc = clamp(Math.hypot(rx, ry) / 15, 0, 1);
+  const s = cvCardEl.style;
+  s.setProperty("--mx", `${mx.toFixed(1)}%`);
+  s.setProperty("--my", `${my.toFixed(1)}%`);
+  s.setProperty("--bx", `${bx.toFixed(1)}%`);
+  s.setProperty("--by", `${by.toFixed(1)}%`);
+  s.setProperty("--fc", fc.toFixed(3));
+}
+
+// Pointer/mouse tilt (desktop): the screen is stationary, so the card itself
+// rotates in 3D and the sheen follows.
+function setViewerOrientation(rx, ry) {
+  if (!cvCardEl) return;
   cvCardEl.style.setProperty("--rx", `${rx.toFixed(2)}deg`);
   cvCardEl.style.setProperty("--ry", `${ry.toFixed(2)}deg`);
-  const mx = clamp(50 - ry * 1.8, 15, 85);
-  const my = clamp(32 + rx * 1.8, 12, 78);
-  cvCardEl.style.setProperty("--mx", `${mx.toFixed(1)}%`);
-  cvCardEl.style.setProperty("--my", `${my.toFixed(1)}%`);
+  setViewerHolo(rx, ry);
+}
+
+// Phone-tilt (gyro): the screen is already moving in the user's hand, so
+// rotating the card on top of that is double motion. Keep the card flat and
+// let only the hologram travel with the phone's position.
+function setViewerTiltHolo(rx, ry) {
+  if (!cvCardEl) return;
+  cvCardEl.style.setProperty("--rx", "0deg");
+  cvCardEl.style.setProperty("--ry", "0deg");
+  setViewerHolo(rx, ry);
 }
 
 function applyViewerTilt(clientX, clientY) {
@@ -1123,7 +1152,8 @@ function initCardViewer() {
       if (ev.gamma == null || ev.beta == null) return;
       const ry = Math.max(-14, Math.min(14, ev.gamma * 0.45));
       const rx = Math.max(-14, Math.min(14, (ev.beta - 45) * 0.3));
-      setViewerOrientation(-rx, ry);
+      // Card stays flat on gyro — only the hologram tracks the phone.
+      setViewerTiltHolo(-rx, ry);
     });
   };
   const DOE = typeof window !== "undefined" ? window.DeviceOrientationEvent : null;

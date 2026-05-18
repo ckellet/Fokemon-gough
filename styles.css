@@ -7,12 +7,19 @@
   --accent: #7cf0c6;
 }
 * { box-sizing: border-box; }
+html, body {
+  /* Stop iOS Safari pull-to-refresh / rubber-band bounce (e.g. flicking the FokéCache wheel). */
+  overscroll-behavior: none;
+}
 body {
   margin: 0;
   min-height: 100vh;
   font-family: "Outfit", sans-serif;
   background: radial-gradient(circle at 20% 20%, #202d57, var(--bg));
   color: var(--text);
+  /* Kill the iOS double-tap-to-zoom gesture on rapid taps. */
+  touch-action: manipulation;
+  -webkit-text-size-adjust: 100%;
 }
 .bg-orb { position: fixed; border-radius: 50%; filter: blur(60px); opacity: .35; z-index: -1; }
 .orb-1 { width: 260px; height: 260px; background: #60f7d4; top: 6%; left: 8%; }
@@ -24,7 +31,7 @@ body {
 h1, h2, h3 { margin: .2rem 0 .6rem; }
 .auth-form { display: grid; gap: 1rem; max-width: 400px; margin-top: 1rem; }
 label { display: grid; gap: .5rem; color: var(--muted); }
-input, select, button { border-radius: 12px; border: 1px solid var(--line); padding: .8rem .95rem; font: inherit; }
+input, select, button { border-radius: 12px; border: 1px solid var(--line); padding: .8rem .95rem; font: inherit; touch-action: manipulation; }
 input, select { background: rgba(255,255,255,.06); color: var(--text); }
 button { background: linear-gradient(90deg,#6df0c4,#4bb7ff); color: #031423; font-weight: 700; cursor: pointer; border: none; }
 button.ghost { background: transparent; border: 1px solid var(--line); color: var(--text); }
@@ -1929,6 +1936,8 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
   align-items: center;
   justify-content: center;
   padding: 1rem;
+  /* Keep any stray drag on the overlay from moving the page behind it. */
+  overscroll-behavior: contain;
 }
 .card-viewer.hidden { display: none; }
 .cv-backdrop {
@@ -1944,6 +1953,13 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
   z-index: 1;
   perspective: 1300px;
   width: min(380px, 86vw);
+  /* Own the touch gesture: without this, mobile Safari treats a horizontal
+     drag as a pan/scroll, fires pointercancel, and the swipe-to-browse never
+     registers — the background moves instead of the card. */
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
 }
 
 .cv-card {
@@ -1955,13 +1971,52 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
   transform: rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg));
   transition: transform .16s ease-out;
   cursor: pointer;
-  --holo: 0;
-  --mx: 50%;
-  --my: 50%;
+  /* Motion vars (set by JS). Foil rests OFF-centre so no seam parks mid-card. */
+  --holo: 0;            /* rainbow-foil strength, per rarity */
+  --spark: 0;           /* sparkle/glitter strength, epic (or cosmic) only */
+  --mx: 50%;            /* glare focal X */
+  --my: 34%;            /* glare focal Y */
+  --bx: 30%;            /* foil sweep X (resting, off-centre) */
+  --by: 26%;            /* foil sweep Y (resting, off-centre) */
+  --fc: 0;              /* tilt amount 0..1, swells the glare */
+  /* Default rainbow palette — per-type classes below override these. */
+  --h1: #ff6b97; --h2: #ffd36b; --h3: #7bff9b;
+  --h4: #62e7ff; --h5: #7d92ff; --h6: #d987ff;
+  /* Concentrate the foil over the artwork band so it reads as printed-on
+     foil, fading clear of the name and stat text. */
+  --art-mask: linear-gradient(to bottom,
+    transparent 4%, rgba(0, 0, 0, .9) 20%, rgba(0, 0, 0, .9) 54%, transparent 70%);
 }
-.cv-card.rarity-epic   { --holo: .60; }
-.cv-card.rarity-rare   { --holo: .34; }
-.cv-card.rarity-common { --holo: .15; }
+.cv-card.rarity-common { --holo: .10; --spark: 0; }
+.cv-card.rarity-rare   { --holo: .30; --spark: 0; }
+.cv-card.rarity-epic   { --holo: .44; --spark: .4; }
+
+/* Per-type foil palettes ---------------------------------------------------*/
+.cv-card.type-fire, .cv-card.type-rock {
+  --h1:#ff7a3a; --h2:#ffd36b; --h3:#ff9e5e; --h4:#ffee8c; --h5:#ff5e7a; --h6:#ffb27a;
+}
+.cv-card.type-water, .cv-card.type-ice {
+  --h1:#4ea9ff; --h2:#7ff0ff; --h3:#9bd4ff; --h4:#d6f6ff; --h5:#6b86ff; --h6:#a0e6ff;
+}
+.cv-card.type-leaf, .cv-card.type-bug, .cv-card.type-wind {
+  --h1:#5ed27a; --h2:#caf08b; --h3:#8ce8c8; --h4:#e0f4a8; --h5:#62e4b0; --h6:#b2f0c4;
+}
+.cv-card.type-electric {
+  --h1:#ffd966; --h2:#fff79a; --h3:#d4ff8a; --h4:#8affd2; --h5:#ffe566; --h6:#f2ff8a;
+}
+.cv-card.type-shadow, .cv-card.type-spirit {
+  --h1:#8a6cff; --h2:#cf8bff; --h3:#ff8bd2; --h4:#8b9cff; --h5:#b06bff; --h6:#e08bff;
+}
+.cv-card.type-cosmic {
+  --h1:#a878ff; --h2:#6be0ff; --h3:#e0c8ff; --h4:#7d92ff; --h5:#c97bff; --h6:#8be0ff;
+}
+/* Cosmic gets a starfield (sparkle layer) even at rare. */
+.cv-card.type-cosmic.rarity-rare { --spark: .28; }
+.cv-card.type-cosmic.rarity-epic { --spark: .5; }
+/* Metal: brushed silver rather than rainbow. */
+.cv-card.type-metal {
+  --h1:#e8eef6; --h2:#9aaabd; --h3:#ffffff; --h4:#aab6c6; --h5:#dfe6f0; --h6:#8593a6;
+}
 
 .cv-flipper {
   position: relative;
@@ -1996,31 +2051,97 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
 .cv-face.front { transform: translateZ(1px); }
 .cv-face.back { transform: rotateY(180deg) translateZ(1px); }
 
-/* Holographic foil + moving glare, layered over each face */
+/* Holographic foil + moving glare, layered ABOVE the card content so the
+   foil sits "on" the artwork like real printed holo (poke-holo style:
+   repeating rainbow bands swept by background-position — no conic gradient,
+   so there is no convergence point/seam parked in the middle of the card). */
 .cv-holo,
 .cv-glare {
   position: absolute;
   inset: 0;
   pointer-events: none;
-  border-radius: 18px;
+  border-radius: 16px;
+  overflow: hidden;
 }
+
+/* Rainbow foil — masked to the artwork band so it reads as printed-on. */
 .cv-holo {
+  z-index: 2;
   opacity: var(--holo, 0);
+  background-image:
+    repeating-linear-gradient(108deg,
+      var(--h1) 0%, var(--h2) 7%, var(--h3) 14%, var(--h4) 21%,
+      var(--h5) 28%, var(--h6) 35%, var(--h1) 42%),
+    repeating-linear-gradient(53deg,
+      var(--h4) 0%, var(--h6) 8%, var(--h2) 16%, var(--h5) 24%, var(--h4) 32%),
+    radial-gradient(farthest-corner circle at var(--mx) var(--my),
+      rgba(255, 255, 255, .7) 0%, rgba(40, 40, 55, .35) 28%, #000 62%);
+  background-size: 220% 220%, 170% 170%, cover;
+  background-position:
+    var(--bx) var(--by),
+    calc(100% - var(--bx)) var(--by),
+    center;
+  background-blend-mode: screen, multiply;
+  filter: brightness(.82) contrast(2.55) saturate(.78);
   mix-blend-mode: color-dodge;
-  background:
-    repeating-linear-gradient(115deg,
-      transparent 0 6%, rgba(255, 255, 255, .10) 7.5%, transparent 9% 15%),
-    conic-gradient(from 0deg at var(--mx) var(--my),
-      #ffe66d, #ff8fab, #b57cff, #4ea9ff, #7cf0c6, #ffe66d);
-  transition: opacity .2s ease;
+  -webkit-mask-image: var(--art-mask);
+  mask-image: var(--art-mask);
+  -webkit-mask-size: 100% 100%;
+  mask-size: 100% 100%;
+  transition: opacity .3s ease;
 }
+
+/* Fine "printed line screen" micro-texture (skipped on commons). */
+.cv-card:not(.rarity-common) .cv-holo::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: repeating-linear-gradient(90deg,
+    rgba(0, 0, 0, .55) 0 1px,
+    rgba(255, 255, 255, .16) 1px 2px,
+    rgba(0, 0, 0, .55) 2px 3px);
+  background-size: 220% 100%;
+  background-position: var(--bx) 0;
+  mix-blend-mode: overlay;
+  opacity: .45;
+  -webkit-mask-image: var(--art-mask);
+  mask-image: var(--art-mask);
+  -webkit-mask-size: 100% 100%;
+  mask-size: 100% 100%;
+}
+
+/* Sparkle / glitter — epic rarity (and cosmic, where it reads as a starfield). */
+.cv-holo::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  opacity: var(--spark, 0);
+  background-image:
+    radial-gradient(rgba(255, 255, 255, .95) 0.6px, transparent 1.4px),
+    radial-gradient(rgba(255, 255, 255, .7) 0.6px, transparent 1.4px);
+  background-size: 3.2% 3.2%, 5% 5%;
+  background-position: var(--bx) var(--by), var(--by) var(--bx);
+  mix-blend-mode: color-dodge;
+  transition: opacity .3s ease;
+  -webkit-mask-image: var(--art-mask);
+  mask-image: var(--art-mask);
+  -webkit-mask-size: 100% 100%;
+  mask-size: 100% 100%;
+}
+
+/* Metal foil is brushed silver, not rainbow — drop the saturation. */
+.cv-card.type-metal .cv-holo { filter: brightness(.85) contrast(2.4) saturate(.32); }
+
+/* Full-face plastic glare — follows the light, swells as you tilt. */
 .cv-glare {
-  background: radial-gradient(135% 95% at var(--mx) var(--my),
-    rgba(255, 255, 255, .26),
-    rgba(255, 255, 255, .07) 34%,
-    rgba(255, 255, 255, 0) 64%);
-  mix-blend-mode: soft-light;
-  transition: background-position .12s linear;
+  z-index: 3;
+  background-image: radial-gradient(farthest-corner circle at var(--mx) var(--my),
+    rgba(255, 255, 255, .24) 8%,
+    rgba(255, 255, 255, .07) 26%,
+    rgba(255, 255, 255, 0) 56%);
+  mix-blend-mode: overlay;
+  opacity: calc(.28 + var(--fc, 0) * .4);
+  transition: opacity .2s ease;
 }
 
 .cv-body {
