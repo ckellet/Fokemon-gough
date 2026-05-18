@@ -26,6 +26,19 @@ Then open `http://localhost:8080`.
 
 Workflow file: `.github/workflows/deploy-pages.yml`.
 
+### Cache busting (version stamping)
+The source tree intentionally references assets **without** a version query
+(`app.js`, `styles.css`, …) so local dev stays simple. The deploy workflow's
+**Stamp build version** step rewrites the *artifact only* (never committed): it
+writes the commit SHA into `version.json` and `<meta name="app-version">` and
+appends `?v=<sha>` to the locally-served assets and the `app.logic.js` import.
+
+`version-check.js` polls `version.json` (with `no-store`) on load, on
+tab-focus, and every 5 minutes. When a deploy changes the version it shows a
+dismissible "Reload" banner, so already-open tabs pick up new code without
+waiting for the GitHub Pages HTML cache to lapse. Don't be surprised that the
+checked-in files have no `?v=` — that is added at deploy time by design.
+
 ## Battle sites (Foké Gyms)
 - Deterministic battle sites scatter the world alongside POIs (see `computeBattleSitePlacements`).
 - Players within ~100 m can interact: deploy a champion at a vacant site, train an owned champion, or challenge a rival.

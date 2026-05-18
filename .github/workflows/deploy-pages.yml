@@ -27,6 +27,28 @@ jobs:
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
+      - name: Stamp build version
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_SHA::12}"
+          BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          printf '{"version":"%s","builtAt":"%s"}\n' "$VERSION" "$BUILT_AT" > version.json
+
+          # Cache-bust every locally served asset and the version meta tag so
+          # a new deploy yields new URLs and open tabs detect the change.
+          sed -i "s|href=\"styles.css\"|href=\"styles.css?v=${VERSION}\"|" index.html
+          sed -i "s|src=\"app.js\"|src=\"app.js?v=${VERSION}\"|" index.html
+          sed -i "s|src=\"version-check.js\"|src=\"version-check.js?v=${VERSION}\"|" index.html
+          sed -i "s|name=\"app-version\" content=\"dev\"|name=\"app-version\" content=\"${VERSION}\"|" index.html
+
+          # app.js statically imports app.logic.js; propagate the version so
+          # the module sub-graph is busted too.
+          sed -i "s|from \"./app.logic.js\"|from \"./app.logic.js?v=${VERSION}\"|" app.js
+
+          echo "Stamped version ${VERSION}"
+          grep -n "app-version\|styles.css?v=\|app.js?v=" index.html
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
