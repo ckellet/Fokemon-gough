@@ -186,6 +186,52 @@ export function normalizeBoosts(raw) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Trade offer wire format
+// ---------------------------------------------------------------------------
+// A trade record syncs through `fokemon/trades/<id>` and is read on every peer
+// via `tradesNode.map().on()`. GUN's `.map().on()` does NOT resolve nested
+// child objects — a `put({ offer: { ... } })` is stored as a *separate graph
+// node*, so the receiver sees `offer` as an unresolved link (`{ '#': soul }`),
+// never the real `{ uid, cardId, boosts }`. The originator's own callback fires
+// with the full object only because GUN already has that subgraph cached
+// locally from its own `.put()` — which is exactly why "I can send a trade but
+// the other player never receives it" happens in two-browser testing.
+//
+// Fix: keep the offer as a single JSON *string* scalar. Strings sync verbatim
+// through `.map().on()`, so both peers reconstruct an identical offer.
+export function serializeTradeOffer(offer) {
+  if (!offer || typeof offer !== "object") return null;
+  if (!offer.uid || !offer.cardId) return null;
+  return JSON.stringify({
+    uid: String(offer.uid),
+    cardId: String(offer.cardId),
+    boosts: normalizeBoosts(offer.boosts),
+    caughtAt: Number(offer.caughtAt) || 0,
+  });
+}
+
+// Accepts what a peer actually receives: a JSON string (the wire format), or a
+// plain object (a local echo before it round-trips, or a legacy record). An
+// unresolved GUN link (`{ '#': ... }`, no uid/cardId) yields null so a partial
+// graph read can't masquerade as a real offer. Card-existence is the caller's
+// job (it needs the live card index); this only fixes the shape.
+export function parseTradeOffer(raw) {
+  if (!raw) return null;
+  let obj = raw;
+  if (typeof raw === "string") {
+    try { obj = JSON.parse(raw); } catch { return null; }
+  }
+  if (!obj || typeof obj !== "object") return null;
+  if (!obj.uid || !obj.cardId) return null;
+  return {
+    uid: String(obj.uid),
+    cardId: String(obj.cardId),
+    boosts: normalizeBoosts(obj.boosts),
+    caughtAt: Number(obj.caughtAt) || 0,
+  };
+}
+
 export function migrateCaughtEntries(entries) {
   // Assign uid/boosts/deployedAt to legacy entries while preserving any newer
   // fields. Returns a new array; safe to call multiple times.
