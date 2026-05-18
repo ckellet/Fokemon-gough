@@ -1141,6 +1141,8 @@ function renderMap() {
       let marker = trainerMarkers.get(name);
       if (!marker) {
         marker = L.marker([pos.lat, pos.lng], { icon: makeTrainerIcon(name) }).addTo(map);
+        const trainerName = name;
+        marker.on("click", () => openTradeModal(null, { offerTo: trainerName }));
         trainerMarkers.set(name, marker);
       } else {
         marker.setLatLng([pos.lat, pos.lng]);
@@ -5146,8 +5148,14 @@ function publishBattleEvent(event) {
 let tradesNode = null;
 const tradeRequests = new Map(); // requestId -> normalized request
 const appliedTrades = new Set();
+const notifiedTradeKeys = new Set(); // `${id}:${status}` already surfaced as a toast
+const locallyCancelledTrades = new Set(); // ids I cancelled/declined myself
 let openTradeRequestId = null;
 let openTradeRefresh = null;
+
+// A trade request/counter syncs near-instantly over GUN; anything older than
+// this is treated as a stale replay (e.g. on reload) and surfaced silently.
+const TRADE_NOTIFY_FRESH_MS = 120000;
 
 function makeRequestId() {
   return `trade-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -5316,7 +5324,9 @@ function subscribeTrades() {
     if (req.status === "completed") {
       if (req.from === profile?.name) applyIncomingCompletedTrade(req);
       else if (req.to === profile?.name) applyAcceptedTradeAsRecipient(req);
+      dismissTradeToast(); // the trade resolved — clear any lingering banner
     }
+    maybeNotifyTrade(req);
     renderTradeBadge();
     refreshOpenTradeModal();
   });
@@ -5338,6 +5348,109 @@ function refreshOpenTradeModal() {
   if (typeof openTradeRefresh === "function") openTradeRefresh();
 }
 
+// A single non-blocking banner so an incoming request / counter can't be
+// missed even when the player isn't looking at the Trade button.
+let tradeToastEl = null;
+let tradeToastTimer = null;
+
+function dismissTradeToast() {
+  if (tradeToastTimer) { clearTimeout(tradeToastTimer); tradeToastTimer = null; }
+  const wrap = tradeToastEl;
+  tradeToastEl = null;
+  if (!wrap) return;
+  wrap.classList.remove("show");
+  setTimeout(() => { if (wrap.parentNode) wrap.remove(); }, 250);
+}
+
+function showTradeToast({ title, detail, requestId, autoDismissMs }) {
+  if (typeof document === "undefined") return;
+  dismissTradeToast();
+  const wrap = document.createElement("div");
+  wrap.className = "trade-toast";
+  wrap.setAttribute("role", "alert");
+  wrap.innerHTML = `
+    <div class="trade-toast-body">
+      <span class="trade-toast-icon" aria-hidden="true">🔄</span>
+      <div class="trade-toast-text">
+        <strong>${escapeHtml(title)}</strong>
+        ${detail ? `<span>${escapeHtml(detail)}</span>` : ""}
+      </div>
+    </div>
+    <div class="trade-toast-actions">
+      ${requestId ? `<button type="button" class="primary trade-toast-view">Review</button>` : ""}
+      <button type="button" class="ghost trade-toast-dismiss" aria-label="Dismiss">✕</button>
+    </div>
+  `;
+  document.body.appendChild(wrap);
+  void wrap.offsetWidth; // reflow so the slide-in transition runs
+  wrap.classList.add("show");
+  tradeToastEl = wrap;
+
+  wrap.querySelector(".trade-toast-dismiss")?.addEventListener("click", dismissTradeToast);
+  wrap.querySelector(".trade-toast-view")?.addEventListener("click", () => {
+    dismissTradeToast();
+    if (!requestId) return;
+    if (openTradeRequestId) {
+      // A trade modal is already open — route it to this request.
+      openTradeRequestId = requestId;
+      if (typeof openTradeRefresh === "function") openTradeRefresh();
+    } else {
+      openTradeModal(requestId);
+    }
+  });
+  if (autoDismissMs) tradeToastTimer = setTimeout(dismissTradeToast, autoDismissMs);
+}
+
+function buzz(pattern) {
+  try { if (navigator?.vibrate) navigator.vibrate(pattern); } catch {}
+}
+
+// Surface a fresh, actionable trade transition exactly once.
+function maybeNotifyTrade(req) {
+  if (!req || !profile?.name) return;
+  const iAmTo = req.to === profile.name;
+  const iAmFrom = req.from === profile.name;
+  if (!iAmTo && !iAmFrom) return;
+
+  const key = `${req.id}:${req.status}`;
+  if (notifiedTradeKeys.has(key)) return;
+
+  if (req.status === "pending" && iAmTo) {
+    notifiedTradeKeys.add(key);
+    if (Date.now() - req.createdAt > TRADE_NOTIFY_FRESH_MS) return;
+    const name = cardsById.get(req.offer.cardId)?.name || "a Fokemon";
+    buzz([120, 60, 120]);
+    showTradeToast({
+      title: `${req.from} wants to trade`,
+      detail: `Offering their ${name} — tap Review to respond`,
+      requestId: req.id,
+    });
+  } else if (req.status === "countered" && iAmFrom) {
+    notifiedTradeKeys.add(key);
+    if (Date.now() - req.updatedAt > TRADE_NOTIFY_FRESH_MS) return;
+    const name = req.counterOffer
+      ? (cardsById.get(req.counterOffer.cardId)?.name || "a Fokemon")
+      : "a Fokemon";
+    buzz([120, 60, 120]);
+    showTradeToast({
+      title: `${req.to} responded`,
+      detail: `They offer their ${name} — review the swap`,
+      requestId: req.id,
+    });
+  } else if (req.status === "cancelled") {
+    notifiedTradeKeys.add(key);
+    if (locallyCancelledTrades.has(req.id)) return;
+    if (Date.now() - req.updatedAt > TRADE_NOTIFY_FRESH_MS) return;
+    const other = iAmFrom ? req.to : req.from;
+    showTradeToast({
+      title: `Trade cancelled`,
+      detail: `Your trade with ${other} was cancelled`,
+      requestId: null,
+      autoDismissMs: 6000,
+    });
+  }
+}
+
 function offerSummaryHtml(offer) {
   if (!offer) return "<em>Nothing offered</em>";
   const card = cardsById.get(offer.cardId);
@@ -5354,9 +5467,10 @@ function offerSummaryHtml(offer) {
   `;
 }
 
-function openTradeModal(initialRequestId = null) {
+function openTradeModal(initialRequestId = null, options = {}) {
   if (activeChallenge) return;
   if (openTradeRequestId) return;
+  const offerTo = options?.offerTo || null;
 
   const overlay = document.createElement("div");
   overlay.className = "battle-site-modal trade-modal";
@@ -5390,6 +5504,7 @@ function openTradeModal(initialRequestId = null) {
   document.addEventListener("keydown", onKey);
 
   function renderList() {
+    openTradeRequestId = "list";
     const nearby = nearbyTrainerEntries();
     const incoming = pendingIncomingTrades();
     const myOutgoing = [...tradeRequests.values()].filter((r) =>
@@ -5451,6 +5566,7 @@ function openTradeModal(initialRequestId = null) {
   }
 
   function renderOffer(recipientName) {
+    openTradeRequestId = "list";
     const available = availableInstances(caught);
     if (!available.length) {
       bodyEl.innerHTML = `
@@ -5510,6 +5626,7 @@ function openTradeModal(initialRequestId = null) {
   function renderRequest(reqId) {
     const req = tradeRequests.get(reqId);
     if (!req) { renderList(); return; }
+    openTradeRequestId = reqId;
     const card = cardsById.get(req.offer.cardId);
     const counterCard = req.counterOffer ? cardsById.get(req.counterOffer.cardId) : null;
     const iAmFrom = req.from === profile?.name;
@@ -5617,28 +5734,47 @@ function openTradeModal(initialRequestId = null) {
     });
     bodyEl.querySelector(".cancel-trade")?.addEventListener("click", () => {
       const cancelled = { ...req, status: "cancelled", updatedAt: Date.now() };
+      locallyCancelledTrades.add(req.id);
       tradeRequests.set(req.id, cancelled);
       publishTradeRequest(cancelled);
       renderRequest(req.id);
     });
     bodyEl.querySelector(".reject-trade")?.addEventListener("click", () => {
       const cancelled = { ...req, status: "cancelled", updatedAt: Date.now() };
+      locallyCancelledTrades.add(req.id);
       tradeRequests.set(req.id, cancelled);
       publishTradeRequest(cancelled);
       renderList();
     });
   }
 
+  function renderOutOfRange(name) {
+    openTradeRequestId = "list";
+    bodyEl.innerHTML = `
+      <p><a href="#" class="back-link">&larr; Back</a></p>
+      <h4>${escapeHtml(name)} is out of range</h4>
+      <p class="empty-state">You need to be within ${TRADE_RANGE_METERS}m of <strong>${escapeHtml(name)}</strong> (and they must have been active recently) to trade. Move closer and try again.</p>
+    `;
+    bodyEl.querySelector(".back-link").addEventListener("click", (ev) => { ev.preventDefault(); renderList(); });
+  }
+
   openTradeRefresh = () => {
     // If a tracked request gets a new status update behind the scenes, refresh the view.
     if (openTradeRequestId && openTradeRequestId !== "list" && tradeRequests.has(openTradeRequestId)) {
       renderRequest(openTradeRequestId);
-    } else {
+    } else if (!offerTo) {
+      // Don't yank the player out of the offer picker on a background sync.
       renderList();
     }
   };
 
-  if (initialRequestId && tradeRequests.has(initialRequestId)) {
+  if (offerTo) {
+    if (nearbyTrainerEntries().some((t) => t.name === offerTo)) {
+      renderOffer(offerTo);
+    } else {
+      renderOutOfRange(offerTo);
+    }
+  } else if (initialRequestId && tradeRequests.has(initialRequestId)) {
     renderRequest(initialRequestId);
   } else {
     renderList();
