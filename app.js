@@ -4098,6 +4098,111 @@ function launchPoiSpinner(poi) {
   let bursts = [];
   let stopped = false;
 
+  // ---------- juice: audio (synthesized, no asset files) ----------
+  let audioCtx = null;
+  function ensureAudio() {
+    try {
+      if (!audioCtx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return;
+        audioCtx = new AC();
+      }
+      if (audioCtx.state === "suspended") audioCtx.resume();
+    } catch {
+      audioCtx = null;
+    }
+  }
+  function tone({ freq = 440, freqEnd = freq, dur = 0.12, type = "triangle", vol = 0.1, delay = 0 }) {
+    if (!audioCtx) return;
+    const t0 = audioCtx.currentTime + delay;
+    const osc = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t0);
+    if (freqEnd !== freq) osc.frequency.exponentialRampToValueAtTime(Math.max(1, freqEnd), t0 + dur);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.linearRampToValueAtTime(vol, t0 + 0.006);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(g).connect(audioCtx.destination);
+    osc.start(t0);
+    osc.stop(t0 + dur + 0.03);
+  }
+  function noiseBurst({ dur = 0.18, vol = 0.16, filter = 1400 }) {
+    if (!audioCtx) return;
+    const t0 = audioCtx.currentTime;
+    const frames = Math.max(1, Math.floor(audioCtx.sampleRate * dur));
+    const buf = audioCtx.createBuffer(1, frames, audioCtx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < frames; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / frames);
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    const f = audioCtx.createBiquadFilter();
+    f.type = "lowpass";
+    f.frequency.value = filter;
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(vol, t0);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    src.connect(f).connect(g).connect(audioCtx.destination);
+    src.start(t0);
+    src.stop(t0 + dur);
+  }
+  const sfx = {
+    tick(strength = 1) { tone({ freq: 220 + strength * 360, dur: 0.04, type: "square", vol: 0.018 + strength * 0.03 }); },
+    lock() { tone({ freq: 520, freqEnd: 760, dur: 0.14, type: "triangle", vol: 0.06 }); },
+    ball() { [659, 880, 1175].forEach((f, i) => tone({ freq: f, dur: 0.14, type: "triangle", vol: 0.085, delay: i * 0.06 })); },
+    empty() { [523, 659, 784, 1047, 1319].forEach((f, i) => tone({ freq: f, dur: 0.2, type: "triangle", vol: 0.1, delay: i * 0.09 })); noiseBurst({ dur: 0.2, vol: 0.05, filter: 3200 }); },
+  };
+
+  // ---------- juice: particles + screen shake ----------
+  const particles = [];
+  let shakeMag = 0;
+  function addShake(m) { shakeMag = Math.min(10, Math.max(shakeMag, m)); }
+  function spawnBallBurst(cx, cy) {
+    const cols = ["#7cf0c6", "#ffe27a", "#8fb4ff", "#ff8d9e", "#ffffff"];
+    for (let i = 0; i < 26; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = 110 + Math.random() * 240;
+      particles.push({
+        x: cx, y: cy,
+        vx: Math.cos(a) * sp,
+        vy: Math.sin(a) * sp - 60,
+        g: 420,
+        life: 0.45 + Math.random() * 0.5, maxLife: 0.95,
+        size: 1.8 + Math.random() * 2.8,
+        color: cols[i % cols.length],
+      });
+    }
+    if (particles.length > 220) particles.splice(0, particles.length - 220);
+  }
+  function updateParticles(dt) {
+    for (const p of particles) {
+      p.life -= dt;
+      p.vy += (p.g || 0) * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vx *= 0.97;
+    }
+    for (let i = particles.length - 1; i >= 0; i--) if (particles[i].life <= 0) particles.splice(i, 1);
+    if (shakeMag > 0) shakeMag = Math.max(0, shakeMag - dt * 40);
+  }
+  function drawParticles() {
+    for (const p of particles) {
+      const k = Math.max(0, Math.min(1, p.life / p.maxLife));
+      ctx.save();
+      ctx.globalAlpha = k;
+      ctx.globalCompositeOperation = "lighter";
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size * (0.4 + k * 0.6), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  const SPOKES = 6;
+  let lastDetent = 0;
+  let wasAboveThreshold = false;
+
   function setStatus(html) {
     if (html !== undefined) status.innerHTML = html;
     else {
@@ -4129,10 +4234,15 @@ function launchPoiSpinner(poi) {
     collected += 1;
     addFokeBalls(1);
     pushBurst();
+    sfx.ball();
+    spawnBallBurst(CX, CY);
+    addShake(4);
     if (readoutBalls) readoutBalls.textContent = String(collected);
     if (readoutBag) readoutBag.textContent = String(fokeBalls);
     if (collected >= MAX_POI_REWARD) {
       // Cache fully drained — mark spent now.
+      sfx.empty();
+      addShake(8);
       finalizeSpent();
       setStatus();
     }
@@ -4148,6 +4258,7 @@ function launchPoiSpinner(poi) {
 
   function onDown(e) {
     if (stopped) return;
+    ensureAudio();
     const p = getPointer(e);
     const dx = p.x - CX;
     const dy = p.y - CY;
@@ -4240,6 +4351,22 @@ function launchPoiSpinner(poi) {
       theta += omega * dt;
     }
     const absO = Math.abs(omega);
+
+    // Ratchet click as each spoke passes the top — pitch/volume track speed.
+    const detentSize = (Math.PI * 2) / SPOKES;
+    const detent = Math.floor(theta / detentSize);
+    if (detent !== lastDetent && absO > 0.35) {
+      lastDetent = detent;
+      sfx.tick(Math.min(1, absO / MAX_OMEGA));
+    } else if (detent !== lastDetent) {
+      lastDetent = detent;
+    }
+
+    // "Locked in" chime when first crossing the speed line.
+    const above = absO >= THRESHOLD && collected < MAX_POI_REWARD;
+    if (above && !wasAboveThreshold) sfx.lock();
+    wasAboveThreshold = above;
+
     if (absO >= THRESHOLD && collected < MAX_POI_REWARD) {
       revAccum += absO * dt;
       aboveSince += dt;
@@ -4257,12 +4384,11 @@ function launchPoiSpinner(poi) {
       return b.t < b.life;
     });
 
+    updateParticles(dt);
     setStatus();
   }
 
   function drawWheel() {
-    ctx.clearRect(0, 0, W, H);
-
     // Speed-line indicator ring outside the wheel
     const speedPct = Math.min(1, Math.abs(omega) / (THRESHOLD * 1.6));
     const ringR = R + 14;
@@ -4385,7 +4511,14 @@ function launchPoiSpinner(poi) {
   }
 
   function draw() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.save();
+    if (shakeMag > 0) {
+      ctx.translate((Math.random() - 0.5) * shakeMag, (Math.random() - 0.5) * shakeMag);
+    }
     drawWheel();
+    drawParticles();
+    ctx.restore();
   }
 
   function closeChallenge() {
@@ -4434,7 +4567,7 @@ function launchTraining(site, champion) {
         <span class="hits-meter"><span class="meta-label">HP</span><span class="train-hp"></span></span>
         <span class="hits-meter"><span class="meta-label">Reps</span><span class="train-score">0</span></span>
       </div>
-      <p class="train-help">Drag to dodge the trainer-balls — an amber ⚠ flash warns which edge each one fires from. Grab the glowing 💚 FokéFood to heal a heart. Each near-miss earns reps; boost stats when the drill ends.</p>
+      <p class="train-help">Drag to dodge the trainer-balls — an amber ⚠ flash warns which edge each one fires from. Grab the glowing 💚 FokéFood to refill your hearts. Each near-miss earns reps; boost stats when the drill ends.</p>
       <div class="arena training-arena">
         <canvas class="training-canvas" aria-label="Training arena"></canvas>
       </div>
@@ -4629,8 +4762,20 @@ function launchTraining(site, champion) {
     }
   }
 
-  function setHpText() {
-    if (hpEl) hpEl.textContent = `${hp}/${hpMax}`;
+  function setHpText(healed) {
+    if (!hpEl) return;
+    let html = "";
+    for (let i = 0; i < hpMax; i++) {
+      html += `<span class="train-heart ${i < hp ? "full" : "empty"}" aria-hidden="true">♥</span>`;
+    }
+    hpEl.innerHTML = html;
+    hpEl.setAttribute("aria-label", `${hp} of ${hpMax} hearts`);
+    hpEl.classList.toggle("hp-low", hp <= 1 && hp > 0);
+    if (healed) {
+      hpEl.classList.remove("heal");
+      void hpEl.offsetWidth; // restart the pulse animation
+      hpEl.classList.add("heal");
+    }
   }
   setHpText();
 
@@ -4755,11 +4900,12 @@ function launchTraining(site, champion) {
     food.life -= dt;
     food.pulse += dt * 5;
     if (food.life <= 0) { food = null; return; }
-    if (Math.hypot(food.x - fokePos.x, food.y - fokePos.y) < PLAYER_R + FOOD_R) {
+    if (Math.hypot(food.x - fokePos.x, food.y - fokePos.y) < PLAYER_R + FOOD_R + 6) {
       if (hp < hpMax) {
-        hp += 1;
-        setHpText();
-        popComic("YUM! +1 HP", food.x, food.y - FOOD_R - 8, "#7cf0c6");
+        const before = hp;
+        hp = hpMax; // FokéFood tops you back up to full
+        setHpText(true);
+        popComic(hpMax - before > 1 ? "FULL HEAL!" : "YUM! +1 HP", food.x, food.y - FOOD_R - 8, "#7cf0c6");
       } else {
         score += 3;
         if (scoreEl) scoreEl.textContent = String(score);
@@ -5374,6 +5520,90 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
   let screenShake = 0;
   let flashWhole = 0;
 
+  // ---------- juice: audio (synthesized, no asset files) ----------
+  let audioCtx = null;
+  function ensureAudio() {
+    try {
+      if (!audioCtx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return;
+        audioCtx = new AC();
+      }
+      if (audioCtx.state === "suspended") audioCtx.resume();
+    } catch {
+      audioCtx = null;
+    }
+  }
+  function tone({ freq = 440, freqEnd = freq, dur = 0.12, type = "triangle", vol = 0.1, delay = 0 }) {
+    if (!audioCtx) return;
+    const t0 = audioCtx.currentTime + delay;
+    const osc = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t0);
+    if (freqEnd !== freq) osc.frequency.exponentialRampToValueAtTime(Math.max(1, freqEnd), t0 + dur);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.linearRampToValueAtTime(vol, t0 + 0.006);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(g).connect(audioCtx.destination);
+    osc.start(t0);
+    osc.stop(t0 + dur + 0.03);
+  }
+  function noiseBurst({ dur = 0.18, vol = 0.16, filter = 1400 }) {
+    if (!audioCtx) return;
+    const t0 = audioCtx.currentTime;
+    const frames = Math.max(1, Math.floor(audioCtx.sampleRate * dur));
+    const buf = audioCtx.createBuffer(1, frames, audioCtx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < frames; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / frames);
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    const f = audioCtx.createBiquadFilter();
+    f.type = "lowpass";
+    f.frequency.value = filter;
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(vol, t0);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    src.connect(f).connect(g).connect(audioCtx.destination);
+    src.start(t0);
+    src.stop(t0 + dur);
+  }
+  const sfx = {
+    charge() { tone({ freq: 240, freqEnd: 620, dur: 0.5, type: "sawtooth", vol: 0.04 }); },
+    fire() { tone({ freq: 360, freqEnd: 820, dur: 0.13, type: "triangle", vol: 0.08 }); noiseBurst({ dur: 0.06, vol: 0.05, filter: 3000 }); },
+    perfect() { [784, 1047, 1319].forEach((f, i) => tone({ freq: f, dur: 0.13, type: "triangle", vol: 0.09, delay: i * 0.05 })); },
+    hit() { tone({ freq: 190, freqEnd: 85, dur: 0.16, type: "square", vol: 0.11 }); noiseBurst({ dur: 0.07, vol: 0.09, filter: 2400 }); },
+    crit() { noiseBurst({ dur: 0.22, vol: 0.18, filter: 1600 }); tone({ freq: 150, freqEnd: 60, dur: 0.22, type: "sawtooth", vol: 0.08 }); tone({ freq: 880, freqEnd: 220, dur: 0.16, type: "square", vol: 0.06 }); },
+    super() { [523, 784, 1047].forEach((f, i) => tone({ freq: f, dur: 0.12, type: "triangle", vol: 0.07, delay: i * 0.045 })); },
+    weak() { tone({ freq: 280, freqEnd: 150, dur: 0.2, type: "sine", vol: 0.05 }); },
+    miss() { tone({ freq: 620, freqEnd: 1150, dur: 0.1, type: "sine", vol: 0.045 }); },
+    telegraph() { tone({ freq: 880, freqEnd: 1180, dur: 0.09, type: "sine", vol: 0.035 }); },
+    brace() { tone({ freq: 150, freqEnd: 90, dur: 0.14, type: "square", vol: 0.08 }); noiseBurst({ dur: 0.05, vol: 0.06, filter: 1800 }); },
+    ko() { noiseBurst({ dur: 0.34, vol: 0.2, filter: 900 }); tone({ freq: 220, freqEnd: 50, dur: 0.42, type: "sawtooth", vol: 0.09 }); },
+    victory() { [523, 659, 784, 1047, 1319].forEach((f, i) => tone({ freq: f, dur: 0.2, type: "triangle", vol: 0.1, delay: i * 0.1 })); },
+    defeat() { [392, 330, 262, 196].forEach((f, i) => tone({ freq: f, dur: 0.28, type: "sine", vol: 0.08, delay: i * 0.13 })); },
+  };
+
+  // ---------- scene: drifting ambient motes ----------
+  const motes = [];
+  for (let i = 0, n = Math.round(W / 26); i < n; i++) {
+    motes.push({
+      x: Math.random() * W,
+      y: Math.random() * H,
+      r: 0.8 + Math.random() * 1.8,
+      sp: 6 + Math.random() * 15,
+      ph: Math.random() * Math.PI * 2,
+    });
+  }
+  let sceneT = 0;
+  function updateScene(dt) {
+    sceneT += dt;
+    for (const m of motes) {
+      m.y -= m.sp * dt;
+      if (m.y < -6) { m.y = H + 6; m.x = Math.random() * W; }
+    }
+  }
+
   function popComic(text, x, y, color, big = false) {
     comicTexts.push({ text, x, y, vy: -55 - Math.random() * 25, life: big ? 1.4 : 1.0, maxLife: big ? 1.4 : 1.0, color, rotation: (Math.random() - 0.5) * 0.5, scaleBoost: big ? 1.6 : 1 });
     if (comicTexts.length > 8) comicTexts.shift();
@@ -5637,6 +5867,29 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
     grad.addColorStop(1, "rgba(7, 11, 22, 0.7)");
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, W, H);
+
+    // Spotlight glow behind the arena, gently pulsing.
+    const glowR = Math.max(W, H) * (0.5 + Math.sin(sceneT * 0.8) * 0.04);
+    const spot = ctx.createRadialGradient(W / 2, FLOOR_Y - 10, 10, W / 2, FLOOR_Y - 10, glowR);
+    spot.addColorStop(0, "rgba(124, 240, 198, 0.16)");
+    spot.addColorStop(0.55, "rgba(124, 160, 255, 0.06)");
+    spot.addColorStop(1, "rgba(7, 11, 22, 0)");
+    ctx.fillStyle = spot;
+    ctx.fillRect(0, 0, W, H);
+
+    // Drifting ambient motes.
+    ctx.globalCompositeOperation = "lighter";
+    for (const m of motes) {
+      const tw = 0.4 + 0.6 * (0.5 + 0.5 * Math.sin(sceneT * 2 + m.ph));
+      ctx.globalAlpha = tw * 0.5;
+      ctx.fillStyle = "rgba(170, 210, 255, 0.9)";
+      ctx.beginPath();
+      ctx.arc(m.x, m.y, m.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "source-over";
+
     // floor
     const floorGrad = ctx.createLinearGradient(0, FLOOR_Y, 0, H);
     floorGrad.addColorStop(0, "rgba(124, 240, 198, 0.25)");
@@ -5650,6 +5903,15 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
     ctx.moveTo(0, FLOOR_Y);
     ctx.lineTo(W, FLOOR_Y);
     ctx.stroke();
+    // perspective floor lines, scrolling subtly for depth
+    ctx.strokeStyle = "rgba(124, 240, 198, 0.1)";
+    for (let i = 1; i <= 4; i++) {
+      const y = FLOOR_Y + (H - FLOOR_Y) * (i / 5);
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(W, y);
+      ctx.stroke();
+    }
   }
 
   function drawAuras(dt) {
@@ -5723,6 +5985,7 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
   }
 
   function drawAll(dt) {
+    updateScene(dt);
     ctx.save();
     if (screenShake > 0) {
       ctx.translate((Math.random() - 0.5) * screenShake * 10, (Math.random() - 0.5) * screenShake * 10);
@@ -5737,12 +6000,77 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
       drawProjectile(p);
     }
     drawSparksLayer(dt);
+    drawBraceRing();
     drawComicTexts(dt);
     if (flashWhole > 0) {
       ctx.fillStyle = `rgba(255, 255, 255, ${flashWhole})`;
       ctx.fillRect(0, 0, W, H);
       flashWhole = Math.max(0, flashWhole - dt * 3);
     }
+    ctx.restore();
+    // HUD-space overlays (not affected by screen shake)
+    drawFireMeter();
+  }
+
+  // ---- interactive fire meter (challenger turns) ----
+  // A marker sweeps a bar; tapping near the centre "sweet spot" maxes the
+  // spectacle. It NEVER changes damage — the sim already decided the outcome.
+  function fireQualityFromMeter() {
+    const d = Math.abs(meterPos); // 0 at centre, 1 at edges
+    if (d <= 0.16) return "perfect";
+    if (d <= 0.42) return "good";
+    return "ok";
+  }
+  function drawFireMeter() {
+    if (phase !== "aim") return;
+    const bw = Math.min(W * 0.74, 420);
+    const bh = 16;
+    const bx = (W - bw) / 2;
+    const by = H - 30;
+    ctx.save();
+    ctx.fillStyle = "rgba(7, 13, 28, 0.78)";
+    ctx.strokeStyle = "rgba(255,255,255,0.18)";
+    ctx.lineWidth = 1;
+    ctx.fillRect(bx - 6, by - 6, bw + 12, bh + 12);
+    ctx.strokeRect(bx - 6, by - 6, bw + 12, bh + 12);
+    // Zones mirror fireQualityFromMeter() exactly: marker x = centre +
+    // meterPos*(bw/2), so a threshold T maps to a half-width of T*bw/2.
+    const sweetW = 0.16 * (bw / 2);
+    const goodW = 0.42 * (bw / 2);
+    ctx.fillStyle = "rgba(143, 180, 255, 0.28)";
+    ctx.fillRect(bx + bw / 2 - goodW, by, goodW * 2, bh);
+    ctx.fillStyle = "rgba(124, 240, 198, 0.5)";
+    ctx.fillRect(bx + bw / 2 - sweetW, by, sweetW * 2, bh);
+    // frame
+    ctx.strokeStyle = "rgba(255,255,255,0.28)";
+    ctx.strokeRect(bx, by, bw, bh);
+    // marker
+    const mx = bx + bw / 2 + meterPos * (bw / 2);
+    ctx.fillStyle = "#ffe27a";
+    ctx.shadowColor = "#ffe27a";
+    ctx.shadowBlur = 10;
+    ctx.fillRect(mx - 3, by - 5, 6, bh + 10);
+    ctx.shadowBlur = 0;
+    ctx.restore();
+  }
+  function drawBraceRing() {
+    if (phase !== "telegraph" || !current) return;
+    // contracting ring around the challenger — tap when it's tight to brace
+    const cx = challenger.pos.x;
+    const cy = challenger.pos.y - BODY_R * 0.5;
+    const k = Math.max(0, Math.min(1, telegraphT / TELEGRAPH_DUR));
+    const r = BODY_R * (2.4 - 1.5 * k);
+    ctx.save();
+    ctx.strokeStyle = braced ? "#7cf0c6" : "#8fb4ff";
+    ctx.globalAlpha = braced ? 0.5 : 0.85;
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 0.4;
+    ctx.beginPath();
+    ctx.arc(cx, cy, BODY_R * 0.9, 0, Math.PI * 2);
+    ctx.stroke();
     ctx.restore();
   }
 
@@ -5783,19 +6111,27 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
 
   function applyHit(state) {
     const { entry, defSide } = state;
-    const isAttackerChallenger = entry.attacker === "attacker";
-    const newHp = isAttackerChallenger ? result.log[state.idx].defenderHp : result.log[state.idx].defenderHp;
-    void newHp;
     if (entry.dodged) {
       defSide.shakeTime = 0.15;
       popComic("MISS!", defSide.pos.x, defSide.pos.y - BODY_R - 16, "#cdd6f0");
+      sfx.miss();
       return;
     }
+
+    // Player input is pure spectacle — it scales juice, never the numbers.
+    // Damage + HP always come straight from the deterministic sim log.
+    const playerAttacked = state.playerControlled;
+    const q = state.fireQuality || "ok";
+    const juiceMul = !playerAttacked ? 1 : q === "perfect" ? 1.6 : q === "good" ? 1.15 : 0.8;
+    const braced = !!state.braced;
+
     defSide.hp = entry.defenderHp;
-    defSide.flashTime = 0.35;
-    defSide.shakeTime = 0.32;
+    defSide.flashTime = braced ? 0.2 : 0.35;
+    defSide.shakeTime = braced ? 0.14 : 0.32;
     setHpBar(defSide, defSide === challenger ? "challenger" : "defender");
-    popSparks(defSide.pos.x, defSide.pos.y - BODY_R * 0.5, state.atkSide.card.type === "Fire" ? "#ffb185" : colorsFor(state.atkSide.card).accent, entry.crit ? 22 : 14);
+    const sparkColor = state.atkSide.card.type === "Fire" ? "#ffb185" : colorsFor(state.atkSide.card).accent;
+    const baseSparks = entry.crit ? 22 : 14;
+    popSparks(defSide.pos.x, defSide.pos.y - BODY_R * 0.5, sparkColor, Math.round(baseSparks * juiceMul * (braced ? 0.5 : 1)));
     const colors = colorsFor(state.atkSide.card);
     auras.push({ x: defSide.pos.x, y: defSide.pos.y - BODY_R * 0.4, r: BODY_R * 0.9, dur: 0.45, t: 0, color: colors.accent });
     const word = entry.move === "skill"
@@ -5804,13 +6140,32 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
     popComic(`${word} -${entry.damage}`, defSide.pos.x, defSide.pos.y - BODY_R - 20, entry.crit ? "#ffe27a" : "#ff8ca6", entry.crit);
     if (entry.effective === "super") popComic("SUPER!", defSide.pos.x, defSide.pos.y - BODY_R - 44, "#7cf0c6");
     if (entry.effective === "weak") popComic("weak…", defSide.pos.x, defSide.pos.y - BODY_R - 44, "#9fb0d9");
-    screenShake = entry.crit ? 0.9 : entry.move === "skill" ? 0.65 : 0.35;
-    if (entry.move === "skill") flashWhole = 0.35;
+    if (playerAttacked && q === "perfect") popComic("PERFECT!", defSide.pos.x, defSide.pos.y - BODY_R - 68, "#ffe27a", true);
+
+    // Audio
+    if (entry.crit) sfx.crit();
+    else sfx.hit();
+    if (entry.effective === "super") sfx.super();
+    else if (entry.effective === "weak") sfx.weak();
+
+    let shake = entry.crit ? 0.9 : entry.move === "skill" ? 0.65 : 0.35;
+    shake *= juiceMul;
+    if (braced) {
+      shake *= 0.4;
+      sfx.brace();
+      popComic("BLOCK!", defSide.pos.x, defSide.pos.y - BODY_R - 16, "#8fb4ff");
+      auras.push({ x: defSide.pos.x, y: defSide.pos.y - BODY_R * 0.4, r: BODY_R * 1.1, dur: 0.4, t: 0, color: "#8fb4ff" });
+    }
+    screenShake = Math.max(screenShake, shake);
+    if (entry.move === "skill" || (playerAttacked && q === "perfect")) {
+      flashWhole = Math.max(flashWhole, entry.move === "skill" ? 0.35 : 0.25);
+    }
     if (defSide.hp <= 0) {
       defSide.knockedOut = true;
       defSide.koTime = 0;
       popComic("K.O.!", defSide.pos.x, defSide.pos.y - BODY_R - 50, "#ffd166", true);
       screenShake = 1.1;
+      sfx.ko();
     }
   }
 
@@ -5818,6 +6173,7 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
   result.log.forEach((entry, idx) => {
     const state = attackEntry(entry);
     state.idx = idx;
+    state.playerControlled = entry.attacker === "attacker";
     queue.push(state);
   });
 
@@ -5827,57 +6183,173 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
   let last = performance.now();
   let battleOver = false;
 
+  // ---- interactive phase machine ----
+  // phase: intro | aim | windup | flight | telegraph | recover | done
+  let phase = "intro";
+  let meterPos = 0;   // -1 .. 1 (0 = sweet spot)
+  let meterDir = 1;
+  const AIM_TIMEOUT = 2.6;   // auto-fire if the player freezes
+  const TELEGRAPH_DUR = 0.95;
+  let telegraphT = 0;
+  let braced = false;
+  let telegraphBeepT = 0;
+
+  function describeTurn(state) {
+    const moveLabel = state.entry.move === "skill" ? skillNameFor(state.atkSide.card) : "Quick Strike";
+    const who = state.entry.attacker === "attacker" ? challengerCard.name : champCard.name;
+    const note = state.entry.dodged
+      ? " — but it missed!"
+      : state.entry.effective === "super" ? " — super effective!"
+      : state.entry.effective === "weak" ? " — not very effective."
+      : "";
+    return `<strong>${escapeHtml(who)}</strong> used <em>${escapeHtml(moveLabel)}</em>${escapeHtml(note)}`;
+  }
+
   function advance() {
     current = queue.shift() || null;
     phaseT = 0;
-    if (current) {
-      const moveLabel = current.entry.move === "skill" ? skillNameFor(current.atkSide.card) : "Quick Strike";
-      const who = current.entry.attacker === "attacker" ? challengerCard.name : champCard.name;
-      const effectivenessNote = current.entry.dodged
-        ? " — but it missed!"
-        : current.entry.effective === "super" ? " — super effective!"
-        : current.entry.effective === "weak" ? " — not very effective."
-        : "";
-      status.innerHTML = `<strong>${escapeHtml(who)}</strong> used <em>${escapeHtml(moveLabel)}</em>${escapeHtml(effectivenessNote)}`;
-    } else if (!battleOver) {
-      finishBattle();
+    if (!current) {
+      if (!battleOver) finishBattle();
+      return;
+    }
+    current.descLine = describeTurn(current);
+    if (current.playerControlled) {
+      phase = "aim";
+      meterPos = -1;
+      meterDir = 1;
+      current.fireQuality = "ok";
+      sfx.charge();
+      const skill = current.entry.move === "skill";
+      status.innerHTML = `<strong>Your move!</strong> ${skill ? "Charge a skill — " : ""}TAP / SPACE in the <span style="color:#7cf0c6">green zone</span> to fire 🔴`;
+    } else {
+      phase = "telegraph";
+      telegraphT = 0;
+      telegraphBeepT = 0;
+      braced = false;
+      status.innerHTML = `<strong>${escapeHtml(champCard.name)}</strong> is winding up — <span style="color:#8fb4ff">TAP / SPACE to BRACE!</span>`;
+    }
+  }
+
+  function spawnTurnProjectile() {
+    const entry = current.entry;
+    const proj = entry.move === "skill"
+      ? makeSkillProjectile(current.atkSide, current.defSide, current.atkSide.card)
+      : makeAttackProjectile(current.atkSide, current.defSide, current.atkSide.card);
+    proj.onHit = () => {
+      if (current.hit) return;
+      current.hit = true;
+      applyHit(current);
+    };
+    projectiles.push(proj);
+    current.projectileSpawned = true;
+    phase = "flight";
+    phaseT = 0;
+    status.innerHTML = current.descLine;
+  }
+
+  // Player tap / key — routes by phase. Pure spectacle: never the numbers.
+  function onPlayerAction() {
+    ensureAudio();
+    if (phase === "aim" && current && !current.fired) {
+      current.fired = true;
+      current.fireQuality = fireQualityFromMeter();
+      sfx.fire();
+      if (current.fireQuality === "perfect") {
+        sfx.perfect();
+        flashWhole = Math.max(flashWhole, 0.22);
+      }
+      phase = "windup";
+      phaseT = 0;
+    } else if (phase === "telegraph" && current && !braced) {
+      braced = true;
+      current.braced = true;
+      // tighter timing (later in the wind-up) = a crisper block flourish
+      const tight = telegraphT / TELEGRAPH_DUR > 0.55;
+      sfx.telegraph();
+      popComic(tight ? "READY!" : "brace", challenger.pos.x, challenger.pos.y - BODY_R - 14, tight ? "#7cf0c6" : "#8fb4ff");
+      popSparks(challenger.pos.x, challenger.pos.y - BODY_R * 0.5, "#8fb4ff", tight ? 12 : 6, 120);
     }
   }
 
   function tickPhase(dt) {
     if (!current) return;
     phaseT += dt;
-    const entry = current.entry;
     const atkHome = current.atkSide === challenger ? CHALLENGER_HOME : DEFENDER_HOME;
+    ensureBodyAt(current.atkSide, atkHome.x, atkHome.y);
 
-    // wind-up: lunge slightly forward
-    const lunge = Math.min(1, phaseT / 0.22);
-    const lungeOffset = current.atkSide.facing * 18 * lunge * (1 - lunge);
-    ensureBodyAt(current.atkSide, atkHome.x + lungeOffset, atkHome.y);
-
-    if (!current.projectileSpawned && phaseT >= 0.22) {
-      current.projectileSpawned = true;
-      const proj = entry.move === "skill"
-        ? makeSkillProjectile(current.atkSide, current.defSide, current.atkSide.card)
-        : makeAttackProjectile(current.atkSide, current.defSide, current.atkSide.card);
-      proj.onHit = () => {
-        if (current.hit) return;
-        current.hit = true;
-        applyHit(current);
-      };
-      projectiles.push(proj);
+    if (phase === "aim") {
+      // sweep the marker back and forth; gentle charge bob on the attacker
+      meterPos += meterDir * dt * 2.7;
+      if (meterPos >= 1) { meterPos = 1; meterDir = -1; }
+      else if (meterPos <= -1) { meterPos = -1; meterDir = 1; }
+      const charge = Math.sin(phaseT * 11) * 3;
+      ensureBodyAt(current.atkSide, atkHome.x - current.atkSide.facing * 4, atkHome.y + charge);
+      if (phaseT >= AIM_TIMEOUT && !current.fired) {
+        current.fired = true;
+        current.fireQuality = "ok";
+        sfx.fire();
+        phase = "windup";
+        phaseT = 0;
+      }
+      return;
     }
 
-    // hand off when this turn's projectile is done and a small recovery delay passes
-    if (current.hit && phaseT >= 0.22 + 0.55 + 0.35) {
-      // small pause before next turn
-      if (current.defSide.knockedOut && current.defSide.koTime > 0.8) {
-        battleOver = true;
-        current = null;
-        finishBattle();
-        return;
+    if (phase === "windup") {
+      const lunge = Math.min(1, phaseT / 0.22);
+      const lungeOffset = current.atkSide.facing * 20 * lunge * (1 - lunge);
+      ensureBodyAt(current.atkSide, atkHome.x + lungeOffset, atkHome.y);
+      if (phaseT >= 0.22) spawnTurnProjectile();
+      return;
+    }
+
+    if (phase === "telegraph") {
+      telegraphT += dt;
+      telegraphBeepT -= dt;
+      if (telegraphBeepT <= 0) { sfx.telegraph(); telegraphBeepT = 0.26; }
+      // defender draws back, glowing
+      const k = telegraphT / TELEGRAPH_DUR;
+      const draw = current.atkSide.facing * 16 * Math.min(1, k);
+      ensureBodyAt(current.atkSide, atkHome.x + draw, atkHome.y - Math.sin(k * Math.PI) * 4);
+      current.atkSide.flashTime = Math.max(current.atkSide.flashTime, 0.12);
+      if (telegraphT >= TELEGRAPH_DUR) {
+        const lungeOffset = current.atkSide.facing * 20;
+        ensureBodyAt(current.atkSide, atkHome.x + lungeOffset, atkHome.y);
+        spawnTurnProjectile();
       }
-      advance();
+      return;
+    }
+
+    if (phase === "flight") {
+      // projectile motion + onHit handled by tickProjectiles()
+      if (current.hit) { phase = "recover"; phaseT = 0; }
+      return;
+    }
+
+    if (phase === "recover") {
+      if (phaseT >= 0.55) {
+        if (current.defSide.knockedOut && current.defSide.koTime > 0.8) {
+          battleOver = true;
+          current = null;
+          phase = "done";
+          finishBattle();
+          return;
+        }
+        advance();
+      }
+    }
+  }
+
+  function tickProjectiles(dt) {
+    for (const p of projectiles) {
+      if (p.done) continue;
+      if (p.t >= p.dur && !p.exploded) {
+        p.exploded = true;
+        p.done = true;
+        if (typeof p.onHit === "function") p.onHit();
+      }
+    }
+    for (let i = projectiles.length - 1; i >= 0; i--) {
+      if (projectiles[i].done && projectiles[i].t > projectiles[i].dur + 0.2) projectiles.splice(i, 1);
     }
   }
 
@@ -5947,6 +6419,21 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
       challengerWon,
     });
     renderMap();
+    // Final flourish
+    if (challengerWon) {
+      sfx.victory();
+      flashWhole = Math.max(flashWhole, 0.3);
+      popComic("VICTORY!", W / 2, H * 0.4, "#7cf0c6", true);
+      for (let i = 0; i < 5; i++) {
+        setTimeout(() => {
+          if (!document.body.contains(challenge)) return;
+          popSparks(W * (0.2 + Math.random() * 0.6), H * (0.25 + Math.random() * 0.3), ["#7cf0c6", "#ffe27a", "#8fb4ff", "#ff8d9e"][i % 4], 16, 220);
+        }, i * 130);
+      }
+    } else {
+      sfx.defeat();
+      popComic("DEFEAT", W / 2, H * 0.42, "#ff8ca6", true);
+    }
     status.innerHTML = `<span class="${challengerWon ? "success" : "fail"}">${challengerWon ? "Victory!" : "Defeat!"}</span> ${summary}`;
     cancel.classList.add("hidden");
     continueBtn.classList.remove("hidden");
@@ -5975,14 +6462,28 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
     activeChallenge = null;
     document.removeEventListener("keydown", onKey);
   }
-  function onKey(ev) { if (ev.key === "Escape") closeChallenge(); }
+  function onKey(ev) {
+    if (ev.key === "Escape") { closeChallenge(); return; }
+    if (ev.key === " " || ev.key === "Spacebar" || ev.key === "Enter") {
+      ev.preventDefault();
+      onPlayerAction();
+    }
+  }
+  function onCanvasTap(ev) {
+    ev.preventDefault();
+    onPlayerAction();
+  }
   document.addEventListener("keydown", onKey);
+  canvas.addEventListener("pointerdown", onCanvasTap);
+  canvas.style.touchAction = "manipulation";
+  canvas.style.cursor = "pointer";
   cancel.addEventListener("click", closeChallenge);
 
   // intro pause then kick off
   setHpBar(challenger, "challenger");
   setHpBar(defender, "defender");
-  setTimeout(advance, 600);
+  status.innerHTML = `<strong>Battle start!</strong> ${escapeHtml(profile?.name || "You")} challenge ${escapeHtml(championBefore.trainer)}…`;
+  setTimeout(advance, 700);
   raf = requestAnimationFrame(loop);
 }
 
@@ -6195,11 +6696,11 @@ if (typeof document !== "undefined") {
     }
   });
 
-  // Touch-friendly: 10 rapid taps on the location pill opens the debug dialog.
+  // Touch-friendly: rapid taps on the location pill opens the debug dialog.
   const pill = el.locationStatus;
   if (pill) {
-    const TAP_TARGET = 10;
-    const TAP_WINDOW_MS = 2500;
+    const TAP_TARGET = 7;
+    const TAP_WINDOW_MS = 3000;
     let tapCount = 0;
     let tapTimer = null;
     let originalText = "";
@@ -6215,7 +6716,10 @@ if (typeof document !== "undefined") {
     pill.style.userSelect = "none";
     pill.style.webkitUserSelect = "none";
     pill.style.webkitTapHighlightColor = "transparent";
-    pill.addEventListener("click", () => {
+    // Count on pointerdown (not click): fires once per tap, immediately, and
+    // is never swallowed by the iOS double-tap-zoom guard below.
+    function registerTap(ev) {
+      ev.preventDefault();
       if (tapCount === 0) originalText = pill.textContent;
       tapCount += 1;
       if (tapTimer) clearTimeout(tapTimer);
@@ -6229,8 +6733,31 @@ if (typeof document !== "undefined") {
         pill.dataset.tapping = "1";
         pill.textContent = `Debug ${tapCount}/${TAP_TARGET}…`;
       }
-    });
+    }
+    if (window.PointerEvent) {
+      pill.addEventListener("pointerdown", registerTap);
+    } else {
+      pill.addEventListener("touchstart", registerTap, { passive: false });
+      pill.addEventListener("click", registerTap);
+    }
   }
+
+  // ---- iOS zoom guard ----
+  // iOS Safari ignores `user-scalable=no`, so rapid multi-taps and pinches on
+  // the full-screen map still trigger a page zoom. Suppress the double-tap
+  // zoom (without killing single-tap clicks) and the pinch gesture.
+  let lastTouchEnd = 0;
+  document.addEventListener(
+    "touchend",
+    (ev) => {
+      const now = Date.now();
+      if (now - lastTouchEnd <= 320) ev.preventDefault();
+      lastTouchEnd = now;
+    },
+    { passive: false }
+  );
+  document.addEventListener("gesturestart", (ev) => ev.preventDefault());
+  document.addEventListener("dblclick", (ev) => ev.preventDefault());
 }
 
 async function bootstrapLocation() {
@@ -7497,11 +8024,40 @@ if (el.form) {
   });
 }
 
-if (el.reset) {
-  el.reset.addEventListener("click", () => {
+function confirmSwitchTrainer() {
+  if (document.getElementById("logoutConfirm")) return;
+  const overlay = document.createElement("div");
+  overlay.id = "logoutConfirm";
+  overlay.className = "modal";
+  const who = escapeHtml(profile?.name || "this trainer");
+  overlay.innerHTML = `
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="logoutConfirmTitle">
+      <p class="eyebrow">Switch trainer</p>
+      <h2 id="logoutConfirmTitle">Log out of ${who}?</h2>
+      <p>This signs out on this device and returns to the trainer setup screen. Your caught Fokemon and gym champions stay safe on the network — you can sign back in with the same name to pick up where you left off.</p>
+      <div class="debug-actions">
+        <button type="button" class="ghost lo-cancel">Stay logged in</button>
+        <button type="button" class="lo-confirm">Log out</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  function close() {
+    overlay.remove();
+    document.removeEventListener("keydown", onKey);
+  }
+  function onKey(ev) { if (ev.key === "Escape") close(); }
+  document.addEventListener("keydown", onKey);
+  overlay.addEventListener("click", (ev) => { if (ev.target === overlay) close(); });
+  overlay.querySelector(".lo-cancel").addEventListener("click", close);
+  overlay.querySelector(".lo-confirm").addEventListener("click", () => {
     try { localStorage.removeItem("fokemon_profile"); } catch {}
     location.reload();
   });
+}
+
+if (el.reset) {
+  el.reset.addEventListener("click", confirmSwitchTrainer);
 }
 
 if (el.enableLocation) {
