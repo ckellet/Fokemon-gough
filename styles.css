@@ -118,15 +118,18 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
   gap: .45rem;
   padding: .3rem .65rem;
   border-radius: 999px;
-  background: rgba(255, 255, 255, .05);
-  border: 1px solid rgba(255, 255, 255, .15);
+  /* Dark glassy backing so the chip stays visible over light map tiles. */
+  background: rgba(9, 14, 28, .82);
+  border: 1px solid rgba(255, 255, 255, .28);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .35);
   color: var(--text);
   font-size: .78rem;
   letter-spacing: .02em;
   transition: background .2s ease, border-color .2s ease, transform .25s ease;
 }
 .ball-chip strong { font-weight: 800; font-size: .92rem; }
-.ball-chip.empty { border-color: rgba(255, 132, 162, .55); color: #ffcad6; background: rgba(255, 130, 158, .08); }
+.ball-chip.empty { border-color: rgba(255, 132, 162, .7); color: #ffcad6; background: rgba(40, 12, 24, .85); }
 .ball-chip.flash { transform: scale(1.08); border-color: #ff85a6; box-shadow: 0 0 14px rgba(255, 133, 166, .6); }
 .ball-chip-label { color: var(--muted); margin-left: .15rem; }
 .ball-icon {
@@ -407,7 +410,13 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
   left: 50%;
   transform: translateX(-50%);
   z-index: 4;
-  pointer-events: none;
+  /* Tappable: the location pill is the debug-location multi-tap target. */
+  pointer-events: auto;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
   white-space: nowrap;
   /* Dark glassy backdrop so the status (esp. the pink error state) stays
      legible over light map tiles — the .live/.error rules only recolour
@@ -1293,12 +1302,45 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
   color: var(--muted);
   font-size: .82rem;
 }
-.training-challenge .hits-meter .train-hp,
 .training-challenge .hits-meter .train-score {
   font-size: .8rem;
   font-weight: 800;
   color: #f5f7ff;
   letter-spacing: .03em;
+}
+.training-challenge .hits-meter .train-hp {
+  display: inline-flex;
+  align-items: center;
+  gap: .14rem;
+  line-height: 1;
+}
+.train-heart {
+  font-size: 1rem;
+  line-height: 1;
+  transition: transform .18s ease, opacity .18s ease, color .18s ease;
+}
+.train-heart.full {
+  color: #ff5d7a;
+  text-shadow: 0 0 6px rgba(255, 93, 122, .65);
+}
+.train-heart.empty {
+  color: rgba(255, 255, 255, .22);
+  text-shadow: none;
+  transform: scale(.82);
+}
+.training-challenge .hits-meter.hp-low,
+.train-hp.hp-low { animation: heartLowPulse 1s ease-in-out infinite; }
+@keyframes heartLowPulse {
+  0%, 100% { filter: none; }
+  50% { filter: drop-shadow(0 0 7px rgba(255, 93, 122, .9)); }
+}
+.train-hp.heal .train-heart.full {
+  animation: heartHeal .55s ease;
+}
+@keyframes heartHeal {
+  0% { transform: scale(1); }
+  35% { transform: scale(1.5); color: #7cf0c6; text-shadow: 0 0 12px rgba(124, 240, 198, .9); }
+  100% { transform: scale(1); }
 }
 .training-canvas {
   display: block;
@@ -1422,6 +1464,12 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
   color: #031423;
   font-weight: 800;
 }
+.debug-actions .lo-confirm {
+  background: linear-gradient(90deg, #ff8d9e, #ff5d6e);
+  color: #2a0710;
+  font-weight: 800;
+  border-color: transparent;
+}
 
 @media (max-width: 1024px) {
   .app-shell { padding: 1.25rem; }
@@ -1485,15 +1533,18 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
   border-radius: 999px;
   font-size: .78rem;
   letter-spacing: .02em;
-  background: rgba(124, 240, 198, .12);
-  border: 1px solid rgba(124, 240, 198, .45);
-  color: #d6fff0;
+  /* Dark glassy backing + brighter accent so it reads on light map tiles. */
+  background: rgba(9, 14, 28, .82);
+  border: 1px solid rgba(124, 240, 198, .75);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .35);
+  color: #c2ffe9;
   cursor: pointer;
   font-family: inherit;
 }
 .trade-btn:hover {
-  background: rgba(124, 240, 198, .2);
-  border-color: rgba(124, 240, 198, .7);
+  background: rgba(18, 40, 44, .88);
+  border-color: rgba(124, 240, 198, .95);
 }
 .trade-btn-label { font-weight: 700; }
 .trade-badge {
