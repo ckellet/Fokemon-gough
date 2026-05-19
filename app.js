@@ -5432,21 +5432,23 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
   challenge.className = "catch-challenge battle-challenge";
   challenge.innerHTML = `
     <div class="challenge-card battle-card-wrap" role="dialog" aria-modal="true" aria-label="Battle">
-      <p class="eyebrow">Foké Battle</p>
-      <h3 class="battle-title">${escapeHtml(challengerCard.name)} vs ${escapeHtml(champCard.name)}</h3>
       <div class="battle-roster">
         <div class="roster-side challenger">
-          <p class="roster-label">Challenger • ${escapeHtml(profile?.name || "You")}</p>
-          <p class="roster-name">${escapeHtml(challengerCard.name)} <span class="type-pill" style="background:${colorsFor(challengerCard).accent};color:#061226;">${escapeHtml(challengerCard.type)}</span></p>
+          <div class="roster-top">
+            <span class="roster-name">${escapeHtml(challengerCard.name)} <span class="type-pill" style="background:${colorsFor(challengerCard).accent};color:#061226;">${escapeHtml(challengerCard.type)}</span></span>
+            <small class="hp-text challenger-hp-text">${attackerStats.hp} / ${attackerStats.hp}</small>
+          </div>
           <div class="hp-bar"><div class="hp-fill challenger-hp" style="width:100%"></div></div>
-          <small class="hp-text challenger-hp-text">${attackerStats.hp} / ${attackerStats.hp}</small>
+          <p class="roster-label">${escapeHtml(profile?.name || "You")}</p>
         </div>
         <span class="vs-pill">VS</span>
         <div class="roster-side defender">
-          <p class="roster-label">Champion • ${escapeHtml(championBefore.trainer)}</p>
-          <p class="roster-name">${escapeHtml(champCard.name)} <span class="type-pill" style="background:${colorsFor(champCard).accent};color:#061226;">${escapeHtml(champCard.type)}</span></p>
+          <div class="roster-top">
+            <span class="roster-name">${escapeHtml(champCard.name)} <span class="type-pill" style="background:${colorsFor(champCard).accent};color:#061226;">${escapeHtml(champCard.type)}</span></span>
+            <small class="hp-text defender-hp-text">${defenderStats.hp} / ${defenderStats.hp}</small>
+          </div>
           <div class="hp-bar"><div class="hp-fill defender-hp" style="width:100%"></div></div>
-          <small class="hp-text defender-hp-text">${defenderStats.hp} / ${defenderStats.hp}</small>
+          <p class="roster-label">${escapeHtml(championBefore.trainer)}</p>
         </div>
       </div>
       <div class="arena battle-arena">

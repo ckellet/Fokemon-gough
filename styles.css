@@ -1322,11 +1322,14 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
 .train-heart.full {
   color: #ff5d7a;
   text-shadow: 0 0 6px rgba(255, 93, 122, .65);
+  opacity: 1;
 }
+/* A lost heart drains to a flat dim grey with no glow — readable at a glance. */
 .train-heart.empty {
-  color: rgba(255, 255, 255, .22);
+  color: #3c465f;
   text-shadow: none;
-  transform: scale(.82);
+  opacity: .55;
+  transform: scale(.78);
 }
 .training-challenge .hits-meter.hp-low,
 .train-hp.hp-low { animation: heartLowPulse 1s ease-in-out infinite; }
@@ -1365,35 +1368,68 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
 /* ---------- Battle stage ---------- */
 .battle-challenge .battle-arena { height: 360px; }
 .battle-card-wrap { width: min(760px, 96vw); }
-.battle-title { text-align: center; margin: .2rem 0 .4rem; }
+/* Title removed for the battle modal — the SF2 nameplates carry it. */
+.battle-title { display: none; }
+/* Compact Street-Fighter-style HUD: two nameplates side-by-side with a
+   central VS, staying horizontal at every width so the top stays short. */
 .battle-roster {
   display: grid;
   grid-template-columns: 1fr auto 1fr;
-  gap: .8rem;
+  gap: .45rem;
   align-items: center;
-  margin: .15rem 0 .55rem;
+  margin: .1rem 0 .5rem;
 }
 .roster-side {
-  padding: .55rem .7rem;
-  border-radius: 12px;
+  min-width: 0;
+  padding: .35rem .5rem;
+  border-radius: 10px;
   background: rgba(255, 255, 255, .04);
   border: 1px solid rgba(255, 255, 255, .12);
 }
-.roster-side.defender { text-align: right; }
+.roster-top {
+  display: flex;
+  align-items: baseline;
+  gap: .4rem;
+  margin-bottom: .28rem;
+}
+.roster-side.defender .roster-top { flex-direction: row-reverse; }
+.roster-name {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+  font-weight: 800;
+  font-size: .82rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.roster-side.defender .roster-name { text-align: right; }
+.roster-name .type-pill {
+  font-size: .58rem;
+  padding: .05rem .3rem;
+  border-radius: 999px;
+  font-weight: 800;
+}
 .roster-label {
-  margin: 0 0 .1rem;
-  font-size: .62rem;
-  letter-spacing: .12em;
+  margin: .22rem 0 0;
+  font-size: .58rem;
+  letter-spacing: .1em;
   text-transform: uppercase;
   color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.roster-name { margin: 0 0 .35rem; font-weight: 700; }
+.roster-side.defender .roster-label { text-align: right; }
 .hp-bar {
-  height: 8px;
-  border-radius: 999px;
+  height: 11px;
+  border-radius: 6px;
   background: rgba(255, 255, 255, .08);
+  border: 1px solid rgba(255, 255, 255, .16);
   overflow: hidden;
 }
+/* Champion bar mirrors so both drain toward the centre VS, SF2-style. */
+.roster-side.defender .hp-bar { transform: scaleX(-1); }
 .hp-fill {
   display: block;
   height: 100%;
@@ -1403,18 +1439,21 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
 .hp-fill.low { background: linear-gradient(90deg, #ffe27a, #ff5d6e); }
 .hp-text {
   display: block;
-  margin-top: .25rem;
-  color: var(--muted);
-  font-size: .7rem;
+  flex: none;
+  margin: 0;
+  color: var(--text);
+  font-size: .64rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
 }
 .vs-pill {
   background: linear-gradient(90deg, #ffe27a, #ff7a3a);
   color: #1b0a02;
   font-weight: 900;
-  letter-spacing: .12em;
-  padding: .2rem .55rem;
+  letter-spacing: .08em;
+  padding: .18rem .45rem;
   border-radius: 999px;
-  font-size: .72rem;
+  font-size: .66rem;
 }
 .battle-canvas {
   display: block;
@@ -1484,9 +1523,8 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
 @media (max-width: 850px) {
   .champion-pane { grid-template-columns: 1fr; }
   .champion-portrait .champ-art { max-width: 220px; }
-  .battle-roster { grid-template-columns: 1fr; }
-  .roster-side.defender { text-align: left; }
-  .vs-pill { justify-self: center; }
+  /* Battle roster intentionally stays side-by-side (SF2 layout) at all
+     widths so the modal header stays short on phones. */
 }
 
 @media (max-width: 640px) {
