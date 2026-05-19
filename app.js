@@ -2564,6 +2564,224 @@ function launchCatchChallenge(card, placement) {
   const REST_OFFSET = { x: 0, y: -(NET_RADIUS + 8) };
   const RESTING = { x: ANCHOR.x + REST_OFFSET.x, y: ANCHOR.y + REST_OFFSET.y };
 
+  // ---------- juice: audio (synthesized, no asset files) ----------
+  let audioCtx = null;
+  function ensureAudio() {
+    try {
+      if (!audioCtx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return;
+        audioCtx = new AC();
+      }
+      if (audioCtx.state === "suspended") audioCtx.resume();
+    } catch {
+      audioCtx = null;
+    }
+  }
+  function tone({ freq = 440, freqEnd = freq, dur = 0.12, type = "triangle", vol = 0.1, delay = 0 }) {
+    if (!audioCtx) return;
+    const t0 = audioCtx.currentTime + delay;
+    const osc = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t0);
+    if (freqEnd !== freq) osc.frequency.exponentialRampToValueAtTime(Math.max(1, freqEnd), t0 + dur);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.linearRampToValueAtTime(vol, t0 + 0.006);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(g).connect(audioCtx.destination);
+    osc.start(t0);
+    osc.stop(t0 + dur + 0.03);
+  }
+  function noiseBurst({ dur = 0.18, vol = 0.16, filter = 1400 }) {
+    if (!audioCtx) return;
+    const t0 = audioCtx.currentTime;
+    const frames = Math.max(1, Math.floor(audioCtx.sampleRate * dur));
+    const buf = audioCtx.createBuffer(1, frames, audioCtx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < frames; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / frames);
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    const f = audioCtx.createBiquadFilter();
+    f.type = "lowpass";
+    f.frequency.value = filter;
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(vol, t0);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    src.connect(f).connect(g).connect(audioCtx.destination);
+    src.start(t0);
+    src.stop(t0 + dur);
+  }
+  const sfx = {
+    throw() { tone({ freq: 320, freqEnd: 720, dur: 0.13, type: "triangle", vol: 0.08 }); },
+    hit() { tone({ freq: 190, freqEnd: 85, dur: 0.16, type: "square", vol: 0.11 }); noiseBurst({ dur: 0.07, vol: 0.09, filter: 2400 }); },
+    block() { tone({ freq: 135, freqEnd: 80, dur: 0.12, type: "square", vol: 0.08 }); },
+    smash() { noiseBurst({ dur: 0.26, vol: 0.2, filter: 1100 }); tone({ freq: 95, freqEnd: 48, dur: 0.18, type: "sawtooth", vol: 0.06 }); },
+    miss() { tone({ freq: 300, freqEnd: 150, dur: 0.22, type: "sine", vol: 0.05 }); },
+    dodge() { tone({ freq: 620, freqEnd: 1150, dur: 0.1, type: "sine", vol: 0.045 }); },
+    capture() { [523, 659, 784, 1047].forEach((f, i) => tone({ freq: f, dur: 0.17, type: "triangle", vol: 0.1, delay: i * 0.085 })); },
+  };
+
+  // ---------- juice: screen shake ----------
+  let shakeMag = 0;
+  function addShake(m) { shakeMag = Math.min(10, Math.max(shakeMag, m)); }
+
+  // ---------- juice: particles ----------
+  const particles = [];
+  const rings = [];
+  function addParticle(p) {
+    particles.push(p);
+    if (particles.length > 150) particles.splice(0, particles.length - 150);
+  }
+  function spawnSplinters(x, y, count = 14) {
+    for (let i = 0; i < count; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = 70 + Math.random() * 190;
+      addParticle({
+        x, y,
+        vx: Math.cos(a) * sp,
+        vy: Math.sin(a) * sp - 90,
+        g: 640,
+        life: 0.45 + Math.random() * 0.4, maxLife: 0.85,
+        w: 3 + Math.random() * 4, h: 6 + Math.random() * 8,
+        rot: Math.random() * Math.PI, vr: (Math.random() - 0.5) * 16,
+        color: Math.random() < 0.5 ? "#b08148" : "#7a5230",
+        shape: "rect",
+      });
+    }
+  }
+  function spawnSparks(x, y, color = "#ffe27a") {
+    for (let i = 0; i < 13; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = 90 + Math.random() * 230;
+      addParticle({
+        x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, g: 130,
+        life: 0.22 + Math.random() * 0.3, maxLife: 0.52,
+        size: 1.6 + Math.random() * 2.6, color, shape: "spark",
+      });
+    }
+  }
+  function spawnConfetti(x, y) {
+    const cols = ["#7cf0c6", "#ffe27a", "#ff9c70", "#8fb4ff", "#ff8d9e", "#b57cff"];
+    for (let i = 0; i < 36; i++) {
+      const a = -Math.PI / 2 + (Math.random() - 0.5) * 2.5;
+      const sp = 140 + Math.random() * 250;
+      addParticle({
+        x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, g: 520, drag: 0.55,
+        sway: Math.random() * Math.PI * 2, swaySp: 4 + Math.random() * 4,
+        life: 0.9 + Math.random() * 0.8, maxLife: 1.7,
+        w: 4 + Math.random() * 4, h: 7 + Math.random() * 5,
+        rot: Math.random() * Math.PI, vr: (Math.random() - 0.5) * 18,
+        color: cols[i % cols.length], shape: "rect",
+      });
+    }
+  }
+  function spawnDust(x, y) {
+    for (let i = 0; i < 5; i++) {
+      const a = -Math.PI / 2 + (Math.random() - 0.5) * 2;
+      const sp = 20 + Math.random() * 50;
+      addParticle({
+        x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, g: 60,
+        life: 0.3 + Math.random() * 0.25, maxLife: 0.55,
+        size: 2.2 + Math.random() * 2.8, color: "rgba(196, 176, 140, 0.7)", shape: "spark",
+      });
+    }
+  }
+  function spawnRing(x, y) { rings.push({ x, y, r: 6, life: 0.5, maxLife: 0.5 }); }
+  function updateParticles(dt) {
+    for (const p of particles) {
+      p.life -= dt;
+      if (p.drag) p.vx *= 1 - p.drag * dt;
+      p.vy += (p.g || 0) * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      if (p.sway != null) { p.sway += p.swaySp * dt; p.x += Math.sin(p.sway) * 24 * dt; }
+      if (p.vr) p.rot += p.vr * dt;
+    }
+    for (let i = particles.length - 1; i >= 0; i--) if (particles[i].life <= 0) particles.splice(i, 1);
+    for (const rg of rings) { rg.life -= dt; rg.r += 230 * dt; }
+    for (let i = rings.length - 1; i >= 0; i--) if (rings[i].life <= 0) rings.splice(i, 1);
+    if (shakeMag > 0) shakeMag = Math.max(0, shakeMag - dt * 42);
+  }
+  function drawParticles() {
+    for (const rg of rings) {
+      const k = rg.life / rg.maxLife;
+      ctx.save();
+      ctx.globalAlpha = k * 0.7;
+      ctx.strokeStyle = "#7cf0c6";
+      ctx.lineWidth = 3 * k + 0.5;
+      ctx.beginPath();
+      ctx.arc(rg.x, rg.y, rg.r, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+    for (const p of particles) {
+      const k = Math.max(0, Math.min(1, p.life / p.maxLife));
+      ctx.save();
+      ctx.globalAlpha = k;
+      if (p.shape === "spark") {
+        ctx.globalCompositeOperation = "lighter";
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size * (0.4 + k * 0.6), 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        ctx.translate(p.x, p.y);
+        ctx.rotate(p.rot);
+        ctx.fillStyle = p.color;
+        ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h);
+      }
+      ctx.restore();
+    }
+  }
+
+  // ---------- juice: ball trail + near-miss tracking ----------
+  const trail = [];
+  let minMiss = Infinity;
+
+  // ---------- scene: layered animated background ----------
+  let elapsed = 0;
+  let bumpCd = 0;
+  const GROUND_Y = Math.max(FLOOR_Y - 34, H * 0.78);
+  const stars = [];
+  for (let i = 0, n = Math.round(W / 11); i < n; i++) {
+    stars.push({
+      x: Math.random() * W,
+      y: Math.random() * (GROUND_Y * 0.66),
+      r: 0.5 + Math.random() * 1.5,
+      ph: Math.random() * Math.PI * 2,
+      sp: 0.8 + Math.random() * 2.4,
+    });
+  }
+  const hillFar = { base: GROUND_Y - 56, amp: 24, k: 0.011, phase: Math.random() * 6, color: "rgba(46, 60, 104, 0.45)" };
+  const hillNear = { base: GROUND_Y - 26, amp: 18, k: 0.019, phase: Math.random() * 6, color: "rgba(30, 42, 78, 0.65)" };
+  const tufts = [];
+  for (let x = 6; x < W; x += 18 + Math.random() * 12) {
+    const c = Math.random();
+    tufts.push({
+      x,
+      h: 7 + Math.random() * 13,
+      ph: Math.random() * Math.PI * 2,
+      color: c < 0.4 ? "rgba(124, 240, 198, 0.55)" : c < 0.7 ? "rgba(96, 210, 178, 0.5)" : "rgba(150, 255, 220, 0.45)",
+    });
+  }
+  const motes = [];
+  for (let i = 0, n = Math.round(W / 24); i < n; i++) {
+    motes.push({
+      x: Math.random() * W,
+      y: Math.random() * H,
+      r: 0.8 + Math.random() * 1.8,
+      sp: 7 + Math.random() * 16,
+      ph: Math.random() * Math.PI * 2,
+    });
+  }
+  function updateScene(dt) {
+    for (const m of motes) {
+      m.y -= m.sp * dt;
+      if (m.y < -6) { m.y = H + 6; m.x = Math.random() * W; }
+    }
+  }
+
   const movementMode = movementFor(card);
   const movementProfile = MOVEMENT_PROFILES[movementMode];
   const startBand = movementProfile.bandY || [0.4, 0.55];
@@ -2640,7 +2858,8 @@ function launchCatchChallenge(card, placement) {
   const FINAL_WORDS = ["GOTCHA!", "K.O.!", "SNARE!", "CAUGHT!"];
   const SMASH_WORDS = ["SMASH!", "CRACK!", "SHATTER!", "KRAKK!"];
   const BLOCK_WORDS = ["THUD!", "BONK!", "KLANG!", "CLUNK!"];
-  const COMIC_COLORS = { hit: "#ffe27a", final: "#7cf0c6", smash: "#ff9c70", block: "#cdd6f0" };
+  const NEAR_WORDS = ["SO CLOSE!", "WHIFF!", "JUST MISSED!", "ALMOST!", "EEK, MISSED!"];
+  const COMIC_COLORS = { hit: "#ffe27a", final: "#7cf0c6", smash: "#ff9c70", block: "#cdd6f0", near: "#ffd27c" };
   function pickWord(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 
   const comicTexts = [];
@@ -2719,8 +2938,14 @@ function launchCatchChallenge(card, placement) {
       o.broken = true;
       o.breakTime = 0.55;
       popComic(pickWord(SMASH_WORDS), o.x, o.y - o.h / 2 - 6, "smash");
+      spawnSplinters(o.x, o.y, 18);
+      addShake(4.6);
+      sfx.smash();
     } else {
       popComic(pickWord(BLOCK_WORDS), o.x, o.y - o.h / 2 - 6, "block");
+      spawnSplinters(o.x, o.y, 6);
+      addShake(2.4);
+      sfx.block();
     }
   }
   function updateObstacles(dt) {
@@ -2737,6 +2962,13 @@ function launchCatchChallenge(card, placement) {
   }
   function drawObstacle(o) {
     const fade = o.broken ? Math.max(0, o.breakTime / 0.55) : 1;
+    ctx.save();
+    ctx.globalAlpha = fade * 0.26;
+    ctx.fillStyle = "#000";
+    ctx.beginPath();
+    ctx.ellipse(o.x, FLOOR_Y - 2, o.w * 0.55, 5, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
     const rot = o.broken ? (1 - fade) * 0.6 : 0;
     const shakeX = o.shakeTime > 0 ? (Math.random() - 0.5) * 4 * (o.shakeTime / 0.25) : 0;
     ctx.save();
@@ -2827,6 +3059,7 @@ function launchCatchChallenge(card, placement) {
 
   function onDown(e) {
     if (finished || projectile || fokeBalls <= 0) return;
+    ensureAudio();
     const p = getPointer(e);
     const dx = p.x - RESTING.x;
     const dy = p.y - RESTING.y;
@@ -2877,6 +3110,10 @@ function launchCatchChallenge(card, placement) {
       vx: pullDx * POWER,
       vy: pullDy * POWER,
     };
+    trail.length = 0;
+    minMiss = Infinity;
+    ensureAudio();
+    sfx.throw();
     aiming = null;
     dodgeArmed = !fokemon.caught && Math.random() < DODGE_CHANCE;
     dodgeTriggered = false;
@@ -2973,9 +3210,63 @@ function launchCatchChallenge(card, placement) {
     fokemon.turnCd = 0;
   }
 
+  // Keep the fokemon out of the crates so they act as real cover.
+  function resolveObstacleCollision() {
+    const R = fokemon.r * 0.62;
+    for (const o of obstacles) {
+      if (o.broken) continue;
+      const left = o.x - o.w / 2;
+      const right = o.x + o.w / 2;
+      const top = o.y - o.h / 2;
+      const bottom = o.y + o.h / 2;
+      const cx = Math.max(left, Math.min(fokemon.x, right));
+      const cy = Math.max(top, Math.min(fokemon.y, bottom));
+      const dx = fokemon.x - cx;
+      const dy = fokemon.y - cy;
+      const d2 = dx * dx + dy * dy;
+      if (d2 >= R * R) continue;
+
+      if (d2 > 0.001) {
+        const d = Math.sqrt(d2);
+        const push = R - d;
+        fokemon.x += (dx / d) * push;
+        fokemon.y += (dy / d) * push;
+        if (Math.abs(dx) > Math.abs(dy)) {
+          fokemon.vx = (dx > 0 ? 1 : -1) * Math.abs(fokemon.vx || 60);
+        } else {
+          fokemon.targetY = fokemon.y;
+        }
+      } else {
+        // Center buried inside the crate: eject along the shallowest face.
+        const pl = fokemon.x - left;
+        const pr = right - fokemon.x;
+        const pt = fokemon.y - top;
+        const pb = bottom - fokemon.y;
+        let m = Math.min(pl, pr, pt, pb);
+        if (m === pl && left - R < FOKEMON_MIN_X) m = Math.min(pt, pb);
+        if (m === pl) { fokemon.x = left - R; fokemon.vx = -Math.abs(fokemon.vx || 60); }
+        else if (m === pr) { fokemon.x = right + R; fokemon.vx = Math.abs(fokemon.vx || 60); }
+        else if (m === pt) { fokemon.y = top - R; fokemon.targetY = fokemon.y; }
+        else { fokemon.y = bottom + R; fokemon.targetY = fokemon.y; }
+      }
+
+      if (fokemon.jumpState === "air") {
+        fokemon.jumpState = "rest";
+        fokemon.restTime = 0.14 + Math.random() * 0.2;
+      }
+      fokemon.turnCd = Math.min(fokemon.turnCd, 0.14);
+      if (bumpCd <= 0) {
+        spawnDust(cx, cy);
+        o.shakeTime = Math.max(o.shakeTime, 0.1);
+        bumpCd = 0.45;
+      }
+    }
+  }
+
   function step(dt) {
     fokemon.bobPhase += dt * 2.4;
     if (fokemon.flashTime > 0) fokemon.flashTime = Math.max(0, fokemon.flashTime - dt);
+    if (bumpCd > 0) bumpCd -= dt;
 
     if (!fokemon.caught) {
       if (fokemon.dodgeTime > 0) {
@@ -2985,6 +3276,9 @@ function launchCatchChallenge(card, placement) {
       } else {
         updateMovement(dt);
       }
+      resolveObstacleCollision();
+      fokemon.x = clampX(fokemon.x);
+      fokemon.y = Math.max(fokemon.r * 0.5, Math.min(FLOOR_Y - fokemon.r * 0.7, fokemon.y));
     } else {
       fokemon.captureScale = Math.max(0, fokemon.captureScale - dt * 2.4);
     }
@@ -2996,6 +3290,13 @@ function launchCatchChallenge(card, placement) {
       projectile.y += projectile.vy * dt;
 
       const bobY = fokemon.y + Math.sin(fokemon.bobPhase) * fokemon.bobAmp;
+
+      trail.push({ x: projectile.x, y: projectile.y });
+      if (trail.length > 16) trail.shift();
+      if (!fokemon.caught) {
+        const md = Math.hypot(projectile.x - fokemon.x, projectile.y - bobY);
+        if (md < minMiss) minMiss = md;
+      }
 
       for (const o of obstacles) {
         if (o.broken) continue;
@@ -3025,6 +3326,7 @@ function launchCatchChallenge(card, placement) {
           fokemon.dodgeVx = direction * DODGE_SPEED;
           fokemon.dodgeTime = DODGE_DURATION;
           dodgeTriggered = true;
+          sfx.dodge();
         }
       }
 
@@ -3037,6 +3339,11 @@ function launchCatchChallenge(card, placement) {
 
           if (fokemon.hitsLeft <= 0) {
             popComic(pickWord(FINAL_WORDS), fokemon.x, bobY - fokemon.r - 6, "final");
+            spawnConfetti(fokemon.x, bobY);
+            spawnSparks(fokemon.x, bobY, "#7cf0c6");
+            spawnRing(fokemon.x, bobY);
+            addShake(7);
+            sfx.capture();
             fokemon.caught = true;
             finished = true;
             outcome = "caught";
@@ -3050,6 +3357,9 @@ function launchCatchChallenge(card, placement) {
             return;
           }
           popComic(pickWord(HIT_WORDS), fokemon.x, bobY - fokemon.r - 6, "hit");
+          spawnSparks(fokemon.x, bobY, "#ffe27a");
+          addShake(3.6);
+          sfx.hit();
           projectile = null;
           relocateAfterHit();
           if (fokeBalls <= 0) {
@@ -3067,6 +3377,11 @@ function launchCatchChallenge(card, placement) {
 
       const offscreen = projectile.x < -40 || projectile.x > W + 40 || projectile.y > FLOOR_Y + NET_RADIUS;
       if (offscreen) {
+        if (!fokemon.caught && minMiss < fokemon.r + NET_RADIUS + 34) {
+          popComic(pickWord(NEAR_WORDS), fokemon.x, bobY - fokemon.r - 6, "near");
+          addShake(1.6);
+          sfx.miss();
+        }
         projectile = null;
         if (fokeBalls <= 0) {
           finished = true;
@@ -3081,20 +3396,110 @@ function launchCatchChallenge(card, placement) {
     }
   }
 
-  function drawBackground() {
-    ctx.clearRect(0, 0, W, H);
-    const grad = ctx.createLinearGradient(0, FLOOR_Y - 20, 0, H);
-    grad.addColorStop(0, "rgba(124, 240, 198, 0.05)");
-    grad.addColorStop(1, "rgba(124, 240, 198, 0.18)");
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, FLOOR_Y - 4, W, H - FLOOR_Y + 4);
-
-    ctx.strokeStyle = "rgba(143, 171, 255, 0.25)";
-    ctx.lineWidth = 1;
+  function drawHill(h) {
+    ctx.fillStyle = h.color;
     ctx.beginPath();
-    ctx.moveTo(0, FLOOR_Y);
-    ctx.lineTo(W, FLOOR_Y);
+    ctx.moveTo(-14, H);
+    for (let x = -14; x <= W + 14; x += 14) {
+      const y = h.base + Math.sin(x * h.k + h.phase) * h.amp + Math.sin(x * h.k * 2.3 + h.phase) * h.amp * 0.3;
+      ctx.lineTo(x, y);
+    }
+    ctx.lineTo(W + 14, H);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function drawBackground(time) {
+    ctx.clearRect(0, 0, W, H);
+
+    // Twinkling starfield (the .arena CSS nebula shows through behind it).
+    ctx.fillStyle = "#cfe0ff";
+    for (const s of stars) {
+      ctx.globalAlpha = (0.3 + 0.7 * (0.5 + 0.5 * Math.sin(time * s.sp + s.ph))) * 0.8;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // Parallax hill silhouettes for depth.
+    drawHill(hillFar);
+    drawHill(hillNear);
+
+    // Ground plane.
+    const grad = ctx.createLinearGradient(0, GROUND_Y - 8, 0, H);
+    grad.addColorStop(0, "rgba(22, 64, 74, 0.55)");
+    grad.addColorStop(0.18, "rgba(14, 42, 56, 0.88)");
+    grad.addColorStop(1, "rgba(6, 16, 30, 0.97)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(-16, GROUND_Y - 2, W + 32, H - GROUND_Y + 16);
+
+    // Receding perspective grid on the ground.
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, GROUND_Y, W, H - GROUND_Y);
+    ctx.clip();
+    ctx.strokeStyle = "rgba(124, 240, 198, 0.11)";
+    ctx.lineWidth = 1;
+    const vx = W * 0.5;
+    for (let i = -9; i <= 9; i++) {
+      ctx.beginPath();
+      ctx.moveTo(vx + i * (W * 0.055), GROUND_Y);
+      ctx.lineTo(vx + i * (W * 0.62), H + 24);
+      ctx.stroke();
+    }
+    const depth = H - GROUND_Y;
+    for (let r = 1; r <= 5; r++) {
+      const yy = GROUND_Y + Math.pow(r / 5, 1.7) * depth;
+      ctx.globalAlpha = 0.5;
+      ctx.beginPath();
+      ctx.moveTo(0, yy);
+      ctx.lineTo(W, yy);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+
+    // Glowing neon horizon line at the play floor.
+    ctx.save();
+    ctx.shadowColor = "rgba(124, 240, 198, 0.85)";
+    ctx.shadowBlur = 12;
+    ctx.strokeStyle = "rgba(168, 255, 224, 0.7)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, GROUND_Y);
+    ctx.lineTo(W, GROUND_Y);
     ctx.stroke();
+    ctx.restore();
+
+    // Swaying energy tufts along the floor.
+    ctx.lineWidth = 2;
+    ctx.lineCap = "round";
+    for (const t of tufts) {
+      const sway = Math.sin(time * 1.7 + t.ph) * 3.2;
+      ctx.strokeStyle = t.color;
+      ctx.beginPath();
+      ctx.moveTo(t.x, GROUND_Y + 1);
+      ctx.quadraticCurveTo(t.x + sway * 0.5, GROUND_Y - t.h * 0.6, t.x + sway, GROUND_Y - t.h);
+      ctx.stroke();
+    }
+
+    // Drifting ambient motes.
+    ctx.fillStyle = "#7cf0c6";
+    for (const m of motes) {
+      ctx.globalAlpha = 0.16 + 0.22 * (0.5 + 0.5 * Math.sin(time * 1.3 + m.ph));
+      ctx.beginPath();
+      ctx.arc(m.x + Math.sin(time * 0.6 + m.ph) * 10, m.y, m.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // Soft vignette to focus the action.
+    const vig = ctx.createRadialGradient(W / 2, H * 0.52, Math.min(W, H) * 0.34, W / 2, H * 0.52, Math.max(W, H) * 0.75);
+    vig.addColorStop(0, "rgba(0, 0, 0, 0)");
+    vig.addColorStop(1, "rgba(0, 0, 0, 0.45)");
+    ctx.fillStyle = vig;
+    ctx.fillRect(0, 0, W, H);
   }
 
   function drawSlingshot(netPos, inFlight) {
@@ -3170,6 +3575,21 @@ function launchCatchChallenge(card, placement) {
       ctx.arc(px, py, size, 0, Math.PI * 2);
       ctx.fill();
     }
+  }
+
+  function drawBallTrail() {
+    if (trail.length < 2) return;
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    for (let i = 0; i < trail.length; i++) {
+      const k = i / trail.length;
+      ctx.globalAlpha = k * 0.5;
+      ctx.fillStyle = "#7cf0c6";
+      ctx.beginPath();
+      ctx.arc(trail[i].x, trail[i].y, NET_RADIUS * (0.22 + k * 0.55), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
   }
 
   function drawFokemon() {
@@ -3258,15 +3678,25 @@ function launchCatchChallenge(card, placement) {
   }
 
   function draw() {
-    drawBackground();
-    drawObstacles();
+    drawBackground(elapsed);
+
+    const sx = shakeMag > 0 ? (Math.random() * 2 - 1) * shakeMag : 0;
+    const sy = shakeMag > 0 ? (Math.random() * 2 - 1) * shakeMag : 0;
+    ctx.save();
+    ctx.translate(sx, sy);
+
     drawFokemon();
+    drawObstacles();
 
     const netPos = projectile ? projectile : netRestPosition();
     drawSlingshot(netPos, !!projectile);
     drawTrajectory();
+    if (projectile) drawBallTrail();
     drawNet(netPos, !!projectile);
+    drawParticles();
     drawComicTexts();
+
+    ctx.restore();
   }
 
   let lastTime = performance.now();
@@ -3275,8 +3705,11 @@ function launchCatchChallenge(card, placement) {
     if (!document.body.contains(challenge)) return;
     const dt = Math.min(0.033, (now - lastTime) / 1000);
     lastTime = now;
+    elapsed += dt;
     updateObstacles(dt);
     updateComicTexts(dt);
+    updateParticles(dt);
+    updateScene(dt);
     if (!finished || (fokemon.caught && fokemon.captureScale > 0)) step(dt);
     draw();
     rafId = requestAnimationFrame(loop);
@@ -3954,11 +4387,11 @@ function launchTraining(site, champion) {
         <span class="hits-meter"><span class="meta-label">HP</span><span class="train-hp"></span></span>
         <span class="hits-meter"><span class="meta-label">Reps</span><span class="train-score">0</span></span>
       </div>
-      <p class="train-help">Drag your Fokemon to dodge incoming trainer-balls. Survive as long as you can — each near-miss earns training reps. Boost stats when the drill ends.</p>
+      <p class="train-help">Drag to dodge the trainer-balls — an amber ⚠ flash warns which edge each one fires from. Grab the glowing 💚 FokéFood to heal a heart. Each near-miss earns reps; boost stats when the drill ends.</p>
       <div class="arena training-arena">
         <canvas class="training-canvas" aria-label="Training arena"></canvas>
       </div>
-      <p class="status" aria-live="polite">Drag your fighter. Avoid the balls!</p>
+      <p class="status" aria-live="polite">Drag to dodge • watch the edge warnings • grab FokéFood to heal</p>
       <div class="training-footer">
         <button class="ghost cancel">Stop drill</button>
       </div>
@@ -3990,6 +4423,7 @@ function launchTraining(site, champion) {
   let hp = hpMax;
   let score = 0;
   let stopped = false;
+  let dying = 0;
   let dragging = false;
   let totalElapsed = 0;
   let nextSpawnIn = 1.4;
@@ -3999,6 +4433,154 @@ function launchTraining(site, champion) {
   const balls = [];
   const sparks = [];
   const comicTexts = [];
+  const telegraphs = [];
+  const particles = [];
+  const rings = [];
+  let food = null;
+  let foodTimer = 9 + Math.random() * 4;
+  const FOOD_R = 14;
+  let shakeMag = 0;
+  let hitFlash = 0;
+
+  // ---------- juice: audio (synthesized, no asset files) ----------
+  let audioCtx = null;
+  function ensureAudio() {
+    try {
+      if (!audioCtx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return;
+        audioCtx = new AC();
+      }
+      if (audioCtx.state === "suspended") audioCtx.resume();
+    } catch {
+      audioCtx = null;
+    }
+  }
+  function tone({ freq = 440, freqEnd = freq, dur = 0.12, type = "triangle", vol = 0.1, delay = 0 }) {
+    if (!audioCtx) return;
+    const t0 = audioCtx.currentTime + delay;
+    const osc = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t0);
+    if (freqEnd !== freq) osc.frequency.exponentialRampToValueAtTime(Math.max(1, freqEnd), t0 + dur);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.linearRampToValueAtTime(vol, t0 + 0.006);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(g).connect(audioCtx.destination);
+    osc.start(t0);
+    osc.stop(t0 + dur + 0.03);
+  }
+  function noiseBurst({ dur = 0.18, vol = 0.16, filter = 1400 }) {
+    if (!audioCtx) return;
+    const t0 = audioCtx.currentTime;
+    const frames = Math.max(1, Math.floor(audioCtx.sampleRate * dur));
+    const buf = audioCtx.createBuffer(1, frames, audioCtx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < frames; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / frames);
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    const f = audioCtx.createBiquadFilter();
+    f.type = "lowpass";
+    f.frequency.value = filter;
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(vol, t0);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    src.connect(f).connect(g).connect(audioCtx.destination);
+    src.start(t0);
+    src.stop(t0 + dur);
+  }
+  const sfx = {
+    warn() { tone({ freq: 940, freqEnd: 1180, dur: 0.07, type: "sine", vol: 0.03 }); },
+    incoming() { tone({ freq: 680, freqEnd: 300, dur: 0.16, type: "sine", vol: 0.045 }); },
+    hit() { tone({ freq: 175, freqEnd: 78, dur: 0.17, type: "square", vol: 0.12 }); noiseBurst({ dur: 0.08, vol: 0.1, filter: 2200 }); },
+    whiff() { tone({ freq: 520, freqEnd: 920, dur: 0.1, type: "sine", vol: 0.04 }); },
+    streak() { [660, 880].forEach((f, i) => tone({ freq: f, dur: 0.12, type: "triangle", vol: 0.07, delay: i * 0.07 })); },
+    food() { [523, 659, 880].forEach((f, i) => tone({ freq: f, dur: 0.15, type: "triangle", vol: 0.09, delay: i * 0.08 })); },
+    ko() { noiseBurst({ dur: 0.32, vol: 0.18, filter: 900 }); tone({ freq: 210, freqEnd: 55, dur: 0.4, type: "sawtooth", vol: 0.08 }); },
+  };
+
+  // ---------- juice: screen shake + particles ----------
+  function addShake(m) { shakeMag = Math.min(12, Math.max(shakeMag, m)); }
+  function addParticle(p) {
+    particles.push(p);
+    if (particles.length > 160) particles.splice(0, particles.length - 160);
+  }
+  function spawnBurst(x, y, color, count = 14, opts = {}) {
+    const spread = opts.spread ?? 240;
+    const up = opts.up ?? 0;
+    for (let i = 0; i < count; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = 60 + Math.random() * spread;
+      addParticle({
+        x, y,
+        vx: Math.cos(a) * sp,
+        vy: Math.sin(a) * sp - up,
+        g: opts.g ?? 0,
+        life: 0.3 + Math.random() * (opts.life ?? 0.4), maxLife: 0.7,
+        size: 1.6 + Math.random() * 2.6,
+        color, shape: opts.shape ?? "spark",
+      });
+    }
+  }
+  function spawnRing(x, y, color) { rings.push({ x, y, r: 6, life: 0.45, maxLife: 0.45, color }); }
+  function updateParticles(dt) {
+    for (const p of particles) {
+      p.life -= dt;
+      p.vy += (p.g || 0) * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vx *= 0.96;
+      p.vy *= 0.96;
+    }
+    for (let i = particles.length - 1; i >= 0; i--) if (particles[i].life <= 0) particles.splice(i, 1);
+    for (const rg of rings) { rg.life -= dt; rg.r += 200 * dt; }
+    for (let i = rings.length - 1; i >= 0; i--) if (rings[i].life <= 0) rings.splice(i, 1);
+    if (shakeMag > 0) shakeMag = Math.max(0, shakeMag - dt * 46);
+    if (hitFlash > 0) hitFlash = Math.max(0, hitFlash - dt * 2.4);
+  }
+  function drawParticles() {
+    for (const rg of rings) {
+      const k = rg.life / rg.maxLife;
+      ctx.save();
+      ctx.globalAlpha = k * 0.7;
+      ctx.strokeStyle = rg.color;
+      ctx.lineWidth = 3 * k + 0.5;
+      ctx.beginPath();
+      ctx.arc(rg.x, rg.y, rg.r, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+    for (const p of particles) {
+      const k = Math.max(0, Math.min(1, p.life / p.maxLife));
+      ctx.save();
+      ctx.globalAlpha = k;
+      ctx.globalCompositeOperation = "lighter";
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size * (0.4 + k * 0.6), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  // ---------- scene: drifting ambient motes ----------
+  const motes = [];
+  for (let i = 0, n = Math.round(W / 26); i < n; i++) {
+    motes.push({
+      x: Math.random() * W,
+      y: Math.random() * H,
+      r: 0.8 + Math.random() * 1.7,
+      sp: 6 + Math.random() * 14,
+      ph: Math.random() * Math.PI * 2,
+    });
+  }
+  function updateScene(dt) {
+    for (const m of motes) {
+      m.y -= m.sp * dt;
+      if (m.y < -6) { m.y = H + 6; m.x = Math.random() * W; }
+    }
+  }
 
   function setHpText() {
     if (hpEl) hpEl.textContent = `${hp}/${hpMax}`;
@@ -4025,6 +4607,7 @@ function launchTraining(site, champion) {
 
   function onDown(e) {
     if (stopped) return;
+    ensureAudio();
     const p = getPointer(e);
     const dx = p.x - fokePos.x;
     const dy = p.y - fokePos.y;
@@ -4054,32 +4637,93 @@ function launchTraining(site, champion) {
   canvas.addEventListener("pointerup", onUp);
   canvas.addEventListener("pointercancel", onUp);
 
+  // Spawning is telegraphed: a warning marker + aim line flashes at the edge
+  // for ~0.5s before the ball actually appears, so you always know where it's
+  // coming from even when your hand is over that edge.
   function spawnBall(dt) {
     nextSpawnIn -= dt;
     if (nextSpawnIn > 0) return;
     nextSpawnIn = spawnInterval;
     const edge = Math.floor(Math.random() * 4);
-    let x, y;
-    if (edge === 0) { x = Math.random() * W; y = -20; }
-    else if (edge === 1) { x = W + 20; y = Math.random() * H; }
-    else if (edge === 2) { x = Math.random() * W; y = H + 20; }
-    else { x = -20; y = Math.random() * H; }
+    let x, y, mx, my;
+    if (edge === 0) { x = Math.random() * W; y = -20; mx = clamp(x, 20, W - 20); my = 18; }
+    else if (edge === 1) { x = W + 20; y = Math.random() * H; mx = W - 18; my = clamp(y, 20, H - 20); }
+    else if (edge === 2) { x = Math.random() * W; y = H + 20; mx = clamp(x, 20, W - 20); my = H - 18; }
+    else { x = -20; y = Math.random() * H; mx = 18; my = clamp(y, 20, H - 20); }
     const targetJitterX = (Math.random() - 0.5) * 90;
     const targetJitterY = (Math.random() - 0.5) * 90;
     const tx = fokePos.x + targetJitterX;
     const ty = fokePos.y + targetJitterY;
     const dx = tx - x;
     const dy = ty - y;
-    const dist = Math.hypot(dx, dy);
+    const dist = Math.hypot(dx, dy) || 1;
     const speed = 230 + difficulty * 90 + Math.random() * 80;
-    balls.push({
-      x, y,
+    const warn = Math.max(0.42, 0.62 - difficulty * 0.06);
+    telegraphs.push({
+      x, y, mx, my, tx, ty,
       vx: (dx / dist) * speed,
       vy: (dy / dist) * speed,
-      r: 11,
-      passed: false,
-      spin: Math.random() * Math.PI * 2,
+      ux: dx / dist, uy: dy / dist,
+      warn, maxWarn: warn,
     });
+    sfx.warn();
+  }
+
+  function updateTelegraphs(dt) {
+    for (const t of telegraphs) t.warn -= dt;
+    for (let i = telegraphs.length - 1; i >= 0; i--) {
+      const t = telegraphs[i];
+      if (t.warn <= 0) {
+        balls.push({
+          x: t.x, y: t.y,
+          vx: t.vx, vy: t.vy,
+          r: 11,
+          passed: false,
+          spin: Math.random() * Math.PI * 2,
+          trail: [],
+        });
+        sfx.incoming();
+        telegraphs.splice(i, 1);
+      }
+    }
+  }
+
+  function spawnFood() {
+    const margin = PLAYER_R * 2.4;
+    let fx = 0, fy = 0;
+    for (let tries = 0; tries < 12; tries++) {
+      fx = margin + Math.random() * (W - margin * 2);
+      fy = margin + Math.random() * (H - margin * 2);
+      if (Math.hypot(fx - fokePos.x, fy - fokePos.y) > PLAYER_R * 3.2) break;
+    }
+    food = { x: fx, y: fy, life: 7.5, maxLife: 7.5, pulse: Math.random() * Math.PI * 2 };
+  }
+
+  function updateFood(dt) {
+    if (!food) {
+      foodTimer -= dt;
+      if (foodTimer <= 0) { spawnFood(); foodTimer = 15 + Math.random() * 7; }
+      return;
+    }
+    food.life -= dt;
+    food.pulse += dt * 5;
+    if (food.life <= 0) { food = null; return; }
+    if (Math.hypot(food.x - fokePos.x, food.y - fokePos.y) < PLAYER_R + FOOD_R) {
+      if (hp < hpMax) {
+        hp += 1;
+        setHpText();
+        popComic("YUM! +1 HP", food.x, food.y - FOOD_R - 8, "#7cf0c6");
+      } else {
+        score += 3;
+        if (scoreEl) scoreEl.textContent = String(score);
+        popComic("YUM! +3", food.x, food.y - FOOD_R - 8, "#ffe27a");
+      }
+      spawnBurst(food.x, food.y, "#7cf0c6", 20, { spread: 200, life: 0.5 });
+      spawnRing(food.x, food.y, "#7cf0c6");
+      addShake(2.2);
+      sfx.food();
+      food = null;
+    }
   }
 
   function updateBalls(dt) {
@@ -4087,6 +4731,10 @@ function launchTraining(site, champion) {
       b.x += b.vx * dt;
       b.y += b.vy * dt;
       b.spin += dt * 8;
+      if (b.trail) {
+        b.trail.push({ x: b.x, y: b.y });
+        if (b.trail.length > 9) b.trail.shift();
+      }
       const dx = b.x - fokePos.x;
       const dy = b.y - fokePos.y;
       const dist = Math.hypot(dx, dy);
@@ -4097,7 +4745,18 @@ function launchTraining(site, champion) {
         setHpText();
         popComic("HIT!", fokePos.x, fokePos.y - PLAYER_R - 8, "#ff8ca6");
         popSparks(fokePos.x, fokePos.y, "#ff8ca6");
-        if (hp <= 0) endDrill("ko");
+        spawnBurst(fokePos.x, fokePos.y, "#ff8ca6", 18, { spread: 260, life: 0.45 });
+        spawnRing(fokePos.x, fokePos.y, "#ff8ca6");
+        hitFlash = 1;
+        if (hp <= 0) {
+          addShake(9);
+          spawnBurst(fokePos.x, fokePos.y, "#ffd27c", 26, { spread: 320, life: 0.6 });
+          sfx.ko();
+          dying = 0.85;
+        } else {
+          addShake(5);
+          sfx.hit();
+        }
       } else if (!b.passed && dist < PLAYER_R + 38 && (b.vx * dx + b.vy * dy) > 0) {
         // ball just whizzed past
         b.passed = true;
@@ -4105,8 +4764,11 @@ function launchTraining(site, champion) {
         if (scoreEl) scoreEl.textContent = String(score);
         if (score % 5 === 0) {
           popComic("STREAK!", fokePos.x, fokePos.y - PLAYER_R - 4, "#ffe27a");
+          spawnRing(fokePos.x, fokePos.y, "#ffe27a");
+          sfx.streak();
         } else {
           popComic("WHIFF!", b.x, b.y, "#7cf0c6");
+          sfx.whiff();
         }
         popSparks(b.x, b.y, "#7cf0c6");
       }
@@ -4136,29 +4798,204 @@ function launchTraining(site, champion) {
 
   function step(dt) {
     if (stopped) return;
+    if (dying > 0) {
+      dying -= dt;
+      updateScene(dt);
+      updateParticles(dt);
+      updateFx(dt);
+      if (dying <= 0) endDrill("ko");
+      return;
+    }
     totalElapsed += dt;
     difficulty = Math.min(2.4, totalElapsed / 18);
     spawnInterval = Math.max(0.35, 1.35 - difficulty * 0.32);
     spawnBall(dt);
+    updateTelegraphs(dt);
     updateBalls(dt);
+    updateFood(dt);
+    updateScene(dt);
+    updateParticles(dt);
     updateFx(dt);
   }
 
-  function drawBackground() {
-    ctx.fillStyle = "rgba(7, 11, 22, 0.6)";
+  function drawBackground(time) {
+    // Translucent base so the .arena nebula glows through.
+    ctx.fillStyle = "rgba(7, 11, 22, 0.55)";
     ctx.fillRect(0, 0, W, H);
-    // floor grid lines for cartoon vibe
-    ctx.strokeStyle = "rgba(124, 240, 198, 0.08)";
+
+    const cx = W / 2;
+    const cy = H / 2;
+
+    // Soft floor glow under the action.
+    const fl = ctx.createRadialGradient(cx, cy, 10, cx, cy, Math.max(W, H) * 0.62);
+    fl.addColorStop(0, "rgba(124, 240, 198, 0.10)");
+    fl.addColorStop(1, "rgba(124, 240, 198, 0)");
+    ctx.fillStyle = fl;
+    ctx.fillRect(0, 0, W, H);
+
+    // Slowly scrolling grid for motion.
+    const off = (time * 13) % 40;
+    ctx.strokeStyle = "rgba(124, 240, 198, 0.07)";
     ctx.lineWidth = 1;
-    for (let x = 0; x < W; x += 40) {
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+    ctx.beginPath();
+    for (let x = -40 + off; x < W; x += 40) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
+    for (let y = -40 + off; y < H; y += 40) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
+    ctx.stroke();
+
+    // Concentric dojo target rings, gently pulsing.
+    const baseR = Math.min(W, H) * 0.5;
+    for (let i = 0; i < 4; i++) {
+      const pr = baseR * (0.26 + i * 0.22) + Math.sin(time * 1.4 + i) * 4;
+      ctx.strokeStyle = `rgba(143, 171, 255, ${0.1 - i * 0.018})`;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(cx, cy, pr, 0, Math.PI * 2);
+      ctx.stroke();
     }
-    for (let y = 0; y < H; y += 40) {
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+
+    // Corner accent glows.
+    for (const [gx, gy, gc] of [
+      [0, 0, "rgba(181, 124, 255, 0.16)"],
+      [W, 0, "rgba(75, 183, 255, 0.16)"],
+      [0, H, "rgba(75, 183, 255, 0.14)"],
+      [W, H, "rgba(181, 124, 255, 0.14)"],
+    ]) {
+      const cg = ctx.createRadialGradient(gx, gy, 0, gx, gy, Math.min(W, H) * 0.42);
+      cg.addColorStop(0, gc);
+      cg.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.fillStyle = cg;
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    // Drifting ambient motes.
+    ctx.fillStyle = "#7cf0c6";
+    for (const m of motes) {
+      ctx.globalAlpha = 0.14 + 0.2 * (0.5 + 0.5 * Math.sin(time * 1.3 + m.ph));
+      ctx.beginPath();
+      ctx.arc(m.x + Math.sin(time * 0.6 + m.ph) * 9, m.y, m.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // Vignette.
+    const vig = ctx.createRadialGradient(cx, cy, Math.min(W, H) * 0.34, cx, cy, Math.max(W, H) * 0.72);
+    vig.addColorStop(0, "rgba(0,0,0,0)");
+    vig.addColorStop(1, "rgba(0,0,0,0.42)");
+    ctx.fillStyle = vig;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  function drawTelegraphs() {
+    for (const t of telegraphs) {
+      const k = 1 - t.warn / t.maxWarn; // 0 -> 1 as it nears firing
+      const pulse = 0.45 + 0.55 * Math.abs(Math.sin(t.warn * 16));
+      ctx.save();
+
+      // Faint aim line from the spawn edge toward the target.
+      ctx.globalAlpha = 0.18 + 0.32 * k;
+      ctx.strokeStyle = "#ffb24d";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([6, 7]);
+      ctx.beginPath();
+      ctx.moveTo(t.mx, t.my);
+      ctx.lineTo(t.mx + t.ux * (90 + 120 * k), t.my + t.uy * (90 + 120 * k));
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Pulsing warning chevron at the edge, pointing inward.
+      const ang = Math.atan2(t.uy, t.ux);
+      ctx.translate(t.mx, t.my);
+      ctx.rotate(ang);
+      ctx.globalAlpha = 0.5 + 0.5 * pulse;
+      ctx.fillStyle = "#ff9c40";
+      ctx.shadowColor = "rgba(255, 156, 64, 0.9)";
+      ctx.shadowBlur = 10;
+      const s = 9 + 5 * pulse;
+      for (let c = 0; c < 2; c++) {
+        const ox = c * 8;
+        ctx.beginPath();
+        ctx.moveTo(ox - 4, -s);
+        ctx.lineTo(ox + s - 4, 0);
+        ctx.lineTo(ox - 4, s);
+        ctx.lineTo(ox - 1, 0);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.restore();
     }
   }
 
+  function drawFood() {
+    if (!food) return;
+    const blink = food.life < 1.6 ? (Math.sin(food.life * 22) > -0.1 ? 1 : 0.18) : 1;
+    if (!blink) return;
+    const pulse = 1 + Math.sin(food.pulse) * 0.08;
+    const r = FOOD_R * pulse;
+    ctx.save();
+    ctx.globalAlpha = blink;
+    ctx.translate(food.x, food.y);
+
+    // Halo.
+    const halo = ctx.createRadialGradient(0, 0, r * 0.5, 0, 0, r * 2.1);
+    halo.addColorStop(0, "rgba(124, 240, 198, 0.5)");
+    halo.addColorStop(1, "rgba(124, 240, 198, 0)");
+    ctx.fillStyle = halo;
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 2.1, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Berry body (warm green/gold — clearly friendly vs the red trainer-balls).
+    const body = ctx.createRadialGradient(-r * 0.3, -r * 0.35, r * 0.2, 0, 0, r);
+    body.addColorStop(0, "#b6f5c8");
+    body.addColorStop(0.55, "#5fd39a");
+    body.addColorStop(1, "#2f9d63");
+    ctx.fillStyle = body;
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(7, 30, 20, 0.55)";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Leaf.
+    ctx.fillStyle = "#8be86b";
+    ctx.beginPath();
+    ctx.ellipse(r * 0.18, -r * 1.05, r * 0.42, r * 0.22, -0.7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "#3aa64a";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, -r * 0.9);
+    ctx.lineTo(r * 0.05, -r * 1.18);
+    ctx.stroke();
+
+    // Heart glyph to read as "heal".
+    ctx.fillStyle = "rgba(255, 255, 255, 0.92)";
+    const hs = r * 0.42;
+    ctx.beginPath();
+    ctx.moveTo(0, hs * 0.55);
+    ctx.bezierCurveTo(hs * 1.1, -hs * 0.35, hs * 0.45, -hs * 1.05, 0, -hs * 0.35);
+    ctx.bezierCurveTo(-hs * 0.45, -hs * 1.05, -hs * 1.1, -hs * 0.35, 0, hs * 0.55);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.restore();
+  }
+
   function drawBall(b) {
+    if (b.trail && b.trail.length > 1) {
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter";
+      for (let i = 0; i < b.trail.length; i++) {
+        const k = i / b.trail.length;
+        ctx.globalAlpha = k * 0.4;
+        ctx.fillStyle = "#ff8ca6";
+        ctx.beginPath();
+        ctx.arc(b.trail[i].x, b.trail[i].y, b.r * (0.3 + k * 0.6), 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
     ctx.save();
     ctx.translate(b.x, b.y);
     ctx.rotate(b.spin);
@@ -4227,11 +5064,30 @@ function launchTraining(site, champion) {
 
   function draw() {
     ctx.clearRect(0, 0, W, H);
-    drawBackground();
+    drawBackground(totalElapsed);
+
+    const sx = shakeMag > 0 ? (Math.random() * 2 - 1) * shakeMag : 0;
+    const sy = shakeMag > 0 ? (Math.random() * 2 - 1) * shakeMag : 0;
+    ctx.save();
+    ctx.translate(sx, sy);
+    drawTelegraphs();
+    drawFood();
     drawSparks();
     for (const b of balls) drawBall(b);
     drawPlayer();
+    drawParticles();
     drawComicTexts();
+    ctx.restore();
+
+    // Edge danger flash when hit (screen space, not shaken).
+    if (hitFlash > 0) {
+      const a = Math.min(1, hitFlash) * 0.5;
+      const eg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.max(W, H) * 0.62);
+      eg.addColorStop(0, "rgba(255, 60, 90, 0)");
+      eg.addColorStop(1, `rgba(255, 60, 90, ${a})`);
+      ctx.fillStyle = eg;
+      ctx.fillRect(0, 0, W, H);
+    }
   }
 
   let last = performance.now();
