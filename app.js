@@ -393,6 +393,10 @@ const el = {
   ballCount: $("ballCount"),
   tradeBtn: $("tradeBtn"),
   tradeBadge: $("tradeIncomingBadge"),
+  feedTicker: $("feedTicker"),
+  feedTickerTrack: $("feedTickerTrack"),
+  catchBadge: $("catchBadge"),
+  sheetScrim: $("sheetScrim"),
 };
 
 let locationGranted = false;
@@ -1173,16 +1177,59 @@ function initCardViewer() {
 }
 
 function renderFeed() {
-  if (!el.feedList) return;
   const ordered = [...recentEvents].sort((a, b) => b.ts - a.ts).slice(0, 20);
-  el.feedList.innerHTML = ordered
-    .map((e) => `<li><strong>${escapeHtml(e.trainer)}</strong> caught ${escapeHtml(e.card)}</li>`)
+  if (el.feedList) {
+    el.feedList.innerHTML = ordered
+      .map((e) => `<li><strong>${escapeHtml(e.trainer)}</strong> caught ${escapeHtml(e.card)}</li>`)
+      .join("");
+  }
+  renderFeedTicker(ordered);
+}
+
+// The ambient bottom-edge ticker — a glanceable crawl of recent global
+// catches. Tapping it opens the full feed sheet (see initAppShell).
+function renderFeedTicker(ordered) {
+  if (!el.feedTicker || !el.feedTickerTrack) return;
+  if (!ordered || !ordered.length) {
+    el.feedTicker.classList.add("hidden");
+    el.feedTickerTrack.innerHTML = "";
+    return;
+  }
+  const recent = ordered.slice(0, 12);
+  const run = recent
+    .map((e) => `<span><strong>${escapeHtml(e.trainer)}</strong> caught ${escapeHtml(e.card)}</span>`)
     .join("");
+  // Duplicate the run so the -50% scroll keyframe loops seamlessly.
+  el.feedTickerTrack.innerHTML = run + run;
+  // Keep the scroll speed roughly constant regardless of content length.
+  const chars = recent.reduce((n, e) => n + e.trainer.length + e.card.length + 9, 0);
+  el.feedTicker.style.setProperty("--ticker-dur", `${Math.max(16, Math.round(chars * 0.32))}s`);
+  el.feedTicker.classList.remove("hidden");
+}
+
+// Count of uncaught spawns currently within catch range — drives the
+// badge on the "Catch" bottom-nav button.
+function renderCatchBadge() {
+  if (!el.catchBadge) return;
+  let n = 0;
+  if (playerLocation) {
+    for (const p of currentPlacements) {
+      if (gridCaughtIds.has(p.card.id)) continue;
+      if (distanceMeters(playerLocation, { lat: p.lat, lng: p.lng }) <= CATCH_RANGE_METERS) n++;
+    }
+  }
+  if (n > 0) {
+    el.catchBadge.textContent = String(n);
+    el.catchBadge.classList.remove("hidden");
+  } else {
+    el.catchBadge.classList.add("hidden");
+  }
 }
 
 function renderCards() {
-  if (!el.cardsList) return;
   ensureFreshPlacements();
+  renderCatchBadge();
+  if (!el.cardsList) return;
   const availablePlacements = currentPlacements.filter(
     (p) => !gridCaughtIds.has(p.card.id)
   );
@@ -7259,16 +7306,152 @@ function initGun() {
   }
 }
 
+// ---- App-shell navigation ----------------------------------------------
+// The map is the persistent stage. The bottom bar + ticker raise
+// bottom-sheets *over* the still-running map; nothing here ever scrolls
+// the page. Gameplay modals (catch/battle/card-viewer) keep their higher
+// z-index and sit above all of this untouched.
+function initAppShell() {
+  if (typeof document === "undefined" || typeof document.querySelectorAll !== "function") return;
+  const scrim = el.sheetScrim;
+  if (!scrim) return;
+  const navButtons = Array.from(document.querySelectorAll(".nav-btn"));
+  const sheets = {
+    catch: document.getElementById("sheet-catch"),
+    collection: document.getElementById("sheet-collection"),
+    feed: document.getElementById("sheet-feed"),
+  };
+  let activeSheet = null;
+  let closeTimer = null;
+
+  function setActiveNav(name) {
+    navButtons.forEach((b) => {
+      const n = b.dataset.nav;
+      b.classList.toggle("is-active", name ? n === name : n === "map");
+    });
+  }
+
+  function openSheet(name) {
+    const sheet = sheets[name];
+    if (!sheet) return;
+    if (activeSheet && activeSheet !== name) {
+      const prev = sheets[activeSheet];
+      if (prev) prev.classList.remove("show"), prev.classList.add("hidden");
+    }
+    if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; }
+    activeSheet = name;
+    scrim.classList.remove("hidden");
+    sheet.classList.remove("hidden");
+    void sheet.offsetWidth; // reflow so the slide-up transition runs
+    requestAnimationFrame(() => {
+      scrim.classList.add("show");
+      sheet.classList.add("show");
+    });
+    setActiveNav(name);
+    // Refresh content that may have changed while the sheet was closed.
+    if (name === "catch") renderCards();
+    else if (name === "collection") renderCollection();
+    else if (name === "feed") renderFeed();
+  }
+
+  function closeSheet() {
+    if (!activeSheet) return;
+    const sheet = sheets[activeSheet];
+    activeSheet = null;
+    scrim.classList.remove("show");
+    if (sheet) sheet.classList.remove("show");
+    setActiveNav(null);
+    closeTimer = setTimeout(() => {
+      scrim.classList.add("hidden");
+      if (sheet) sheet.classList.add("hidden");
+      closeTimer = null;
+    }, 340);
+  }
+
+  navButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const nav = btn.dataset.nav;
+      if (nav === "map") {
+        if (activeSheet) closeSheet();
+        else recenterOnPlayer();
+        return;
+      }
+      if (activeSheet === nav) closeSheet();
+      else openSheet(nav);
+    });
+  });
+
+  if (el.feedTicker) {
+    el.feedTicker.addEventListener("click", () => {
+      if (activeSheet === "feed") closeSheet();
+      else openSheet("feed");
+    });
+  }
+
+  scrim.addEventListener("click", closeSheet);
+  document
+    .querySelectorAll("[data-sheet-close]")
+    .forEach((b) => b.addEventListener("click", closeSheet));
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && activeSheet) closeSheet();
+  });
+
+  // Swipe-down on a sheet header dismisses it (native bottom-sheet feel).
+  Object.values(sheets).forEach((sheet) => {
+    const head = sheet && sheet.querySelector(".sheet-head");
+    if (!head) return;
+    let startY = 0;
+    let dy = 0;
+    let dragging = false;
+    head.addEventListener(
+      "touchstart",
+      (e) => {
+        dragging = true;
+        startY = e.touches[0].clientY;
+        dy = 0;
+        sheet.style.transition = "none";
+      },
+      { passive: true }
+    );
+    head.addEventListener(
+      "touchmove",
+      (e) => {
+        if (!dragging) return;
+        dy = Math.max(0, e.touches[0].clientY - startY);
+        sheet.style.transform = `translate(-50%, ${dy}px)`;
+      },
+      { passive: true }
+    );
+    head.addEventListener("touchend", () => {
+      if (!dragging) return;
+      dragging = false;
+      sheet.style.transition = "";
+      sheet.style.transform = "";
+      if (dy > 90) closeSheet();
+    });
+  });
+
+  // Keep Leaflet sized to the full-screen container across viewport changes.
+  const resize = () => requestAnimationFrame(() => leafletMap?.invalidateSize());
+  window.addEventListener("resize", resize);
+  window.addEventListener("orientationchange", () => setTimeout(resize, 250));
+}
+
 function enterGame() {
   if (!el.auth || !el.game) return;
   el.auth.classList.add("hidden");
   el.game.classList.remove("hidden");
-  el.welcome.textContent = `Welcome, ${profile.name}`;
+  // Compact HUD chip — the "Live sync" eyebrow carries the context, so the
+  // headline is just the trainer name (it ellipsises within the chip).
+  el.welcome.textContent = profile.name;
   document.documentElement.style.setProperty(
     "--accent",
     profile.team === "violet" ? "#ca90ff" : profile.team === "sun" ? "#ffd173" : "#7cf0c6"
   );
   ensureMap();
+  // The map just went from display:none to a fixed full-viewport stage —
+  // give Leaflet a beat to pick up the new size (URL bar / font load too).
+  setTimeout(() => leafletMap?.invalidateSize(), 220);
   ensureFreshPlacements();
   renderBallCount();
   renderCards();
@@ -7337,6 +7520,7 @@ if (el.tradeBtn) {
 
 
 initGun();
+initAppShell();
 
 if (profile?.name) enterGame();
 
