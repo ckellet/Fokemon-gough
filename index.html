@@ -62,67 +62,102 @@
         </form>
       </section>
 
-      <section class="card game-card hidden" id="gameCard">
-        <header>
-          <div>
-            <p class="eyebrow">Live sync online</p>
-            <h2 id="welcome"></h2>
-          </div>
-          <button id="resetProfile" class="ghost">Switch trainer</button>
-        </header>
+      <section class="game hidden" id="gameCard">
+        <!-- The map is the stage: full-viewport, always live, behind everything. -->
+        <div class="map-layer">
+          <div id="nearbyMap" class="map" aria-label="Nearby map"></div>
+          <p id="mapHint" class="map-hint">Tap “Enable location” to start the world.</p>
+          <p id="mapBucket" class="map-bucket" aria-live="polite"></p>
+          <p id="mapFarHint" class="map-far-hint hidden" aria-live="polite">
+            Zoom in to reveal FokéCaches &amp; Gyms.
+          </p>
+        </div>
 
-        <div class="grid">
-          <article class="panel map-panel">
-            <header class="panel-head">
-              <h3>Nearby Fokemon map</h3>
-              <div class="panel-head-meta">
-                <span class="ball-chip" id="ballChip" aria-live="polite" title="FokéBalls in your bag">
-                  <span class="ball-icon" aria-hidden="true"></span>
-                  <span><strong id="ballCount">0</strong><span class="ball-chip-label"> FokéBalls</span></span>
-                </span>
-                <button
-                  id="tradeBtn"
-                  class="ghost trade-btn"
-                  type="button"
-                  aria-label="Trade with nearby trainers"
-                  title="Trade with nearby trainers"
-                >
-                  <span aria-hidden="true">🔄</span>
-                  <span class="trade-btn-label">Trade</span>
-                  <span id="tradeIncomingBadge" class="trade-badge hidden" aria-hidden="true">0</span>
-                </button>
-                <small id="locationStatus" class="loc-pill" aria-live="polite">Locating…</small>
-              </div>
-            </header>
-            <div class="map-wrap">
-              <div id="nearbyMap" class="map" aria-label="Nearby map"></div>
-              <p id="mapHint" class="map-hint">Tap “Enable location” to start the world.</p>
-              <p id="mapBucket" class="map-bucket" aria-live="polite"></p>
-              <button
-                id="recenterBtn"
-                class="map-recenter hidden"
-                type="button"
-                aria-label="Return to your location"
-                title="Return to your location"
-              >
-                <span class="map-recenter-icon" aria-hidden="true">📍</span>
-                <span class="map-recenter-label">Recenter</span>
-              </button>
-              <p id="mapFarHint" class="map-far-hint hidden" aria-live="polite">
-                Zoom in to reveal FokéCaches &amp; Gyms.
-              </p>
+        <!-- Top HUD — floating chips anchored to the map's top edge -->
+        <div class="hud-top">
+          <div class="hud-trainer">
+            <span class="hud-team-dot" aria-hidden="true"></span>
+            <div class="hud-trainer-text">
+              <span class="hud-eyebrow">Live sync</span>
+              <h2 id="welcome"></h2>
             </div>
+            <button id="resetProfile" class="hud-switch ghost" type="button" aria-label="Switch trainer" title="Switch trainer">⇄</button>
+          </div>
+          <div class="hud-right">
+            <span class="ball-chip" id="ballChip" aria-live="polite" title="FokéBalls in your bag">
+              <span class="ball-icon" aria-hidden="true"></span>
+              <span><strong id="ballCount">0</strong><span class="ball-chip-label"> FokéBalls</span></span>
+            </span>
+            <button
+              id="tradeBtn"
+              class="ghost trade-btn"
+              type="button"
+              aria-label="Trade with nearby trainers"
+              title="Trade with nearby trainers"
+            >
+              <span aria-hidden="true">🔄</span>
+              <span class="trade-btn-label">Trade</span>
+              <span id="tradeIncomingBadge" class="trade-badge hidden" aria-hidden="true">0</span>
+            </button>
+          </div>
+          <small id="locationStatus" class="loc-pill" aria-live="polite">Locating…</small>
+        </div>
+
+        <!-- Contextual recenter (kept; existing show/hide logic) -->
+        <button
+          id="recenterBtn"
+          class="map-recenter hidden"
+          type="button"
+          aria-label="Return to your location"
+          title="Return to your location"
+        >
+          <span class="map-recenter-icon" aria-hidden="true">📍</span>
+          <span class="map-recenter-label">Recenter</span>
+        </button>
+
+        <!-- Ambient world-feed ticker — tap to open full history -->
+        <button id="feedTicker" class="feed-ticker hidden" type="button" aria-label="Open world feed history">
+          <span class="feed-ticker-dot" aria-hidden="true"></span>
+          <span class="feed-ticker-viewport">
+            <span class="feed-ticker-track" id="feedTickerTrack"></span>
+          </span>
+        </button>
+
+        <!-- Bottom navigation -->
+        <nav class="bottom-bar" aria-label="Primary navigation">
+          <button class="nav-btn is-active" data-nav="map" type="button">
+            <span class="nav-ico" aria-hidden="true">🗺️</span><span class="nav-label">Map</span>
+          </button>
+          <button class="nav-btn" data-nav="catch" type="button">
+            <span class="nav-ico" aria-hidden="true">⚡</span><span class="nav-label">Catch</span>
+            <span class="nav-badge hidden" id="catchBadge" aria-hidden="true">0</span>
+          </button>
+          <button class="nav-btn" data-nav="collection" type="button">
+            <span class="nav-ico" aria-hidden="true">📕</span><span class="nav-label">Collection</span>
+          </button>
+        </nav>
+
+        <!-- Bottom-sheet overlays raised over the still-running map -->
+        <div class="sheet-scrim hidden" id="sheetScrim"></div>
+
+        <section class="sheet hidden" id="sheet-catch" data-sheet="catch" aria-label="Nearby Fokemon">
+          <div class="sheet-head">
+            <span class="sheet-grip" aria-hidden="true"></span>
+            <h3>Nearby Fokemon</h3>
+            <button class="sheet-close ghost" type="button" data-sheet-close aria-label="Close">✕</button>
+          </div>
+          <div class="sheet-body">
             <div class="cards" id="cardsList"></div>
-          </article>
+          </div>
+        </section>
 
-          <article class="panel">
-            <h3>World feed</h3>
-            <p>Fresh catches from all trainers.</p>
-            <ul id="feedList" class="feed"></ul>
-          </article>
-
-          <article class="panel full">
+        <section class="sheet hidden" id="sheet-collection" data-sheet="collection" aria-label="Your collection">
+          <div class="sheet-head">
+            <span class="sheet-grip" aria-hidden="true"></span>
             <h3>Your collection</h3>
+            <button class="sheet-close ghost" type="button" data-sheet-close aria-label="Close">✕</button>
+          </div>
+          <div class="sheet-body">
             <div class="stats">
               <div>
                 <span id="caughtCount">0</span>
@@ -141,8 +176,20 @@
               <button type="button" id="expandAllBtn" class="ghost toolbar-btn" aria-pressed="false">Expand all</button>
             </div>
             <div id="collection" class="collection"></div>
-          </article>
-        </div>
+          </div>
+        </section>
+
+        <section class="sheet hidden" id="sheet-feed" data-sheet="feed" aria-label="World feed">
+          <div class="sheet-head">
+            <span class="sheet-grip" aria-hidden="true"></span>
+            <h3>World feed</h3>
+            <button class="sheet-close ghost" type="button" data-sheet-close aria-label="Close">✕</button>
+          </div>
+          <div class="sheet-body">
+            <p class="sheet-sub">Fresh catches from all trainers.</p>
+            <ul id="feedList" class="feed"></ul>
+          </div>
+        </section>
       </section>
     </main>
 
