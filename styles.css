@@ -937,9 +937,18 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
   inset: 0;
   background: rgba(4, 9, 20, 0.8);
   backdrop-filter: blur(8px);
-  display: grid;
-  place-items: center;
+  /* Flex + margin:auto centers when it fits and stays fully scrollable
+     (incl. the footer) when the card is taller than a short phone. */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow-y: auto;
   z-index: 10;
+  box-sizing: border-box;
+  padding:
+    calc(env(safe-area-inset-top, 0px) + 8px)
+    10px
+    calc(env(safe-area-inset-bottom, 0px) + 8px);
 }
 
 .challenge-card {
@@ -949,11 +958,20 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
   background: linear-gradient(180deg, rgba(35, 45, 83, 0.92), rgba(7, 11, 20, 0.94));
   padding: 1.1rem;
   box-shadow: 0 20px 80px rgba(0, 0, 0, 0.5);
+  /* Never exceed the visible viewport; arena flexes, footer stays put. */
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  max-height: calc(100vh - 16px);
+  max-height: calc(100dvh - 16px);
 }
 
 .arena {
   margin: .9rem 0;
-  height: 360px;
+  flex: 1 1 auto;
+  min-height: 150px;
+  max-height: 56vh;
   position: relative;
   overflow: hidden;
   border-radius: 14px;
@@ -975,7 +993,8 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
 .catch-canvas:active { cursor: grabbing; }
 
 .spin-challenge .arena.spin-arena {
-  height: 380px;
+  flex-basis: 380px;
+  min-height: 220px;
   background:
     radial-gradient(circle at 50% 50%, rgba(124, 240, 198, .12), transparent 55%),
     radial-gradient(circle at 18% 22%, rgba(181, 124, 255, .22), transparent 40%),
@@ -1296,7 +1315,7 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
 }
 
 /* ---------- Training challenge ---------- */
-.training-challenge .training-arena { height: 360px; }
+.training-challenge .training-arena { flex-basis: 360px; min-height: 200px; }
 .training-challenge .train-help {
   margin: .1rem 0 .6rem;
   color: var(--muted);
@@ -1322,11 +1341,14 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
 .train-heart.full {
   color: #ff5d7a;
   text-shadow: 0 0 6px rgba(255, 93, 122, .65);
+  opacity: 1;
 }
+/* A lost heart drains to a flat grey with no glow — unmistakable at a glance. */
 .train-heart.empty {
-  color: rgba(255, 255, 255, .22);
+  color: #3c465f;
   text-shadow: none;
-  transform: scale(.82);
+  opacity: .55;
+  transform: scale(.78);
 }
 .training-challenge .hits-meter.hp-low,
 .train-hp.hp-low { animation: heartLowPulse 1s ease-in-out infinite; }
@@ -1354,7 +1376,11 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
   display: flex;
   justify-content: flex-end;
   gap: .6rem;
+  flex: none; /* footer (Forfeit/Continue) must never get squeezed off-screen */
 }
+/* Catch's bare cancel button is a direct flex child — keep it visible too. */
+.challenge-card > .cancel,
+.challenge-card > .status { flex: none; }
 .training-footer .primary {
   background: linear-gradient(90deg, #6df0c4, #4bb7ff);
   color: #031423;
@@ -1363,7 +1389,7 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
 .training-footer .hidden { display: none; }
 
 /* ---------- Battle stage ---------- */
-.battle-challenge .battle-arena { height: 360px; }
+.battle-challenge .battle-arena { flex-basis: 360px; min-height: 200px; }
 .battle-card-wrap { width: min(760px, 96vw); }
 .battle-title { text-align: center; margin: .2rem 0 .4rem; }
 .battle-roster {
@@ -1520,7 +1546,7 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
   .cards { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
   .battle-site-marker { width: 78px; }
   .training-challenge .training-arena,
-  .battle-challenge .battle-arena { height: 300px; }
+  .battle-challenge .battle-arena { flex-basis: 300px; min-height: 170px; }
 }
 
 /* === Instance / trading additions === */
