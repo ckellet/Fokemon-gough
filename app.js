@@ -473,6 +473,9 @@ const el = {
   feedTickerTrack: $("feedTickerTrack"),
   catchBadge: $("catchBadge"),
   sheetScrim: $("sheetScrim"),
+  splash: $("splash"),
+  splashStart: $("splashStart"),
+  musicToggle: $("musicToggle"),
 };
 
 let locationGranted = false;
@@ -8193,10 +8196,149 @@ if (el.tradeBtn) {
 }
 
 
+// ---------- Soundtrack ----------------------------------------------------
+// Two-track playlist that ping-pongs at low volume so the synthesised SFX
+// (battle, catch, capture) still sit on top. Browser autoplay policy means
+// we can only call .play() after a user gesture — the splash "Tap to begin"
+// is that gesture. Preference persists in localStorage.
+const MUSIC_TRACKS = ["audio/fokemon-trail-1.mp3", "audio/fokemon-trail-2.mp3"];
+const MUSIC_VOL = 0.28;
+const MUSIC_PREF_KEY = "fokemon_music_enabled";
+const music = (() => {
+  const audio = typeof Audio === "function" ? new Audio() : null;
+  if (audio) {
+    audio.preload = "auto";
+    audio.volume = MUSIC_VOL;
+    audio.crossOrigin = "anonymous";
+  }
+  let trackIdx = 0;
+  let enabled = true;
+  try {
+    const stored = localStorage.getItem(MUSIC_PREF_KEY);
+    if (stored === "0") enabled = false;
+  } catch {}
+  let unlocked = false;
+
+  function load(idx) {
+    if (!audio) return;
+    trackIdx = (idx + MUSIC_TRACKS.length) % MUSIC_TRACKS.length;
+    audio.src = MUSIC_TRACKS[trackIdx];
+  }
+  function attemptPlay() {
+    if (!audio || !enabled || !unlocked) return;
+    const p = audio.play();
+    if (p && typeof p.catch === "function") p.catch(() => {});
+  }
+  if (audio) {
+    audio.addEventListener("ended", () => {
+      load(trackIdx + 1);
+      attemptPlay();
+    });
+    // Network/decoding errors shouldn't break the splash flow — just skip to
+    // the next track and let the user mute if both files are missing.
+    audio.addEventListener("error", () => {
+      if (trackIdx < MUSIC_TRACKS.length - 1) {
+        load(trackIdx + 1);
+        attemptPlay();
+      }
+    });
+    load(0);
+  }
+
+  function fadeTo(target, ms = 280) {
+    if (!audio) return;
+    const start = audio.volume;
+    const t0 = performance.now();
+    function step(now) {
+      const k = Math.min(1, (now - t0) / ms);
+      audio.volume = start + (target - start) * k;
+      if (k < 1) requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+  }
+
+  return {
+    unlock() {
+      if (unlocked) return;
+      unlocked = true;
+      if (audio) audio.volume = 0;
+      attemptPlay();
+      if (enabled) fadeTo(MUSIC_VOL);
+    },
+    enable() {
+      enabled = true;
+      try { localStorage.setItem(MUSIC_PREF_KEY, "1"); } catch {}
+      if (!audio) return;
+      attemptPlay();
+      fadeTo(MUSIC_VOL);
+    },
+    disable() {
+      enabled = false;
+      try { localStorage.setItem(MUSIC_PREF_KEY, "0"); } catch {}
+      if (!audio) return;
+      fadeTo(0, 220);
+      setTimeout(() => { if (!enabled) audio.pause(); }, 260);
+    },
+    isEnabled() { return enabled; },
+  };
+})();
+
+function syncMusicToggleUI() {
+  const btn = el.musicToggle;
+  if (!btn) return;
+  const on = music.isEnabled();
+  btn.setAttribute("aria-pressed", on ? "true" : "false");
+  btn.setAttribute("aria-label", on ? "Mute soundtrack" : "Unmute soundtrack");
+  btn.title = on ? "Mute soundtrack" : "Unmute soundtrack";
+}
+syncMusicToggleUI();
+
+if (el.musicToggle) {
+  el.musicToggle.addEventListener("click", () => {
+    if (music.isEnabled()) music.disable();
+    else music.enable();
+    syncMusicToggleUI();
+  });
+}
+
+// ---------- Splash dismiss -----------------------------------------------
+// The splash sits over everything until the user taps. That tap is both the
+// audio-unlock gesture and the bridge into the existing auth/game flow.
+function dismissSplash() {
+  const splash = el.splash;
+  if (!splash || splash.dataset.dismissed === "1") return;
+  splash.dataset.dismissed = "1";
+  music.unlock();
+  splash.classList.add("is-leaving");
+  setTimeout(() => {
+    splash.remove();
+    if (el.auth) el.auth.classList.remove("hidden");
+    if (profile?.name) enterGame();
+  }, 560);
+}
+if (el.splashStart) el.splashStart.addEventListener("click", dismissSplash);
+if (el.splash) {
+  el.splash.addEventListener("click", (ev) => {
+    if (ev.target === el.splashStart) return;
+    dismissSplash();
+  });
+  el.splash.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" || ev.key === " ") {
+      ev.preventDefault();
+      dismissSplash();
+    }
+  });
+}
+
 initGun();
 initAppShell();
 
-if (profile?.name) enterGame();
+// If no splash element exists (e.g. older cached markup), fall back to the
+// original auto-enter behaviour so trainers aren't stuck on a blank screen.
+if (!el.splash) {
+  if (el.auth) el.auth.classList.remove("hidden");
+  if (profile?.name) enterGame();
+}
 
 if (typeof setInterval === "function") {
   setInterval(() => {
