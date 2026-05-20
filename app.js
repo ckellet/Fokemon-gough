@@ -7513,6 +7513,7 @@ function tradeMiniCard(offer, opts = {}) {
   const colors = colorsFor(card);
   const b = offer.boosts || {};
   const trained = (b.hp || 0) + (b.atk || 0) + (b.def || 0) + (b.spd || 0);
+  const hp = (card.hp ?? 0) + (b.hp || 0);
   const si = speciesIndexForInstance(offer.uid);
   const dex = si && si.total > 1 ? ` <span class="tcard-dex">#${si.idx}</span>` : "";
   return `
@@ -7521,7 +7522,10 @@ function tradeMiniCard(offer, opts = {}) {
       <span class="tcard-glare"></span>
       <header class="tcard-head">
         <strong>${escapeHtml(card.name)}${dex}</strong>
-        <span class="type-pill" style="background:${colors.accent};color:#061226;">${escapeHtml(card.type)}</span>
+        <span class="tcard-head-meta">
+          <span class="tcard-hp" title="Hit Points"><b>${hp}</b><em>HP</em></span>
+          <span class="type-pill" style="background:${colors.accent};color:#061226;">${escapeHtml(card.type)}</span>
+        </span>
       </header>
       <canvas class="tcard-art" data-card="${escapeHtml(card.id)}" width="260" height="150" aria-hidden="true"></canvas>
       ${instanceStatRowsHtml(card, offer.boosts)}
@@ -7541,20 +7545,23 @@ function tradePickCardHtml(entry) {
   const power = instancePower(entry);
   const b = entry.boosts || {};
   const trained = (b.hp || 0) + (b.atk || 0) + (b.def || 0) + (b.spd || 0);
+  const hp = (card.hp ?? 0) + (b.hp || 0);
   const si = speciesIndexForInstance(entry.uid);
   const dex = si && si.total > 1 ? ` <span class="tcard-dex">#${si.idx}</span>` : "";
   return `
     <button type="button" class="tcard tcard-pick rarity-${card.rarity || "common"}" data-uid="${escapeHtml(entry.uid)}" style="--type-light:${colors.light};--type-dark:${colors.dark};--type-accent:${colors.accent};">
       <span class="tcard-foil"></span>
       <span class="tcard-glare"></span>
-      <span class="tcard-power">⚡ ${power}</span>
       <header class="tcard-head">
         <strong>${escapeHtml(card.name)}${dex}</strong>
-        <span class="type-pill" style="background:${colors.accent};color:#061226;">${escapeHtml(card.type)}</span>
+        <span class="tcard-head-meta">
+          <span class="tcard-hp" title="Hit Points"><b>${hp}</b><em>HP</em></span>
+          <span class="type-pill" style="background:${colors.accent};color:#061226;">${escapeHtml(card.type)}</span>
+        </span>
       </header>
       <canvas class="tcard-art" data-card="${escapeHtml(card.id)}" width="260" height="140" aria-hidden="true"></canvas>
       ${instanceStatRowsHtml(card, entry.boosts)}
-      <span class="tcard-send">${trained ? `★ +${trained} · ` : ""}Tap to send →</span>
+      <span class="tcard-send"><span class="tcard-power-inline">⚡ ${power}</span>${trained ? ` · ★ +${trained}` : ""} · Tap →</span>
     </button>`;
 }
 
