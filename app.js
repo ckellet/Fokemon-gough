@@ -27,13 +27,23 @@ import {
   deployedInstanceAtSite,
   mergeBoosts,
   normalizeBoosts,
+  serializeTradeOffer,
+  parseTradeOffer,
   COLLECTION_SORTS,
   groupCollection,
   flattenCollectionGroups,
+  mergeTrainerLocation,
+  TRADE_DISCOVERY_TTL_MS,
+  PRESENCE_TTL_MS,
 } from "./app.logic.js";
 
 const TRADE_RANGE_METERS = 200;
 const TRADE_REQUEST_TTL_MS = 5 * 60 * 1000;
+// Idle trainers publish a lightweight {lat,lng,ts} heartbeat this often so
+// they stay discoverable for trading even when not catching anything. One
+// node per trainer, written with .put() (overwrite, not .set()/append), so
+// presence never grows the datastore the way the events feed would.
+const PRESENCE_HEARTBEAT_MS = 45 * 1000;
 
 const SPAWN_INTERVAL_MS = 3 * 60 * 1000;
 const MAX_SPAWNS = 4;
@@ -135,6 +145,8 @@ let gridCaughtNode = null;
 let lastGridKey = null;
 let battleSitesNode = null;
 let battleEventsNode = null;
+let presenceNode = null;
+let lastPresenceSentAt = 0;
 
 const cards = [
   // Electric ----------------------------------------------------------------
@@ -458,6 +470,10 @@ const el = {
   ballCount: $("ballCount"),
   tradeBtn: $("tradeBtn"),
   tradeBadge: $("tradeIncomingBadge"),
+  feedTicker: $("feedTicker"),
+  feedTickerTrack: $("feedTickerTrack"),
+  catchBadge: $("catchBadge"),
+  sheetScrim: $("sheetScrim"),
 };
 
 let locationGranted = false;
@@ -752,22 +768,6 @@ function statBars(card) {
   `;
 }
 
-function pickerStatsHtml(card, boosts) {
-  const rows = [
-    ["HP", card.hp ?? 0, boosts?.hp || 0],
-    ["ATK", card.atk ?? 0, boosts?.atk || 0],
-    ["DEF", card.def ?? 0, boosts?.def || 0],
-    ["SPD", card.spd ?? 0, boosts?.spd || 0],
-  ];
-  return `
-    <div class="picker-stats" aria-hidden="false">
-      ${rows.map(([label, base, boost]) => `
-        <span><span>${label}</span><b>${base + boost}${boost ? `<span class="stat-boost">+${boost}</span>` : ""}</b></span>
-      `).join("")}
-    </div>
-  `;
-}
-
 function instanceStatRowsHtml(card, boosts) {
   const rows = [
     ["HP", card.hp ?? 0, boosts?.hp || 0, 140],
@@ -939,6 +939,7 @@ function cardViewerHtml(view) {
   const power = instancePower(entry);
   const tier = powerTier(power);
   const rarity = card.rarity || "common";
+  const typeClass = `type-${String(card.type || "spirit").toLowerCase()}`;
   const trained = (entry.boosts?.hp || 0) + (entry.boosts?.atk || 0) + (entry.boosts?.def || 0) + (entry.boosts?.spd || 0);
   const deployed = !!entry.deployedAt;
   const deployedLabel = deployed ? battleSiteName(entry.deployedAt) : "";
@@ -946,7 +947,7 @@ function cardViewerHtml(view) {
   const stat = (label, base, boost) => `
     <div><span>${base + (boost || 0)}${boost ? `<small class="stat-boost"> +${boost}</small>` : ""}</span><small>${label}</small></div>`;
   return `
-    <div class="cv-card rarity-${escapeHtml(rarity)}"
+    <div class="cv-card rarity-${escapeHtml(rarity)} ${typeClass}"
          style="--cv-edge:${colors.accent};--cv-glow:${colors.accent}55;"
          data-uid="${escapeHtml(entry.uid)}" tabindex="0">
       <div class="cv-flipper">
@@ -1036,19 +1037,47 @@ function renderCardViewer() {
   }
 }
 
-// Apply card rotation, and derive the foil highlight position from the
-// resulting angle (a notional fixed overhead light reflecting off the tilted
-// card) rather than from the cursor — so the sheen sweeps with the card's
-// orientation instead of sitting glued under the pointer.
-function setViewerOrientation(rx, ry) {
+// Drive the holographic layers from a tilt angle (a notional overhead light
+// reflecting off the card) rather than the raw cursor, so the foil and glare
+// sweep with the card's orientation.
+//   --mx/--my : glare focal point (the bright "wet" highlight)
+//   --bx/--by : rainbow-foil sweep position. Repeating bands — no convergence
+//               point — and the resting value is deliberately OFF-centre so
+//               the foil never shows a seam parked mid-card on load.
+//   --fc      : 0..1 distance-from-rest, used to swell the glare on tilt.
+function setViewerHolo(rx, ry) {
   if (!cvCardEl) return;
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const mx = clamp(50 - ry * 1.8, 12, 88);
+  const my = clamp(34 + rx * 1.8, 10, 84);
+  const bx = clamp(30 - ry * 4.6, -45, 135);
+  const by = clamp(26 + rx * 4.6, -45, 135);
+  const fc = clamp(Math.hypot(rx, ry) / 15, 0, 1);
+  const s = cvCardEl.style;
+  s.setProperty("--mx", `${mx.toFixed(1)}%`);
+  s.setProperty("--my", `${my.toFixed(1)}%`);
+  s.setProperty("--bx", `${bx.toFixed(1)}%`);
+  s.setProperty("--by", `${by.toFixed(1)}%`);
+  s.setProperty("--fc", fc.toFixed(3));
+}
+
+// Pointer/mouse tilt (desktop): the screen is stationary, so the card itself
+// rotates in 3D and the sheen follows.
+function setViewerOrientation(rx, ry) {
+  if (!cvCardEl) return;
   cvCardEl.style.setProperty("--rx", `${rx.toFixed(2)}deg`);
   cvCardEl.style.setProperty("--ry", `${ry.toFixed(2)}deg`);
-  const mx = clamp(50 - ry * 1.8, 15, 85);
-  const my = clamp(32 + rx * 1.8, 12, 78);
-  cvCardEl.style.setProperty("--mx", `${mx.toFixed(1)}%`);
-  cvCardEl.style.setProperty("--my", `${my.toFixed(1)}%`);
+  setViewerHolo(rx, ry);
+}
+
+// Phone-tilt (gyro): the screen is already moving in the user's hand, so
+// rotating the card on top of that is double motion. Keep the card flat and
+// let only the hologram travel with the phone's position.
+function setViewerTiltHolo(rx, ry) {
+  if (!cvCardEl) return;
+  cvCardEl.style.setProperty("--rx", "0deg");
+  cvCardEl.style.setProperty("--ry", "0deg");
+  setViewerHolo(rx, ry);
 }
 
 function applyViewerTilt(clientX, clientY) {
@@ -1204,7 +1233,8 @@ function initCardViewer() {
       if (ev.gamma == null || ev.beta == null) return;
       const ry = Math.max(-14, Math.min(14, ev.gamma * 0.45));
       const rx = Math.max(-14, Math.min(14, (ev.beta - 45) * 0.3));
-      setViewerOrientation(-rx, ry);
+      // Card stays flat on gyro — only the hologram tracks the phone.
+      setViewerTiltHolo(-rx, ry);
     });
   };
   const DOE = typeof window !== "undefined" ? window.DeviceOrientationEvent : null;
@@ -1224,16 +1254,59 @@ function initCardViewer() {
 }
 
 function renderFeed() {
-  if (!el.feedList) return;
   const ordered = [...recentEvents].sort((a, b) => b.ts - a.ts).slice(0, 20);
-  el.feedList.innerHTML = ordered
-    .map((e) => `<li><strong>${escapeHtml(e.trainer)}</strong> caught ${escapeHtml(e.card)}</li>`)
+  if (el.feedList) {
+    el.feedList.innerHTML = ordered
+      .map((e) => `<li><strong>${escapeHtml(e.trainer)}</strong> caught ${escapeHtml(e.card)}</li>`)
+      .join("");
+  }
+  renderFeedTicker(ordered);
+}
+
+// The ambient bottom-edge ticker — a glanceable crawl of recent global
+// catches. Tapping it opens the full feed sheet (see initAppShell).
+function renderFeedTicker(ordered) {
+  if (!el.feedTicker || !el.feedTickerTrack) return;
+  if (!ordered || !ordered.length) {
+    el.feedTicker.classList.add("hidden");
+    el.feedTickerTrack.innerHTML = "";
+    return;
+  }
+  const recent = ordered.slice(0, 12);
+  const run = recent
+    .map((e) => `<span><strong>${escapeHtml(e.trainer)}</strong> caught ${escapeHtml(e.card)}</span>`)
     .join("");
+  // Duplicate the run so the -50% scroll keyframe loops seamlessly.
+  el.feedTickerTrack.innerHTML = run + run;
+  // Keep the scroll speed roughly constant regardless of content length.
+  const chars = recent.reduce((n, e) => n + e.trainer.length + e.card.length + 9, 0);
+  el.feedTicker.style.setProperty("--ticker-dur", `${Math.max(16, Math.round(chars * 0.32))}s`);
+  el.feedTicker.classList.remove("hidden");
+}
+
+// Count of uncaught spawns currently within catch range — drives the
+// badge on the "Catch" bottom-nav button.
+function renderCatchBadge() {
+  if (!el.catchBadge) return;
+  let n = 0;
+  if (playerLocation) {
+    for (const p of currentPlacements) {
+      if (gridCaughtIds.has(p.card.id)) continue;
+      if (distanceMeters(playerLocation, { lat: p.lat, lng: p.lng }) <= CATCH_RANGE_METERS) n++;
+    }
+  }
+  if (n > 0) {
+    el.catchBadge.textContent = String(n);
+    el.catchBadge.classList.remove("hidden");
+  } else {
+    el.catchBadge.classList.add("hidden");
+  }
 }
 
 function renderCards() {
-  if (!el.cardsList) return;
   ensureFreshPlacements();
+  renderCatchBadge();
+  if (!el.cardsList) return;
   const availablePlacements = currentPlacements.filter(
     (p) => !gridCaughtIds.has(p.card.id)
   );
@@ -1578,7 +1651,7 @@ function renderMap() {
   if (showNearby) {
     for (const [name, pos] of trainerLocations) {
       if (name === profile?.name) continue;
-      if (Date.now() - pos.ts > 30 * 60 * 1000) continue;
+      if (Date.now() - pos.ts > PRESENCE_TTL_MS) continue;
       seenTrainers.add(name);
       let marker = trainerMarkers.get(name);
       if (!marker) {
@@ -2616,6 +2689,224 @@ function launchCatchChallenge(card, placement) {
   const REST_OFFSET = { x: 0, y: -(NET_RADIUS + 8) };
   const RESTING = { x: ANCHOR.x + REST_OFFSET.x, y: ANCHOR.y + REST_OFFSET.y };
 
+  // ---------- juice: audio (synthesized, no asset files) ----------
+  let audioCtx = null;
+  function ensureAudio() {
+    try {
+      if (!audioCtx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return;
+        audioCtx = new AC();
+      }
+      if (audioCtx.state === "suspended") audioCtx.resume();
+    } catch {
+      audioCtx = null;
+    }
+  }
+  function tone({ freq = 440, freqEnd = freq, dur = 0.12, type = "triangle", vol = 0.1, delay = 0 }) {
+    if (!audioCtx) return;
+    const t0 = audioCtx.currentTime + delay;
+    const osc = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t0);
+    if (freqEnd !== freq) osc.frequency.exponentialRampToValueAtTime(Math.max(1, freqEnd), t0 + dur);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.linearRampToValueAtTime(vol, t0 + 0.006);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(g).connect(audioCtx.destination);
+    osc.start(t0);
+    osc.stop(t0 + dur + 0.03);
+  }
+  function noiseBurst({ dur = 0.18, vol = 0.16, filter = 1400 }) {
+    if (!audioCtx) return;
+    const t0 = audioCtx.currentTime;
+    const frames = Math.max(1, Math.floor(audioCtx.sampleRate * dur));
+    const buf = audioCtx.createBuffer(1, frames, audioCtx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < frames; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / frames);
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    const f = audioCtx.createBiquadFilter();
+    f.type = "lowpass";
+    f.frequency.value = filter;
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(vol, t0);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    src.connect(f).connect(g).connect(audioCtx.destination);
+    src.start(t0);
+    src.stop(t0 + dur);
+  }
+  const sfx = {
+    throw() { tone({ freq: 320, freqEnd: 720, dur: 0.13, type: "triangle", vol: 0.08 }); },
+    hit() { tone({ freq: 190, freqEnd: 85, dur: 0.16, type: "square", vol: 0.11 }); noiseBurst({ dur: 0.07, vol: 0.09, filter: 2400 }); },
+    block() { tone({ freq: 135, freqEnd: 80, dur: 0.12, type: "square", vol: 0.08 }); },
+    smash() { noiseBurst({ dur: 0.26, vol: 0.2, filter: 1100 }); tone({ freq: 95, freqEnd: 48, dur: 0.18, type: "sawtooth", vol: 0.06 }); },
+    miss() { tone({ freq: 300, freqEnd: 150, dur: 0.22, type: "sine", vol: 0.05 }); },
+    dodge() { tone({ freq: 620, freqEnd: 1150, dur: 0.1, type: "sine", vol: 0.045 }); },
+    capture() { [523, 659, 784, 1047].forEach((f, i) => tone({ freq: f, dur: 0.17, type: "triangle", vol: 0.1, delay: i * 0.085 })); },
+  };
+
+  // ---------- juice: screen shake ----------
+  let shakeMag = 0;
+  function addShake(m) { shakeMag = Math.min(10, Math.max(shakeMag, m)); }
+
+  // ---------- juice: particles ----------
+  const particles = [];
+  const rings = [];
+  function addParticle(p) {
+    particles.push(p);
+    if (particles.length > 150) particles.splice(0, particles.length - 150);
+  }
+  function spawnSplinters(x, y, count = 14) {
+    for (let i = 0; i < count; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = 70 + Math.random() * 190;
+      addParticle({
+        x, y,
+        vx: Math.cos(a) * sp,
+        vy: Math.sin(a) * sp - 90,
+        g: 640,
+        life: 0.45 + Math.random() * 0.4, maxLife: 0.85,
+        w: 3 + Math.random() * 4, h: 6 + Math.random() * 8,
+        rot: Math.random() * Math.PI, vr: (Math.random() - 0.5) * 16,
+        color: Math.random() < 0.5 ? "#b08148" : "#7a5230",
+        shape: "rect",
+      });
+    }
+  }
+  function spawnSparks(x, y, color = "#ffe27a") {
+    for (let i = 0; i < 13; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = 90 + Math.random() * 230;
+      addParticle({
+        x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, g: 130,
+        life: 0.22 + Math.random() * 0.3, maxLife: 0.52,
+        size: 1.6 + Math.random() * 2.6, color, shape: "spark",
+      });
+    }
+  }
+  function spawnConfetti(x, y) {
+    const cols = ["#7cf0c6", "#ffe27a", "#ff9c70", "#8fb4ff", "#ff8d9e", "#b57cff"];
+    for (let i = 0; i < 36; i++) {
+      const a = -Math.PI / 2 + (Math.random() - 0.5) * 2.5;
+      const sp = 140 + Math.random() * 250;
+      addParticle({
+        x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, g: 520, drag: 0.55,
+        sway: Math.random() * Math.PI * 2, swaySp: 4 + Math.random() * 4,
+        life: 0.9 + Math.random() * 0.8, maxLife: 1.7,
+        w: 4 + Math.random() * 4, h: 7 + Math.random() * 5,
+        rot: Math.random() * Math.PI, vr: (Math.random() - 0.5) * 18,
+        color: cols[i % cols.length], shape: "rect",
+      });
+    }
+  }
+  function spawnDust(x, y) {
+    for (let i = 0; i < 5; i++) {
+      const a = -Math.PI / 2 + (Math.random() - 0.5) * 2;
+      const sp = 20 + Math.random() * 50;
+      addParticle({
+        x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, g: 60,
+        life: 0.3 + Math.random() * 0.25, maxLife: 0.55,
+        size: 2.2 + Math.random() * 2.8, color: "rgba(196, 176, 140, 0.7)", shape: "spark",
+      });
+    }
+  }
+  function spawnRing(x, y) { rings.push({ x, y, r: 6, life: 0.5, maxLife: 0.5 }); }
+  function updateParticles(dt) {
+    for (const p of particles) {
+      p.life -= dt;
+      if (p.drag) p.vx *= 1 - p.drag * dt;
+      p.vy += (p.g || 0) * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      if (p.sway != null) { p.sway += p.swaySp * dt; p.x += Math.sin(p.sway) * 24 * dt; }
+      if (p.vr) p.rot += p.vr * dt;
+    }
+    for (let i = particles.length - 1; i >= 0; i--) if (particles[i].life <= 0) particles.splice(i, 1);
+    for (const rg of rings) { rg.life -= dt; rg.r += 230 * dt; }
+    for (let i = rings.length - 1; i >= 0; i--) if (rings[i].life <= 0) rings.splice(i, 1);
+    if (shakeMag > 0) shakeMag = Math.max(0, shakeMag - dt * 42);
+  }
+  function drawParticles() {
+    for (const rg of rings) {
+      const k = rg.life / rg.maxLife;
+      ctx.save();
+      ctx.globalAlpha = k * 0.7;
+      ctx.strokeStyle = "#7cf0c6";
+      ctx.lineWidth = 3 * k + 0.5;
+      ctx.beginPath();
+      ctx.arc(rg.x, rg.y, rg.r, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+    for (const p of particles) {
+      const k = Math.max(0, Math.min(1, p.life / p.maxLife));
+      ctx.save();
+      ctx.globalAlpha = k;
+      if (p.shape === "spark") {
+        ctx.globalCompositeOperation = "lighter";
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size * (0.4 + k * 0.6), 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        ctx.translate(p.x, p.y);
+        ctx.rotate(p.rot);
+        ctx.fillStyle = p.color;
+        ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h);
+      }
+      ctx.restore();
+    }
+  }
+
+  // ---------- juice: ball trail + near-miss tracking ----------
+  const trail = [];
+  let minMiss = Infinity;
+
+  // ---------- scene: layered animated background ----------
+  let elapsed = 0;
+  let bumpCd = 0;
+  const GROUND_Y = Math.max(FLOOR_Y - 34, H * 0.78);
+  const stars = [];
+  for (let i = 0, n = Math.round(W / 11); i < n; i++) {
+    stars.push({
+      x: Math.random() * W,
+      y: Math.random() * (GROUND_Y * 0.66),
+      r: 0.5 + Math.random() * 1.5,
+      ph: Math.random() * Math.PI * 2,
+      sp: 0.8 + Math.random() * 2.4,
+    });
+  }
+  const hillFar = { base: GROUND_Y - 56, amp: 24, k: 0.011, phase: Math.random() * 6, color: "rgba(46, 60, 104, 0.45)" };
+  const hillNear = { base: GROUND_Y - 26, amp: 18, k: 0.019, phase: Math.random() * 6, color: "rgba(30, 42, 78, 0.65)" };
+  const tufts = [];
+  for (let x = 6; x < W; x += 18 + Math.random() * 12) {
+    const c = Math.random();
+    tufts.push({
+      x,
+      h: 7 + Math.random() * 13,
+      ph: Math.random() * Math.PI * 2,
+      color: c < 0.4 ? "rgba(124, 240, 198, 0.55)" : c < 0.7 ? "rgba(96, 210, 178, 0.5)" : "rgba(150, 255, 220, 0.45)",
+    });
+  }
+  const motes = [];
+  for (let i = 0, n = Math.round(W / 24); i < n; i++) {
+    motes.push({
+      x: Math.random() * W,
+      y: Math.random() * H,
+      r: 0.8 + Math.random() * 1.8,
+      sp: 7 + Math.random() * 16,
+      ph: Math.random() * Math.PI * 2,
+    });
+  }
+  function updateScene(dt) {
+    for (const m of motes) {
+      m.y -= m.sp * dt;
+      if (m.y < -6) { m.y = H + 6; m.x = Math.random() * W; }
+    }
+  }
+
   const movementMode = movementFor(card);
   const movementProfile = MOVEMENT_PROFILES[movementMode];
   const startBand = movementProfile.bandY || [0.4, 0.55];
@@ -2692,7 +2983,8 @@ function launchCatchChallenge(card, placement) {
   const FINAL_WORDS = ["GOTCHA!", "K.O.!", "SNARE!", "CAUGHT!"];
   const SMASH_WORDS = ["SMASH!", "CRACK!", "SHATTER!", "KRAKK!"];
   const BLOCK_WORDS = ["THUD!", "BONK!", "KLANG!", "CLUNK!"];
-  const COMIC_COLORS = { hit: "#ffe27a", final: "#7cf0c6", smash: "#ff9c70", block: "#cdd6f0" };
+  const NEAR_WORDS = ["SO CLOSE!", "WHIFF!", "JUST MISSED!", "ALMOST!", "EEK, MISSED!"];
+  const COMIC_COLORS = { hit: "#ffe27a", final: "#7cf0c6", smash: "#ff9c70", block: "#cdd6f0", near: "#ffd27c" };
   function pickWord(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 
   const comicTexts = [];
@@ -2771,8 +3063,14 @@ function launchCatchChallenge(card, placement) {
       o.broken = true;
       o.breakTime = 0.55;
       popComic(pickWord(SMASH_WORDS), o.x, o.y - o.h / 2 - 6, "smash");
+      spawnSplinters(o.x, o.y, 18);
+      addShake(4.6);
+      sfx.smash();
     } else {
       popComic(pickWord(BLOCK_WORDS), o.x, o.y - o.h / 2 - 6, "block");
+      spawnSplinters(o.x, o.y, 6);
+      addShake(2.4);
+      sfx.block();
     }
   }
   function updateObstacles(dt) {
@@ -2789,6 +3087,13 @@ function launchCatchChallenge(card, placement) {
   }
   function drawObstacle(o) {
     const fade = o.broken ? Math.max(0, o.breakTime / 0.55) : 1;
+    ctx.save();
+    ctx.globalAlpha = fade * 0.26;
+    ctx.fillStyle = "#000";
+    ctx.beginPath();
+    ctx.ellipse(o.x, FLOOR_Y - 2, o.w * 0.55, 5, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
     const rot = o.broken ? (1 - fade) * 0.6 : 0;
     const shakeX = o.shakeTime > 0 ? (Math.random() - 0.5) * 4 * (o.shakeTime / 0.25) : 0;
     ctx.save();
@@ -2879,6 +3184,7 @@ function launchCatchChallenge(card, placement) {
 
   function onDown(e) {
     if (finished || projectile || fokeBalls <= 0) return;
+    ensureAudio();
     const p = getPointer(e);
     const dx = p.x - RESTING.x;
     const dy = p.y - RESTING.y;
@@ -2929,6 +3235,10 @@ function launchCatchChallenge(card, placement) {
       vx: pullDx * POWER,
       vy: pullDy * POWER,
     };
+    trail.length = 0;
+    minMiss = Infinity;
+    ensureAudio();
+    sfx.throw();
     aiming = null;
     dodgeArmed = !fokemon.caught && Math.random() < DODGE_CHANCE;
     dodgeTriggered = false;
@@ -3025,9 +3335,63 @@ function launchCatchChallenge(card, placement) {
     fokemon.turnCd = 0;
   }
 
+  // Keep the fokemon out of the crates so they act as real cover.
+  function resolveObstacleCollision() {
+    const R = fokemon.r * 0.62;
+    for (const o of obstacles) {
+      if (o.broken) continue;
+      const left = o.x - o.w / 2;
+      const right = o.x + o.w / 2;
+      const top = o.y - o.h / 2;
+      const bottom = o.y + o.h / 2;
+      const cx = Math.max(left, Math.min(fokemon.x, right));
+      const cy = Math.max(top, Math.min(fokemon.y, bottom));
+      const dx = fokemon.x - cx;
+      const dy = fokemon.y - cy;
+      const d2 = dx * dx + dy * dy;
+      if (d2 >= R * R) continue;
+
+      if (d2 > 0.001) {
+        const d = Math.sqrt(d2);
+        const push = R - d;
+        fokemon.x += (dx / d) * push;
+        fokemon.y += (dy / d) * push;
+        if (Math.abs(dx) > Math.abs(dy)) {
+          fokemon.vx = (dx > 0 ? 1 : -1) * Math.abs(fokemon.vx || 60);
+        } else {
+          fokemon.targetY = fokemon.y;
+        }
+      } else {
+        // Center buried inside the crate: eject along the shallowest face.
+        const pl = fokemon.x - left;
+        const pr = right - fokemon.x;
+        const pt = fokemon.y - top;
+        const pb = bottom - fokemon.y;
+        let m = Math.min(pl, pr, pt, pb);
+        if (m === pl && left - R < FOKEMON_MIN_X) m = Math.min(pt, pb);
+        if (m === pl) { fokemon.x = left - R; fokemon.vx = -Math.abs(fokemon.vx || 60); }
+        else if (m === pr) { fokemon.x = right + R; fokemon.vx = Math.abs(fokemon.vx || 60); }
+        else if (m === pt) { fokemon.y = top - R; fokemon.targetY = fokemon.y; }
+        else { fokemon.y = bottom + R; fokemon.targetY = fokemon.y; }
+      }
+
+      if (fokemon.jumpState === "air") {
+        fokemon.jumpState = "rest";
+        fokemon.restTime = 0.14 + Math.random() * 0.2;
+      }
+      fokemon.turnCd = Math.min(fokemon.turnCd, 0.14);
+      if (bumpCd <= 0) {
+        spawnDust(cx, cy);
+        o.shakeTime = Math.max(o.shakeTime, 0.1);
+        bumpCd = 0.45;
+      }
+    }
+  }
+
   function step(dt) {
     fokemon.bobPhase += dt * 2.4;
     if (fokemon.flashTime > 0) fokemon.flashTime = Math.max(0, fokemon.flashTime - dt);
+    if (bumpCd > 0) bumpCd -= dt;
 
     if (!fokemon.caught) {
       if (fokemon.dodgeTime > 0) {
@@ -3037,6 +3401,9 @@ function launchCatchChallenge(card, placement) {
       } else {
         updateMovement(dt);
       }
+      resolveObstacleCollision();
+      fokemon.x = clampX(fokemon.x);
+      fokemon.y = Math.max(fokemon.r * 0.5, Math.min(FLOOR_Y - fokemon.r * 0.7, fokemon.y));
     } else {
       fokemon.captureScale = Math.max(0, fokemon.captureScale - dt * 2.4);
     }
@@ -3048,6 +3415,13 @@ function launchCatchChallenge(card, placement) {
       projectile.y += projectile.vy * dt;
 
       const bobY = fokemon.y + Math.sin(fokemon.bobPhase) * fokemon.bobAmp;
+
+      trail.push({ x: projectile.x, y: projectile.y });
+      if (trail.length > 16) trail.shift();
+      if (!fokemon.caught) {
+        const md = Math.hypot(projectile.x - fokemon.x, projectile.y - bobY);
+        if (md < minMiss) minMiss = md;
+      }
 
       for (const o of obstacles) {
         if (o.broken) continue;
@@ -3077,6 +3451,7 @@ function launchCatchChallenge(card, placement) {
           fokemon.dodgeVx = direction * DODGE_SPEED;
           fokemon.dodgeTime = DODGE_DURATION;
           dodgeTriggered = true;
+          sfx.dodge();
         }
       }
 
@@ -3089,6 +3464,11 @@ function launchCatchChallenge(card, placement) {
 
           if (fokemon.hitsLeft <= 0) {
             popComic(pickWord(FINAL_WORDS), fokemon.x, bobY - fokemon.r - 6, "final");
+            spawnConfetti(fokemon.x, bobY);
+            spawnSparks(fokemon.x, bobY, "#7cf0c6");
+            spawnRing(fokemon.x, bobY);
+            addShake(7);
+            sfx.capture();
             fokemon.caught = true;
             finished = true;
             outcome = "caught";
@@ -3102,6 +3482,9 @@ function launchCatchChallenge(card, placement) {
             return;
           }
           popComic(pickWord(HIT_WORDS), fokemon.x, bobY - fokemon.r - 6, "hit");
+          spawnSparks(fokemon.x, bobY, "#ffe27a");
+          addShake(3.6);
+          sfx.hit();
           projectile = null;
           relocateAfterHit();
           if (fokeBalls <= 0) {
@@ -3119,6 +3502,11 @@ function launchCatchChallenge(card, placement) {
 
       const offscreen = projectile.x < -40 || projectile.x > W + 40 || projectile.y > FLOOR_Y + NET_RADIUS;
       if (offscreen) {
+        if (!fokemon.caught && minMiss < fokemon.r + NET_RADIUS + 34) {
+          popComic(pickWord(NEAR_WORDS), fokemon.x, bobY - fokemon.r - 6, "near");
+          addShake(1.6);
+          sfx.miss();
+        }
         projectile = null;
         if (fokeBalls <= 0) {
           finished = true;
@@ -3133,20 +3521,110 @@ function launchCatchChallenge(card, placement) {
     }
   }
 
-  function drawBackground() {
-    ctx.clearRect(0, 0, W, H);
-    const grad = ctx.createLinearGradient(0, FLOOR_Y - 20, 0, H);
-    grad.addColorStop(0, "rgba(124, 240, 198, 0.05)");
-    grad.addColorStop(1, "rgba(124, 240, 198, 0.18)");
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, FLOOR_Y - 4, W, H - FLOOR_Y + 4);
-
-    ctx.strokeStyle = "rgba(143, 171, 255, 0.25)";
-    ctx.lineWidth = 1;
+  function drawHill(h) {
+    ctx.fillStyle = h.color;
     ctx.beginPath();
-    ctx.moveTo(0, FLOOR_Y);
-    ctx.lineTo(W, FLOOR_Y);
+    ctx.moveTo(-14, H);
+    for (let x = -14; x <= W + 14; x += 14) {
+      const y = h.base + Math.sin(x * h.k + h.phase) * h.amp + Math.sin(x * h.k * 2.3 + h.phase) * h.amp * 0.3;
+      ctx.lineTo(x, y);
+    }
+    ctx.lineTo(W + 14, H);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function drawBackground(time) {
+    ctx.clearRect(0, 0, W, H);
+
+    // Twinkling starfield (the .arena CSS nebula shows through behind it).
+    ctx.fillStyle = "#cfe0ff";
+    for (const s of stars) {
+      ctx.globalAlpha = (0.3 + 0.7 * (0.5 + 0.5 * Math.sin(time * s.sp + s.ph))) * 0.8;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // Parallax hill silhouettes for depth.
+    drawHill(hillFar);
+    drawHill(hillNear);
+
+    // Ground plane.
+    const grad = ctx.createLinearGradient(0, GROUND_Y - 8, 0, H);
+    grad.addColorStop(0, "rgba(22, 64, 74, 0.55)");
+    grad.addColorStop(0.18, "rgba(14, 42, 56, 0.88)");
+    grad.addColorStop(1, "rgba(6, 16, 30, 0.97)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(-16, GROUND_Y - 2, W + 32, H - GROUND_Y + 16);
+
+    // Receding perspective grid on the ground.
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, GROUND_Y, W, H - GROUND_Y);
+    ctx.clip();
+    ctx.strokeStyle = "rgba(124, 240, 198, 0.11)";
+    ctx.lineWidth = 1;
+    const vx = W * 0.5;
+    for (let i = -9; i <= 9; i++) {
+      ctx.beginPath();
+      ctx.moveTo(vx + i * (W * 0.055), GROUND_Y);
+      ctx.lineTo(vx + i * (W * 0.62), H + 24);
+      ctx.stroke();
+    }
+    const depth = H - GROUND_Y;
+    for (let r = 1; r <= 5; r++) {
+      const yy = GROUND_Y + Math.pow(r / 5, 1.7) * depth;
+      ctx.globalAlpha = 0.5;
+      ctx.beginPath();
+      ctx.moveTo(0, yy);
+      ctx.lineTo(W, yy);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+
+    // Glowing neon horizon line at the play floor.
+    ctx.save();
+    ctx.shadowColor = "rgba(124, 240, 198, 0.85)";
+    ctx.shadowBlur = 12;
+    ctx.strokeStyle = "rgba(168, 255, 224, 0.7)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, GROUND_Y);
+    ctx.lineTo(W, GROUND_Y);
     ctx.stroke();
+    ctx.restore();
+
+    // Swaying energy tufts along the floor.
+    ctx.lineWidth = 2;
+    ctx.lineCap = "round";
+    for (const t of tufts) {
+      const sway = Math.sin(time * 1.7 + t.ph) * 3.2;
+      ctx.strokeStyle = t.color;
+      ctx.beginPath();
+      ctx.moveTo(t.x, GROUND_Y + 1);
+      ctx.quadraticCurveTo(t.x + sway * 0.5, GROUND_Y - t.h * 0.6, t.x + sway, GROUND_Y - t.h);
+      ctx.stroke();
+    }
+
+    // Drifting ambient motes.
+    ctx.fillStyle = "#7cf0c6";
+    for (const m of motes) {
+      ctx.globalAlpha = 0.16 + 0.22 * (0.5 + 0.5 * Math.sin(time * 1.3 + m.ph));
+      ctx.beginPath();
+      ctx.arc(m.x + Math.sin(time * 0.6 + m.ph) * 10, m.y, m.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // Soft vignette to focus the action.
+    const vig = ctx.createRadialGradient(W / 2, H * 0.52, Math.min(W, H) * 0.34, W / 2, H * 0.52, Math.max(W, H) * 0.75);
+    vig.addColorStop(0, "rgba(0, 0, 0, 0)");
+    vig.addColorStop(1, "rgba(0, 0, 0, 0.45)");
+    ctx.fillStyle = vig;
+    ctx.fillRect(0, 0, W, H);
   }
 
   function drawSlingshot(netPos, inFlight) {
@@ -3222,6 +3700,21 @@ function launchCatchChallenge(card, placement) {
       ctx.arc(px, py, size, 0, Math.PI * 2);
       ctx.fill();
     }
+  }
+
+  function drawBallTrail() {
+    if (trail.length < 2) return;
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    for (let i = 0; i < trail.length; i++) {
+      const k = i / trail.length;
+      ctx.globalAlpha = k * 0.5;
+      ctx.fillStyle = "#7cf0c6";
+      ctx.beginPath();
+      ctx.arc(trail[i].x, trail[i].y, NET_RADIUS * (0.22 + k * 0.55), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
   }
 
   function drawFokemon() {
@@ -3310,15 +3803,25 @@ function launchCatchChallenge(card, placement) {
   }
 
   function draw() {
-    drawBackground();
-    drawObstacles();
+    drawBackground(elapsed);
+
+    const sx = shakeMag > 0 ? (Math.random() * 2 - 1) * shakeMag : 0;
+    const sy = shakeMag > 0 ? (Math.random() * 2 - 1) * shakeMag : 0;
+    ctx.save();
+    ctx.translate(sx, sy);
+
     drawFokemon();
+    drawObstacles();
 
     const netPos = projectile ? projectile : netRestPosition();
     drawSlingshot(netPos, !!projectile);
     drawTrajectory();
+    if (projectile) drawBallTrail();
     drawNet(netPos, !!projectile);
+    drawParticles();
     drawComicTexts();
+
+    ctx.restore();
   }
 
   let lastTime = performance.now();
@@ -3327,8 +3830,11 @@ function launchCatchChallenge(card, placement) {
     if (!document.body.contains(challenge)) return;
     const dt = Math.min(0.033, (now - lastTime) / 1000);
     lastTime = now;
+    elapsed += dt;
     updateObstacles(dt);
     updateComicTexts(dt);
+    updateParticles(dt);
+    updateScene(dt);
     if (!finished || (fokemon.caught && fokemon.captureScale > 0)) step(dt);
     draw();
     rafId = requestAnimationFrame(loop);
@@ -3672,6 +4178,111 @@ function launchPoiSpinner(poi) {
   let bursts = [];
   let stopped = false;
 
+  // ---------- juice: audio (synthesized, no asset files) ----------
+  let audioCtx = null;
+  function ensureAudio() {
+    try {
+      if (!audioCtx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return;
+        audioCtx = new AC();
+      }
+      if (audioCtx.state === "suspended") audioCtx.resume();
+    } catch {
+      audioCtx = null;
+    }
+  }
+  function tone({ freq = 440, freqEnd = freq, dur = 0.12, type = "triangle", vol = 0.1, delay = 0 }) {
+    if (!audioCtx) return;
+    const t0 = audioCtx.currentTime + delay;
+    const osc = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t0);
+    if (freqEnd !== freq) osc.frequency.exponentialRampToValueAtTime(Math.max(1, freqEnd), t0 + dur);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.linearRampToValueAtTime(vol, t0 + 0.006);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(g).connect(audioCtx.destination);
+    osc.start(t0);
+    osc.stop(t0 + dur + 0.03);
+  }
+  function noiseBurst({ dur = 0.18, vol = 0.16, filter = 1400 }) {
+    if (!audioCtx) return;
+    const t0 = audioCtx.currentTime;
+    const frames = Math.max(1, Math.floor(audioCtx.sampleRate * dur));
+    const buf = audioCtx.createBuffer(1, frames, audioCtx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < frames; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / frames);
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    const f = audioCtx.createBiquadFilter();
+    f.type = "lowpass";
+    f.frequency.value = filter;
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(vol, t0);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    src.connect(f).connect(g).connect(audioCtx.destination);
+    src.start(t0);
+    src.stop(t0 + dur);
+  }
+  const sfx = {
+    tick(strength = 1) { tone({ freq: 220 + strength * 360, dur: 0.04, type: "square", vol: 0.018 + strength * 0.03 }); },
+    lock() { tone({ freq: 520, freqEnd: 760, dur: 0.14, type: "triangle", vol: 0.06 }); },
+    ball() { [659, 880, 1175].forEach((f, i) => tone({ freq: f, dur: 0.14, type: "triangle", vol: 0.085, delay: i * 0.06 })); },
+    empty() { [523, 659, 784, 1047, 1319].forEach((f, i) => tone({ freq: f, dur: 0.2, type: "triangle", vol: 0.1, delay: i * 0.09 })); noiseBurst({ dur: 0.2, vol: 0.05, filter: 3200 }); },
+  };
+
+  // ---------- juice: particles + screen shake ----------
+  const particles = [];
+  let shakeMag = 0;
+  function addShake(m) { shakeMag = Math.min(10, Math.max(shakeMag, m)); }
+  function spawnBallBurst(cx, cy) {
+    const cols = ["#7cf0c6", "#ffe27a", "#8fb4ff", "#ff8d9e", "#ffffff"];
+    for (let i = 0; i < 26; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = 110 + Math.random() * 240;
+      particles.push({
+        x: cx, y: cy,
+        vx: Math.cos(a) * sp,
+        vy: Math.sin(a) * sp - 60,
+        g: 420,
+        life: 0.45 + Math.random() * 0.5, maxLife: 0.95,
+        size: 1.8 + Math.random() * 2.8,
+        color: cols[i % cols.length],
+      });
+    }
+    if (particles.length > 220) particles.splice(0, particles.length - 220);
+  }
+  function updateParticles(dt) {
+    for (const p of particles) {
+      p.life -= dt;
+      p.vy += (p.g || 0) * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vx *= 0.97;
+    }
+    for (let i = particles.length - 1; i >= 0; i--) if (particles[i].life <= 0) particles.splice(i, 1);
+    if (shakeMag > 0) shakeMag = Math.max(0, shakeMag - dt * 40);
+  }
+  function drawParticles() {
+    for (const p of particles) {
+      const k = Math.max(0, Math.min(1, p.life / p.maxLife));
+      ctx.save();
+      ctx.globalAlpha = k;
+      ctx.globalCompositeOperation = "lighter";
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size * (0.4 + k * 0.6), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  const SPOKES = 6;
+  let lastDetent = 0;
+  let wasAboveThreshold = false;
+
   function setStatus(html) {
     if (html !== undefined) status.innerHTML = html;
     else {
@@ -3703,10 +4314,15 @@ function launchPoiSpinner(poi) {
     collected += 1;
     addFokeBalls(1);
     pushBurst();
+    sfx.ball();
+    spawnBallBurst(CX, CY);
+    addShake(4);
     if (readoutBalls) readoutBalls.textContent = String(collected);
     if (readoutBag) readoutBag.textContent = String(fokeBalls);
     if (collected >= MAX_POI_REWARD) {
       // Cache fully drained — mark spent now.
+      sfx.empty();
+      addShake(8);
       finalizeSpent();
       setStatus();
     }
@@ -3722,6 +4338,7 @@ function launchPoiSpinner(poi) {
 
   function onDown(e) {
     if (stopped) return;
+    ensureAudio();
     const p = getPointer(e);
     const dx = p.x - CX;
     const dy = p.y - CY;
@@ -3814,6 +4431,22 @@ function launchPoiSpinner(poi) {
       theta += omega * dt;
     }
     const absO = Math.abs(omega);
+
+    // Ratchet click as each spoke passes the top — pitch/volume track speed.
+    const detentSize = (Math.PI * 2) / SPOKES;
+    const detent = Math.floor(theta / detentSize);
+    if (detent !== lastDetent && absO > 0.35) {
+      lastDetent = detent;
+      sfx.tick(Math.min(1, absO / MAX_OMEGA));
+    } else if (detent !== lastDetent) {
+      lastDetent = detent;
+    }
+
+    // "Locked in" chime when first crossing the speed line.
+    const above = absO >= THRESHOLD && collected < MAX_POI_REWARD;
+    if (above && !wasAboveThreshold) sfx.lock();
+    wasAboveThreshold = above;
+
     if (absO >= THRESHOLD && collected < MAX_POI_REWARD) {
       revAccum += absO * dt;
       aboveSince += dt;
@@ -3831,12 +4464,11 @@ function launchPoiSpinner(poi) {
       return b.t < b.life;
     });
 
+    updateParticles(dt);
     setStatus();
   }
 
   function drawWheel() {
-    ctx.clearRect(0, 0, W, H);
-
     // Speed-line indicator ring outside the wheel
     const speedPct = Math.min(1, Math.abs(omega) / (THRESHOLD * 1.6));
     const ringR = R + 14;
@@ -3959,7 +4591,14 @@ function launchPoiSpinner(poi) {
   }
 
   function draw() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.save();
+    if (shakeMag > 0) {
+      ctx.translate((Math.random() - 0.5) * shakeMag, (Math.random() - 0.5) * shakeMag);
+    }
     drawWheel();
+    drawParticles();
+    ctx.restore();
   }
 
   function closeChallenge() {
@@ -4008,11 +4647,11 @@ function launchTraining(site, champion) {
         <span class="hits-meter"><span class="meta-label">HP</span><span class="train-hp"></span></span>
         <span class="hits-meter"><span class="meta-label">Reps</span><span class="train-score">0</span></span>
       </div>
-      <p class="train-help">Drag your Fokemon to dodge incoming trainer-balls. Survive as long as you can — each near-miss earns training reps. Boost stats when the drill ends.</p>
+      <p class="train-help">Drag to dodge the trainer-balls — an amber ⚠ flash warns which edge each one fires from. Grab the glowing 💚 FokéFood to refill your hearts. Each near-miss earns reps; boost stats when the drill ends.</p>
       <div class="arena training-arena">
         <canvas class="training-canvas" aria-label="Training arena"></canvas>
       </div>
-      <p class="status" aria-live="polite">Drag your fighter. Avoid the balls!</p>
+      <p class="status" aria-live="polite">Drag to dodge • watch the edge warnings • grab FokéFood to heal</p>
       <div class="training-footer">
         <button class="ghost cancel">Stop drill</button>
       </div>
@@ -4044,6 +4683,7 @@ function launchTraining(site, champion) {
   let hp = hpMax;
   let score = 0;
   let stopped = false;
+  let dying = 0;
   let dragging = false;
   let totalElapsed = 0;
   let nextSpawnIn = 1.4;
@@ -4053,9 +4693,169 @@ function launchTraining(site, champion) {
   const balls = [];
   const sparks = [];
   const comicTexts = [];
+  const telegraphs = [];
+  const particles = [];
+  const rings = [];
+  let food = null;
+  let foodTimer = 9 + Math.random() * 4;
+  const FOOD_R = 14;
+  let shakeMag = 0;
+  let hitFlash = 0;
 
-  function setHpText() {
-    if (hpEl) hpEl.textContent = `${hp}/${hpMax}`;
+  // ---------- juice: audio (synthesized, no asset files) ----------
+  let audioCtx = null;
+  function ensureAudio() {
+    try {
+      if (!audioCtx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return;
+        audioCtx = new AC();
+      }
+      if (audioCtx.state === "suspended") audioCtx.resume();
+    } catch {
+      audioCtx = null;
+    }
+  }
+  function tone({ freq = 440, freqEnd = freq, dur = 0.12, type = "triangle", vol = 0.1, delay = 0 }) {
+    if (!audioCtx) return;
+    const t0 = audioCtx.currentTime + delay;
+    const osc = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t0);
+    if (freqEnd !== freq) osc.frequency.exponentialRampToValueAtTime(Math.max(1, freqEnd), t0 + dur);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.linearRampToValueAtTime(vol, t0 + 0.006);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(g).connect(audioCtx.destination);
+    osc.start(t0);
+    osc.stop(t0 + dur + 0.03);
+  }
+  function noiseBurst({ dur = 0.18, vol = 0.16, filter = 1400 }) {
+    if (!audioCtx) return;
+    const t0 = audioCtx.currentTime;
+    const frames = Math.max(1, Math.floor(audioCtx.sampleRate * dur));
+    const buf = audioCtx.createBuffer(1, frames, audioCtx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < frames; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / frames);
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    const f = audioCtx.createBiquadFilter();
+    f.type = "lowpass";
+    f.frequency.value = filter;
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(vol, t0);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    src.connect(f).connect(g).connect(audioCtx.destination);
+    src.start(t0);
+    src.stop(t0 + dur);
+  }
+  const sfx = {
+    warn() { tone({ freq: 940, freqEnd: 1180, dur: 0.07, type: "sine", vol: 0.03 }); },
+    incoming() { tone({ freq: 680, freqEnd: 300, dur: 0.16, type: "sine", vol: 0.045 }); },
+    hit() { tone({ freq: 175, freqEnd: 78, dur: 0.17, type: "square", vol: 0.12 }); noiseBurst({ dur: 0.08, vol: 0.1, filter: 2200 }); },
+    whiff() { tone({ freq: 520, freqEnd: 920, dur: 0.1, type: "sine", vol: 0.04 }); },
+    streak() { [660, 880].forEach((f, i) => tone({ freq: f, dur: 0.12, type: "triangle", vol: 0.07, delay: i * 0.07 })); },
+    food() { [523, 659, 880].forEach((f, i) => tone({ freq: f, dur: 0.15, type: "triangle", vol: 0.09, delay: i * 0.08 })); },
+    ko() { noiseBurst({ dur: 0.32, vol: 0.18, filter: 900 }); tone({ freq: 210, freqEnd: 55, dur: 0.4, type: "sawtooth", vol: 0.08 }); },
+  };
+
+  // ---------- juice: screen shake + particles ----------
+  function addShake(m) { shakeMag = Math.min(12, Math.max(shakeMag, m)); }
+  function addParticle(p) {
+    particles.push(p);
+    if (particles.length > 160) particles.splice(0, particles.length - 160);
+  }
+  function spawnBurst(x, y, color, count = 14, opts = {}) {
+    const spread = opts.spread ?? 240;
+    const up = opts.up ?? 0;
+    for (let i = 0; i < count; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = 60 + Math.random() * spread;
+      addParticle({
+        x, y,
+        vx: Math.cos(a) * sp,
+        vy: Math.sin(a) * sp - up,
+        g: opts.g ?? 0,
+        life: 0.3 + Math.random() * (opts.life ?? 0.4), maxLife: 0.7,
+        size: 1.6 + Math.random() * 2.6,
+        color, shape: opts.shape ?? "spark",
+      });
+    }
+  }
+  function spawnRing(x, y, color) { rings.push({ x, y, r: 6, life: 0.45, maxLife: 0.45, color }); }
+  function updateParticles(dt) {
+    for (const p of particles) {
+      p.life -= dt;
+      p.vy += (p.g || 0) * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vx *= 0.96;
+      p.vy *= 0.96;
+    }
+    for (let i = particles.length - 1; i >= 0; i--) if (particles[i].life <= 0) particles.splice(i, 1);
+    for (const rg of rings) { rg.life -= dt; rg.r += 200 * dt; }
+    for (let i = rings.length - 1; i >= 0; i--) if (rings[i].life <= 0) rings.splice(i, 1);
+    if (shakeMag > 0) shakeMag = Math.max(0, shakeMag - dt * 46);
+    if (hitFlash > 0) hitFlash = Math.max(0, hitFlash - dt * 2.4);
+  }
+  function drawParticles() {
+    for (const rg of rings) {
+      const k = rg.life / rg.maxLife;
+      ctx.save();
+      ctx.globalAlpha = k * 0.7;
+      ctx.strokeStyle = rg.color;
+      ctx.lineWidth = 3 * k + 0.5;
+      ctx.beginPath();
+      ctx.arc(rg.x, rg.y, rg.r, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+    for (const p of particles) {
+      const k = Math.max(0, Math.min(1, p.life / p.maxLife));
+      ctx.save();
+      ctx.globalAlpha = k;
+      ctx.globalCompositeOperation = "lighter";
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size * (0.4 + k * 0.6), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  // ---------- scene: drifting ambient motes ----------
+  const motes = [];
+  for (let i = 0, n = Math.round(W / 26); i < n; i++) {
+    motes.push({
+      x: Math.random() * W,
+      y: Math.random() * H,
+      r: 0.8 + Math.random() * 1.7,
+      sp: 6 + Math.random() * 14,
+      ph: Math.random() * Math.PI * 2,
+    });
+  }
+  function updateScene(dt) {
+    for (const m of motes) {
+      m.y -= m.sp * dt;
+      if (m.y < -6) { m.y = H + 6; m.x = Math.random() * W; }
+    }
+  }
+
+  function setHpText(healed) {
+    if (!hpEl) return;
+    let html = "";
+    for (let i = 0; i < hpMax; i++) {
+      html += `<span class="train-heart ${i < hp ? "full" : "empty"}" aria-hidden="true">♥</span>`;
+    }
+    hpEl.innerHTML = html;
+    hpEl.setAttribute("aria-label", `${hp} of ${hpMax} hearts`);
+    hpEl.classList.toggle("hp-low", hp <= 1 && hp > 0);
+    if (healed) {
+      hpEl.classList.remove("heal");
+      void hpEl.offsetWidth; // restart the pulse animation
+      hpEl.classList.add("heal");
+    }
   }
   setHpText();
 
@@ -4079,6 +4879,7 @@ function launchTraining(site, champion) {
 
   function onDown(e) {
     if (stopped) return;
+    ensureAudio();
     const p = getPointer(e);
     const dx = p.x - fokePos.x;
     const dy = p.y - fokePos.y;
@@ -4108,32 +4909,94 @@ function launchTraining(site, champion) {
   canvas.addEventListener("pointerup", onUp);
   canvas.addEventListener("pointercancel", onUp);
 
+  // Spawning is telegraphed: a warning marker + aim line flashes at the edge
+  // for ~0.5s before the ball actually appears, so you always know where it's
+  // coming from even when your hand is over that edge.
   function spawnBall(dt) {
     nextSpawnIn -= dt;
     if (nextSpawnIn > 0) return;
     nextSpawnIn = spawnInterval;
     const edge = Math.floor(Math.random() * 4);
-    let x, y;
-    if (edge === 0) { x = Math.random() * W; y = -20; }
-    else if (edge === 1) { x = W + 20; y = Math.random() * H; }
-    else if (edge === 2) { x = Math.random() * W; y = H + 20; }
-    else { x = -20; y = Math.random() * H; }
+    let x, y, mx, my;
+    if (edge === 0) { x = Math.random() * W; y = -20; mx = clamp(x, 20, W - 20); my = 18; }
+    else if (edge === 1) { x = W + 20; y = Math.random() * H; mx = W - 18; my = clamp(y, 20, H - 20); }
+    else if (edge === 2) { x = Math.random() * W; y = H + 20; mx = clamp(x, 20, W - 20); my = H - 18; }
+    else { x = -20; y = Math.random() * H; mx = 18; my = clamp(y, 20, H - 20); }
     const targetJitterX = (Math.random() - 0.5) * 90;
     const targetJitterY = (Math.random() - 0.5) * 90;
     const tx = fokePos.x + targetJitterX;
     const ty = fokePos.y + targetJitterY;
     const dx = tx - x;
     const dy = ty - y;
-    const dist = Math.hypot(dx, dy);
+    const dist = Math.hypot(dx, dy) || 1;
     const speed = 230 + difficulty * 90 + Math.random() * 80;
-    balls.push({
-      x, y,
+    const warn = Math.max(0.42, 0.62 - difficulty * 0.06);
+    telegraphs.push({
+      x, y, mx, my, tx, ty,
       vx: (dx / dist) * speed,
       vy: (dy / dist) * speed,
-      r: 11,
-      passed: false,
-      spin: Math.random() * Math.PI * 2,
+      ux: dx / dist, uy: dy / dist,
+      warn, maxWarn: warn,
     });
+    sfx.warn();
+  }
+
+  function updateTelegraphs(dt) {
+    for (const t of telegraphs) t.warn -= dt;
+    for (let i = telegraphs.length - 1; i >= 0; i--) {
+      const t = telegraphs[i];
+      if (t.warn <= 0) {
+        balls.push({
+          x: t.x, y: t.y,
+          vx: t.vx, vy: t.vy,
+          r: 11,
+          passed: false,
+          spin: Math.random() * Math.PI * 2,
+          trail: [],
+        });
+        sfx.incoming();
+        telegraphs.splice(i, 1);
+      }
+    }
+  }
+
+  function spawnFood() {
+    const margin = PLAYER_R * 2.4;
+    let fx = 0, fy = 0;
+    for (let tries = 0; tries < 12; tries++) {
+      fx = margin + Math.random() * (W - margin * 2);
+      fy = margin + Math.random() * (H - margin * 2);
+      if (Math.hypot(fx - fokePos.x, fy - fokePos.y) > PLAYER_R * 3.2) break;
+    }
+    food = { x: fx, y: fy, life: 7.5, maxLife: 7.5, pulse: Math.random() * Math.PI * 2 };
+  }
+
+  function updateFood(dt) {
+    if (!food) {
+      foodTimer -= dt;
+      if (foodTimer <= 0) { spawnFood(); foodTimer = 15 + Math.random() * 7; }
+      return;
+    }
+    food.life -= dt;
+    food.pulse += dt * 5;
+    if (food.life <= 0) { food = null; return; }
+    if (Math.hypot(food.x - fokePos.x, food.y - fokePos.y) < PLAYER_R + FOOD_R + 6) {
+      if (hp < hpMax) {
+        const before = hp;
+        hp = hpMax; // FokéFood tops you back up to full
+        setHpText(true);
+        popComic(hpMax - before > 1 ? "FULL HEAL!" : "YUM! +1 HP", food.x, food.y - FOOD_R - 8, "#7cf0c6");
+      } else {
+        score += 3;
+        if (scoreEl) scoreEl.textContent = String(score);
+        popComic("YUM! +3", food.x, food.y - FOOD_R - 8, "#ffe27a");
+      }
+      spawnBurst(food.x, food.y, "#7cf0c6", 20, { spread: 200, life: 0.5 });
+      spawnRing(food.x, food.y, "#7cf0c6");
+      addShake(2.2);
+      sfx.food();
+      food = null;
+    }
   }
 
   function updateBalls(dt) {
@@ -4141,6 +5004,10 @@ function launchTraining(site, champion) {
       b.x += b.vx * dt;
       b.y += b.vy * dt;
       b.spin += dt * 8;
+      if (b.trail) {
+        b.trail.push({ x: b.x, y: b.y });
+        if (b.trail.length > 9) b.trail.shift();
+      }
       const dx = b.x - fokePos.x;
       const dy = b.y - fokePos.y;
       const dist = Math.hypot(dx, dy);
@@ -4151,7 +5018,18 @@ function launchTraining(site, champion) {
         setHpText();
         popComic("HIT!", fokePos.x, fokePos.y - PLAYER_R - 8, "#ff8ca6");
         popSparks(fokePos.x, fokePos.y, "#ff8ca6");
-        if (hp <= 0) endDrill("ko");
+        spawnBurst(fokePos.x, fokePos.y, "#ff8ca6", 18, { spread: 260, life: 0.45 });
+        spawnRing(fokePos.x, fokePos.y, "#ff8ca6");
+        hitFlash = 1;
+        if (hp <= 0) {
+          addShake(9);
+          spawnBurst(fokePos.x, fokePos.y, "#ffd27c", 26, { spread: 320, life: 0.6 });
+          sfx.ko();
+          dying = 0.85;
+        } else {
+          addShake(5);
+          sfx.hit();
+        }
       } else if (!b.passed && dist < PLAYER_R + 38 && (b.vx * dx + b.vy * dy) > 0) {
         // ball just whizzed past
         b.passed = true;
@@ -4159,8 +5037,11 @@ function launchTraining(site, champion) {
         if (scoreEl) scoreEl.textContent = String(score);
         if (score % 5 === 0) {
           popComic("STREAK!", fokePos.x, fokePos.y - PLAYER_R - 4, "#ffe27a");
+          spawnRing(fokePos.x, fokePos.y, "#ffe27a");
+          sfx.streak();
         } else {
           popComic("WHIFF!", b.x, b.y, "#7cf0c6");
+          sfx.whiff();
         }
         popSparks(b.x, b.y, "#7cf0c6");
       }
@@ -4190,29 +5071,204 @@ function launchTraining(site, champion) {
 
   function step(dt) {
     if (stopped) return;
+    if (dying > 0) {
+      dying -= dt;
+      updateScene(dt);
+      updateParticles(dt);
+      updateFx(dt);
+      if (dying <= 0) endDrill("ko");
+      return;
+    }
     totalElapsed += dt;
     difficulty = Math.min(2.4, totalElapsed / 18);
     spawnInterval = Math.max(0.35, 1.35 - difficulty * 0.32);
     spawnBall(dt);
+    updateTelegraphs(dt);
     updateBalls(dt);
+    updateFood(dt);
+    updateScene(dt);
+    updateParticles(dt);
     updateFx(dt);
   }
 
-  function drawBackground() {
-    ctx.fillStyle = "rgba(7, 11, 22, 0.6)";
+  function drawBackground(time) {
+    // Translucent base so the .arena nebula glows through.
+    ctx.fillStyle = "rgba(7, 11, 22, 0.55)";
     ctx.fillRect(0, 0, W, H);
-    // floor grid lines for cartoon vibe
-    ctx.strokeStyle = "rgba(124, 240, 198, 0.08)";
+
+    const cx = W / 2;
+    const cy = H / 2;
+
+    // Soft floor glow under the action.
+    const fl = ctx.createRadialGradient(cx, cy, 10, cx, cy, Math.max(W, H) * 0.62);
+    fl.addColorStop(0, "rgba(124, 240, 198, 0.10)");
+    fl.addColorStop(1, "rgba(124, 240, 198, 0)");
+    ctx.fillStyle = fl;
+    ctx.fillRect(0, 0, W, H);
+
+    // Slowly scrolling grid for motion.
+    const off = (time * 13) % 40;
+    ctx.strokeStyle = "rgba(124, 240, 198, 0.07)";
     ctx.lineWidth = 1;
-    for (let x = 0; x < W; x += 40) {
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+    ctx.beginPath();
+    for (let x = -40 + off; x < W; x += 40) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
+    for (let y = -40 + off; y < H; y += 40) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
+    ctx.stroke();
+
+    // Concentric dojo target rings, gently pulsing.
+    const baseR = Math.min(W, H) * 0.5;
+    for (let i = 0; i < 4; i++) {
+      const pr = baseR * (0.26 + i * 0.22) + Math.sin(time * 1.4 + i) * 4;
+      ctx.strokeStyle = `rgba(143, 171, 255, ${0.1 - i * 0.018})`;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(cx, cy, pr, 0, Math.PI * 2);
+      ctx.stroke();
     }
-    for (let y = 0; y < H; y += 40) {
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+
+    // Corner accent glows.
+    for (const [gx, gy, gc] of [
+      [0, 0, "rgba(181, 124, 255, 0.16)"],
+      [W, 0, "rgba(75, 183, 255, 0.16)"],
+      [0, H, "rgba(75, 183, 255, 0.14)"],
+      [W, H, "rgba(181, 124, 255, 0.14)"],
+    ]) {
+      const cg = ctx.createRadialGradient(gx, gy, 0, gx, gy, Math.min(W, H) * 0.42);
+      cg.addColorStop(0, gc);
+      cg.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.fillStyle = cg;
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    // Drifting ambient motes.
+    ctx.fillStyle = "#7cf0c6";
+    for (const m of motes) {
+      ctx.globalAlpha = 0.14 + 0.2 * (0.5 + 0.5 * Math.sin(time * 1.3 + m.ph));
+      ctx.beginPath();
+      ctx.arc(m.x + Math.sin(time * 0.6 + m.ph) * 9, m.y, m.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // Vignette.
+    const vig = ctx.createRadialGradient(cx, cy, Math.min(W, H) * 0.34, cx, cy, Math.max(W, H) * 0.72);
+    vig.addColorStop(0, "rgba(0,0,0,0)");
+    vig.addColorStop(1, "rgba(0,0,0,0.42)");
+    ctx.fillStyle = vig;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  function drawTelegraphs() {
+    for (const t of telegraphs) {
+      const k = 1 - t.warn / t.maxWarn; // 0 -> 1 as it nears firing
+      const pulse = 0.45 + 0.55 * Math.abs(Math.sin(t.warn * 16));
+      ctx.save();
+
+      // Faint aim line from the spawn edge toward the target.
+      ctx.globalAlpha = 0.18 + 0.32 * k;
+      ctx.strokeStyle = "#ffb24d";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([6, 7]);
+      ctx.beginPath();
+      ctx.moveTo(t.mx, t.my);
+      ctx.lineTo(t.mx + t.ux * (90 + 120 * k), t.my + t.uy * (90 + 120 * k));
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Pulsing warning chevron at the edge, pointing inward.
+      const ang = Math.atan2(t.uy, t.ux);
+      ctx.translate(t.mx, t.my);
+      ctx.rotate(ang);
+      ctx.globalAlpha = 0.5 + 0.5 * pulse;
+      ctx.fillStyle = "#ff9c40";
+      ctx.shadowColor = "rgba(255, 156, 64, 0.9)";
+      ctx.shadowBlur = 10;
+      const s = 9 + 5 * pulse;
+      for (let c = 0; c < 2; c++) {
+        const ox = c * 8;
+        ctx.beginPath();
+        ctx.moveTo(ox - 4, -s);
+        ctx.lineTo(ox + s - 4, 0);
+        ctx.lineTo(ox - 4, s);
+        ctx.lineTo(ox - 1, 0);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.restore();
     }
   }
 
+  function drawFood() {
+    if (!food) return;
+    const blink = food.life < 1.6 ? (Math.sin(food.life * 22) > -0.1 ? 1 : 0.18) : 1;
+    if (!blink) return;
+    const pulse = 1 + Math.sin(food.pulse) * 0.08;
+    const r = FOOD_R * pulse;
+    ctx.save();
+    ctx.globalAlpha = blink;
+    ctx.translate(food.x, food.y);
+
+    // Halo.
+    const halo = ctx.createRadialGradient(0, 0, r * 0.5, 0, 0, r * 2.1);
+    halo.addColorStop(0, "rgba(124, 240, 198, 0.5)");
+    halo.addColorStop(1, "rgba(124, 240, 198, 0)");
+    ctx.fillStyle = halo;
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 2.1, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Berry body (warm green/gold — clearly friendly vs the red trainer-balls).
+    const body = ctx.createRadialGradient(-r * 0.3, -r * 0.35, r * 0.2, 0, 0, r);
+    body.addColorStop(0, "#b6f5c8");
+    body.addColorStop(0.55, "#5fd39a");
+    body.addColorStop(1, "#2f9d63");
+    ctx.fillStyle = body;
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(7, 30, 20, 0.55)";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Leaf.
+    ctx.fillStyle = "#8be86b";
+    ctx.beginPath();
+    ctx.ellipse(r * 0.18, -r * 1.05, r * 0.42, r * 0.22, -0.7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "#3aa64a";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, -r * 0.9);
+    ctx.lineTo(r * 0.05, -r * 1.18);
+    ctx.stroke();
+
+    // Heart glyph to read as "heal".
+    ctx.fillStyle = "rgba(255, 255, 255, 0.92)";
+    const hs = r * 0.42;
+    ctx.beginPath();
+    ctx.moveTo(0, hs * 0.55);
+    ctx.bezierCurveTo(hs * 1.1, -hs * 0.35, hs * 0.45, -hs * 1.05, 0, -hs * 0.35);
+    ctx.bezierCurveTo(-hs * 0.45, -hs * 1.05, -hs * 1.1, -hs * 0.35, 0, hs * 0.55);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.restore();
+  }
+
   function drawBall(b) {
+    if (b.trail && b.trail.length > 1) {
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter";
+      for (let i = 0; i < b.trail.length; i++) {
+        const k = i / b.trail.length;
+        ctx.globalAlpha = k * 0.4;
+        ctx.fillStyle = "#ff8ca6";
+        ctx.beginPath();
+        ctx.arc(b.trail[i].x, b.trail[i].y, b.r * (0.3 + k * 0.6), 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
     ctx.save();
     ctx.translate(b.x, b.y);
     ctx.rotate(b.spin);
@@ -4281,11 +5337,30 @@ function launchTraining(site, champion) {
 
   function draw() {
     ctx.clearRect(0, 0, W, H);
-    drawBackground();
+    drawBackground(totalElapsed);
+
+    const sx = shakeMag > 0 ? (Math.random() * 2 - 1) * shakeMag : 0;
+    const sy = shakeMag > 0 ? (Math.random() * 2 - 1) * shakeMag : 0;
+    ctx.save();
+    ctx.translate(sx, sy);
+    drawTelegraphs();
+    drawFood();
     drawSparks();
     for (const b of balls) drawBall(b);
     drawPlayer();
+    drawParticles();
     drawComicTexts();
+    ctx.restore();
+
+    // Edge danger flash when hit (screen space, not shaken).
+    if (hitFlash > 0) {
+      const a = Math.min(1, hitFlash) * 0.5;
+      const eg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.max(W, H) * 0.62);
+      eg.addColorStop(0, "rgba(255, 60, 90, 0)");
+      eg.addColorStop(1, `rgba(255, 60, 90, ${a})`);
+      ctx.fillStyle = eg;
+      ctx.fillRect(0, 0, W, H);
+    }
   }
 
   let last = performance.now();
@@ -4437,21 +5512,23 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
   challenge.className = "catch-challenge battle-challenge";
   challenge.innerHTML = `
     <div class="challenge-card battle-card-wrap" role="dialog" aria-modal="true" aria-label="Battle">
-      <p class="eyebrow">Foké Battle</p>
-      <h3 class="battle-title">${escapeHtml(challengerCard.name)} vs ${escapeHtml(champCard.name)}</h3>
       <div class="battle-roster">
         <div class="roster-side challenger">
-          <p class="roster-label">Challenger • ${escapeHtml(profile?.name || "You")}</p>
-          <p class="roster-name">${escapeHtml(challengerCard.name)} <span class="type-pill" style="background:${colorsFor(challengerCard).accent};color:#061226;">${escapeHtml(challengerCard.type)}</span></p>
+          <div class="roster-top">
+            <span class="roster-name">${escapeHtml(challengerCard.name)} <span class="type-pill" style="background:${colorsFor(challengerCard).accent};color:#061226;">${escapeHtml(challengerCard.type)}</span></span>
+            <small class="hp-text challenger-hp-text">${attackerStats.hp} / ${attackerStats.hp}</small>
+          </div>
           <div class="hp-bar"><div class="hp-fill challenger-hp" style="width:100%"></div></div>
-          <small class="hp-text challenger-hp-text">${attackerStats.hp} / ${attackerStats.hp}</small>
+          <p class="roster-label">${escapeHtml(profile?.name || "You")}</p>
         </div>
         <span class="vs-pill">VS</span>
         <div class="roster-side defender">
-          <p class="roster-label">Champion • ${escapeHtml(championBefore.trainer)}</p>
-          <p class="roster-name">${escapeHtml(champCard.name)} <span class="type-pill" style="background:${colorsFor(champCard).accent};color:#061226;">${escapeHtml(champCard.type)}</span></p>
+          <div class="roster-top">
+            <span class="roster-name">${escapeHtml(champCard.name)} <span class="type-pill" style="background:${colorsFor(champCard).accent};color:#061226;">${escapeHtml(champCard.type)}</span></span>
+            <small class="hp-text defender-hp-text">${defenderStats.hp} / ${defenderStats.hp}</small>
+          </div>
           <div class="hp-bar"><div class="hp-fill defender-hp" style="width:100%"></div></div>
-          <small class="hp-text defender-hp-text">${defenderStats.hp} / ${defenderStats.hp}</small>
+          <p class="roster-label">${escapeHtml(championBefore.trainer)}</p>
         </div>
       </div>
       <div class="arena battle-arena">
@@ -4524,6 +5601,90 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
   const sparks = [];
   let screenShake = 0;
   let flashWhole = 0;
+
+  // ---------- juice: audio (synthesized, no asset files) ----------
+  let audioCtx = null;
+  function ensureAudio() {
+    try {
+      if (!audioCtx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return;
+        audioCtx = new AC();
+      }
+      if (audioCtx.state === "suspended") audioCtx.resume();
+    } catch {
+      audioCtx = null;
+    }
+  }
+  function tone({ freq = 440, freqEnd = freq, dur = 0.12, type = "triangle", vol = 0.1, delay = 0 }) {
+    if (!audioCtx) return;
+    const t0 = audioCtx.currentTime + delay;
+    const osc = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t0);
+    if (freqEnd !== freq) osc.frequency.exponentialRampToValueAtTime(Math.max(1, freqEnd), t0 + dur);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.linearRampToValueAtTime(vol, t0 + 0.006);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(g).connect(audioCtx.destination);
+    osc.start(t0);
+    osc.stop(t0 + dur + 0.03);
+  }
+  function noiseBurst({ dur = 0.18, vol = 0.16, filter = 1400 }) {
+    if (!audioCtx) return;
+    const t0 = audioCtx.currentTime;
+    const frames = Math.max(1, Math.floor(audioCtx.sampleRate * dur));
+    const buf = audioCtx.createBuffer(1, frames, audioCtx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < frames; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / frames);
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    const f = audioCtx.createBiquadFilter();
+    f.type = "lowpass";
+    f.frequency.value = filter;
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(vol, t0);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    src.connect(f).connect(g).connect(audioCtx.destination);
+    src.start(t0);
+    src.stop(t0 + dur);
+  }
+  const sfx = {
+    charge() { tone({ freq: 240, freqEnd: 620, dur: 0.5, type: "sawtooth", vol: 0.04 }); },
+    fire() { tone({ freq: 360, freqEnd: 820, dur: 0.13, type: "triangle", vol: 0.08 }); noiseBurst({ dur: 0.06, vol: 0.05, filter: 3000 }); },
+    perfect() { [784, 1047, 1319].forEach((f, i) => tone({ freq: f, dur: 0.13, type: "triangle", vol: 0.09, delay: i * 0.05 })); },
+    hit() { tone({ freq: 190, freqEnd: 85, dur: 0.16, type: "square", vol: 0.11 }); noiseBurst({ dur: 0.07, vol: 0.09, filter: 2400 }); },
+    crit() { noiseBurst({ dur: 0.22, vol: 0.18, filter: 1600 }); tone({ freq: 150, freqEnd: 60, dur: 0.22, type: "sawtooth", vol: 0.08 }); tone({ freq: 880, freqEnd: 220, dur: 0.16, type: "square", vol: 0.06 }); },
+    super() { [523, 784, 1047].forEach((f, i) => tone({ freq: f, dur: 0.12, type: "triangle", vol: 0.07, delay: i * 0.045 })); },
+    weak() { tone({ freq: 280, freqEnd: 150, dur: 0.2, type: "sine", vol: 0.05 }); },
+    miss() { tone({ freq: 620, freqEnd: 1150, dur: 0.1, type: "sine", vol: 0.045 }); },
+    telegraph() { tone({ freq: 880, freqEnd: 1180, dur: 0.09, type: "sine", vol: 0.035 }); },
+    brace() { tone({ freq: 150, freqEnd: 90, dur: 0.14, type: "square", vol: 0.08 }); noiseBurst({ dur: 0.05, vol: 0.06, filter: 1800 }); },
+    ko() { noiseBurst({ dur: 0.34, vol: 0.2, filter: 900 }); tone({ freq: 220, freqEnd: 50, dur: 0.42, type: "sawtooth", vol: 0.09 }); },
+    victory() { [523, 659, 784, 1047, 1319].forEach((f, i) => tone({ freq: f, dur: 0.2, type: "triangle", vol: 0.1, delay: i * 0.1 })); },
+    defeat() { [392, 330, 262, 196].forEach((f, i) => tone({ freq: f, dur: 0.28, type: "sine", vol: 0.08, delay: i * 0.13 })); },
+  };
+
+  // ---------- scene: drifting ambient motes ----------
+  const motes = [];
+  for (let i = 0, n = Math.round(W / 26); i < n; i++) {
+    motes.push({
+      x: Math.random() * W,
+      y: Math.random() * H,
+      r: 0.8 + Math.random() * 1.8,
+      sp: 6 + Math.random() * 15,
+      ph: Math.random() * Math.PI * 2,
+    });
+  }
+  let sceneT = 0;
+  function updateScene(dt) {
+    sceneT += dt;
+    for (const m of motes) {
+      m.y -= m.sp * dt;
+      if (m.y < -6) { m.y = H + 6; m.x = Math.random() * W; }
+    }
+  }
 
   function popComic(text, x, y, color, big = false) {
     comicTexts.push({ text, x, y, vy: -55 - Math.random() * 25, life: big ? 1.4 : 1.0, maxLife: big ? 1.4 : 1.0, color, rotation: (Math.random() - 0.5) * 0.5, scaleBoost: big ? 1.6 : 1 });
@@ -4788,6 +5949,29 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
     grad.addColorStop(1, "rgba(7, 11, 22, 0.7)");
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, W, H);
+
+    // Spotlight glow behind the arena, gently pulsing.
+    const glowR = Math.max(W, H) * (0.5 + Math.sin(sceneT * 0.8) * 0.04);
+    const spot = ctx.createRadialGradient(W / 2, FLOOR_Y - 10, 10, W / 2, FLOOR_Y - 10, glowR);
+    spot.addColorStop(0, "rgba(124, 240, 198, 0.16)");
+    spot.addColorStop(0.55, "rgba(124, 160, 255, 0.06)");
+    spot.addColorStop(1, "rgba(7, 11, 22, 0)");
+    ctx.fillStyle = spot;
+    ctx.fillRect(0, 0, W, H);
+
+    // Drifting ambient motes.
+    ctx.globalCompositeOperation = "lighter";
+    for (const m of motes) {
+      const tw = 0.4 + 0.6 * (0.5 + 0.5 * Math.sin(sceneT * 2 + m.ph));
+      ctx.globalAlpha = tw * 0.5;
+      ctx.fillStyle = "rgba(170, 210, 255, 0.9)";
+      ctx.beginPath();
+      ctx.arc(m.x, m.y, m.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "source-over";
+
     // floor
     const floorGrad = ctx.createLinearGradient(0, FLOOR_Y, 0, H);
     floorGrad.addColorStop(0, "rgba(124, 240, 198, 0.25)");
@@ -4801,6 +5985,15 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
     ctx.moveTo(0, FLOOR_Y);
     ctx.lineTo(W, FLOOR_Y);
     ctx.stroke();
+    // perspective floor lines, scrolling subtly for depth
+    ctx.strokeStyle = "rgba(124, 240, 198, 0.1)";
+    for (let i = 1; i <= 4; i++) {
+      const y = FLOOR_Y + (H - FLOOR_Y) * (i / 5);
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(W, y);
+      ctx.stroke();
+    }
   }
 
   function drawAuras(dt) {
@@ -4874,6 +6067,7 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
   }
 
   function drawAll(dt) {
+    updateScene(dt);
     ctx.save();
     if (screenShake > 0) {
       ctx.translate((Math.random() - 0.5) * screenShake * 10, (Math.random() - 0.5) * screenShake * 10);
@@ -4888,12 +6082,77 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
       drawProjectile(p);
     }
     drawSparksLayer(dt);
+    drawBraceRing();
     drawComicTexts(dt);
     if (flashWhole > 0) {
       ctx.fillStyle = `rgba(255, 255, 255, ${flashWhole})`;
       ctx.fillRect(0, 0, W, H);
       flashWhole = Math.max(0, flashWhole - dt * 3);
     }
+    ctx.restore();
+    // HUD-space overlays (not affected by screen shake)
+    drawFireMeter();
+  }
+
+  // ---- interactive fire meter (challenger turns) ----
+  // A marker sweeps a bar; tapping near the centre "sweet spot" maxes the
+  // spectacle. It NEVER changes damage — the sim already decided the outcome.
+  function fireQualityFromMeter() {
+    const d = Math.abs(meterPos); // 0 at centre, 1 at edges
+    if (d <= 0.16) return "perfect";
+    if (d <= 0.42) return "good";
+    return "ok";
+  }
+  function drawFireMeter() {
+    if (phase !== "aim") return;
+    const bw = Math.min(W * 0.74, 420);
+    const bh = 16;
+    const bx = (W - bw) / 2;
+    const by = H - 30;
+    ctx.save();
+    ctx.fillStyle = "rgba(7, 13, 28, 0.78)";
+    ctx.strokeStyle = "rgba(255,255,255,0.18)";
+    ctx.lineWidth = 1;
+    ctx.fillRect(bx - 6, by - 6, bw + 12, bh + 12);
+    ctx.strokeRect(bx - 6, by - 6, bw + 12, bh + 12);
+    // Zones mirror fireQualityFromMeter() exactly: marker x = centre +
+    // meterPos*(bw/2), so a threshold T maps to a half-width of T*bw/2.
+    const sweetW = 0.16 * (bw / 2);
+    const goodW = 0.42 * (bw / 2);
+    ctx.fillStyle = "rgba(143, 180, 255, 0.28)";
+    ctx.fillRect(bx + bw / 2 - goodW, by, goodW * 2, bh);
+    ctx.fillStyle = "rgba(124, 240, 198, 0.5)";
+    ctx.fillRect(bx + bw / 2 - sweetW, by, sweetW * 2, bh);
+    // frame
+    ctx.strokeStyle = "rgba(255,255,255,0.28)";
+    ctx.strokeRect(bx, by, bw, bh);
+    // marker
+    const mx = bx + bw / 2 + meterPos * (bw / 2);
+    ctx.fillStyle = "#ffe27a";
+    ctx.shadowColor = "#ffe27a";
+    ctx.shadowBlur = 10;
+    ctx.fillRect(mx - 3, by - 5, 6, bh + 10);
+    ctx.shadowBlur = 0;
+    ctx.restore();
+  }
+  function drawBraceRing() {
+    if (phase !== "telegraph" || !current) return;
+    // contracting ring around the challenger — tap when it's tight to brace
+    const cx = challenger.pos.x;
+    const cy = challenger.pos.y - BODY_R * 0.5;
+    const k = Math.max(0, Math.min(1, telegraphT / TELEGRAPH_DUR));
+    const r = BODY_R * (2.4 - 1.5 * k);
+    ctx.save();
+    ctx.strokeStyle = braced ? "#7cf0c6" : "#8fb4ff";
+    ctx.globalAlpha = braced ? 0.5 : 0.85;
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 0.4;
+    ctx.beginPath();
+    ctx.arc(cx, cy, BODY_R * 0.9, 0, Math.PI * 2);
+    ctx.stroke();
     ctx.restore();
   }
 
@@ -4934,19 +6193,27 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
 
   function applyHit(state) {
     const { entry, defSide } = state;
-    const isAttackerChallenger = entry.attacker === "attacker";
-    const newHp = isAttackerChallenger ? result.log[state.idx].defenderHp : result.log[state.idx].defenderHp;
-    void newHp;
     if (entry.dodged) {
       defSide.shakeTime = 0.15;
       popComic("MISS!", defSide.pos.x, defSide.pos.y - BODY_R - 16, "#cdd6f0");
+      sfx.miss();
       return;
     }
+
+    // Player input is pure spectacle — it scales juice, never the numbers.
+    // Damage + HP always come straight from the deterministic sim log.
+    const playerAttacked = state.playerControlled;
+    const q = state.fireQuality || "ok";
+    const juiceMul = !playerAttacked ? 1 : q === "perfect" ? 1.6 : q === "good" ? 1.15 : 0.8;
+    const braced = !!state.braced;
+
     defSide.hp = entry.defenderHp;
-    defSide.flashTime = 0.35;
-    defSide.shakeTime = 0.32;
+    defSide.flashTime = braced ? 0.2 : 0.35;
+    defSide.shakeTime = braced ? 0.14 : 0.32;
     setHpBar(defSide, defSide === challenger ? "challenger" : "defender");
-    popSparks(defSide.pos.x, defSide.pos.y - BODY_R * 0.5, state.atkSide.card.type === "Fire" ? "#ffb185" : colorsFor(state.atkSide.card).accent, entry.crit ? 22 : 14);
+    const sparkColor = state.atkSide.card.type === "Fire" ? "#ffb185" : colorsFor(state.atkSide.card).accent;
+    const baseSparks = entry.crit ? 22 : 14;
+    popSparks(defSide.pos.x, defSide.pos.y - BODY_R * 0.5, sparkColor, Math.round(baseSparks * juiceMul * (braced ? 0.5 : 1)));
     const colors = colorsFor(state.atkSide.card);
     auras.push({ x: defSide.pos.x, y: defSide.pos.y - BODY_R * 0.4, r: BODY_R * 0.9, dur: 0.45, t: 0, color: colors.accent });
     const word = entry.move === "skill"
@@ -4955,13 +6222,32 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
     popComic(`${word} -${entry.damage}`, defSide.pos.x, defSide.pos.y - BODY_R - 20, entry.crit ? "#ffe27a" : "#ff8ca6", entry.crit);
     if (entry.effective === "super") popComic("SUPER!", defSide.pos.x, defSide.pos.y - BODY_R - 44, "#7cf0c6");
     if (entry.effective === "weak") popComic("weak…", defSide.pos.x, defSide.pos.y - BODY_R - 44, "#9fb0d9");
-    screenShake = entry.crit ? 0.9 : entry.move === "skill" ? 0.65 : 0.35;
-    if (entry.move === "skill") flashWhole = 0.35;
+    if (playerAttacked && q === "perfect") popComic("PERFECT!", defSide.pos.x, defSide.pos.y - BODY_R - 68, "#ffe27a", true);
+
+    // Audio
+    if (entry.crit) sfx.crit();
+    else sfx.hit();
+    if (entry.effective === "super") sfx.super();
+    else if (entry.effective === "weak") sfx.weak();
+
+    let shake = entry.crit ? 0.9 : entry.move === "skill" ? 0.65 : 0.35;
+    shake *= juiceMul;
+    if (braced) {
+      shake *= 0.4;
+      sfx.brace();
+      popComic("BLOCK!", defSide.pos.x, defSide.pos.y - BODY_R - 16, "#8fb4ff");
+      auras.push({ x: defSide.pos.x, y: defSide.pos.y - BODY_R * 0.4, r: BODY_R * 1.1, dur: 0.4, t: 0, color: "#8fb4ff" });
+    }
+    screenShake = Math.max(screenShake, shake);
+    if (entry.move === "skill" || (playerAttacked && q === "perfect")) {
+      flashWhole = Math.max(flashWhole, entry.move === "skill" ? 0.35 : 0.25);
+    }
     if (defSide.hp <= 0) {
       defSide.knockedOut = true;
       defSide.koTime = 0;
       popComic("K.O.!", defSide.pos.x, defSide.pos.y - BODY_R - 50, "#ffd166", true);
       screenShake = 1.1;
+      sfx.ko();
     }
   }
 
@@ -4969,6 +6255,7 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
   result.log.forEach((entry, idx) => {
     const state = attackEntry(entry);
     state.idx = idx;
+    state.playerControlled = entry.attacker === "attacker";
     queue.push(state);
   });
 
@@ -4978,57 +6265,173 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
   let last = performance.now();
   let battleOver = false;
 
+  // ---- interactive phase machine ----
+  // phase: intro | aim | windup | flight | telegraph | recover | done
+  let phase = "intro";
+  let meterPos = 0;   // -1 .. 1 (0 = sweet spot)
+  let meterDir = 1;
+  const AIM_TIMEOUT = 2.6;   // auto-fire if the player freezes
+  const TELEGRAPH_DUR = 0.95;
+  let telegraphT = 0;
+  let braced = false;
+  let telegraphBeepT = 0;
+
+  function describeTurn(state) {
+    const moveLabel = state.entry.move === "skill" ? skillNameFor(state.atkSide.card) : "Quick Strike";
+    const who = state.entry.attacker === "attacker" ? challengerCard.name : champCard.name;
+    const note = state.entry.dodged
+      ? " — but it missed!"
+      : state.entry.effective === "super" ? " — super effective!"
+      : state.entry.effective === "weak" ? " — not very effective."
+      : "";
+    return `<strong>${escapeHtml(who)}</strong> used <em>${escapeHtml(moveLabel)}</em>${escapeHtml(note)}`;
+  }
+
   function advance() {
     current = queue.shift() || null;
     phaseT = 0;
-    if (current) {
-      const moveLabel = current.entry.move === "skill" ? skillNameFor(current.atkSide.card) : "Quick Strike";
-      const who = current.entry.attacker === "attacker" ? challengerCard.name : champCard.name;
-      const effectivenessNote = current.entry.dodged
-        ? " — but it missed!"
-        : current.entry.effective === "super" ? " — super effective!"
-        : current.entry.effective === "weak" ? " — not very effective."
-        : "";
-      status.innerHTML = `<strong>${escapeHtml(who)}</strong> used <em>${escapeHtml(moveLabel)}</em>${escapeHtml(effectivenessNote)}`;
-    } else if (!battleOver) {
-      finishBattle();
+    if (!current) {
+      if (!battleOver) finishBattle();
+      return;
+    }
+    current.descLine = describeTurn(current);
+    if (current.playerControlled) {
+      phase = "aim";
+      meterPos = -1;
+      meterDir = 1;
+      current.fireQuality = "ok";
+      sfx.charge();
+      const skill = current.entry.move === "skill";
+      status.innerHTML = `<strong>Your move!</strong> ${skill ? "Charge a skill — " : ""}TAP / SPACE in the <span style="color:#7cf0c6">green zone</span> to fire 🔴`;
+    } else {
+      phase = "telegraph";
+      telegraphT = 0;
+      telegraphBeepT = 0;
+      braced = false;
+      status.innerHTML = `<strong>${escapeHtml(champCard.name)}</strong> is winding up — <span style="color:#8fb4ff">TAP / SPACE to BRACE!</span>`;
+    }
+  }
+
+  function spawnTurnProjectile() {
+    const entry = current.entry;
+    const proj = entry.move === "skill"
+      ? makeSkillProjectile(current.atkSide, current.defSide, current.atkSide.card)
+      : makeAttackProjectile(current.atkSide, current.defSide, current.atkSide.card);
+    proj.onHit = () => {
+      if (current.hit) return;
+      current.hit = true;
+      applyHit(current);
+    };
+    projectiles.push(proj);
+    current.projectileSpawned = true;
+    phase = "flight";
+    phaseT = 0;
+    status.innerHTML = current.descLine;
+  }
+
+  // Player tap / key — routes by phase. Pure spectacle: never the numbers.
+  function onPlayerAction() {
+    ensureAudio();
+    if (phase === "aim" && current && !current.fired) {
+      current.fired = true;
+      current.fireQuality = fireQualityFromMeter();
+      sfx.fire();
+      if (current.fireQuality === "perfect") {
+        sfx.perfect();
+        flashWhole = Math.max(flashWhole, 0.22);
+      }
+      phase = "windup";
+      phaseT = 0;
+    } else if (phase === "telegraph" && current && !braced) {
+      braced = true;
+      current.braced = true;
+      // tighter timing (later in the wind-up) = a crisper block flourish
+      const tight = telegraphT / TELEGRAPH_DUR > 0.55;
+      sfx.telegraph();
+      popComic(tight ? "READY!" : "brace", challenger.pos.x, challenger.pos.y - BODY_R - 14, tight ? "#7cf0c6" : "#8fb4ff");
+      popSparks(challenger.pos.x, challenger.pos.y - BODY_R * 0.5, "#8fb4ff", tight ? 12 : 6, 120);
     }
   }
 
   function tickPhase(dt) {
     if (!current) return;
     phaseT += dt;
-    const entry = current.entry;
     const atkHome = current.atkSide === challenger ? CHALLENGER_HOME : DEFENDER_HOME;
+    ensureBodyAt(current.atkSide, atkHome.x, atkHome.y);
 
-    // wind-up: lunge slightly forward
-    const lunge = Math.min(1, phaseT / 0.22);
-    const lungeOffset = current.atkSide.facing * 18 * lunge * (1 - lunge);
-    ensureBodyAt(current.atkSide, atkHome.x + lungeOffset, atkHome.y);
-
-    if (!current.projectileSpawned && phaseT >= 0.22) {
-      current.projectileSpawned = true;
-      const proj = entry.move === "skill"
-        ? makeSkillProjectile(current.atkSide, current.defSide, current.atkSide.card)
-        : makeAttackProjectile(current.atkSide, current.defSide, current.atkSide.card);
-      proj.onHit = () => {
-        if (current.hit) return;
-        current.hit = true;
-        applyHit(current);
-      };
-      projectiles.push(proj);
+    if (phase === "aim") {
+      // sweep the marker back and forth; gentle charge bob on the attacker
+      meterPos += meterDir * dt * 2.7;
+      if (meterPos >= 1) { meterPos = 1; meterDir = -1; }
+      else if (meterPos <= -1) { meterPos = -1; meterDir = 1; }
+      const charge = Math.sin(phaseT * 11) * 3;
+      ensureBodyAt(current.atkSide, atkHome.x - current.atkSide.facing * 4, atkHome.y + charge);
+      if (phaseT >= AIM_TIMEOUT && !current.fired) {
+        current.fired = true;
+        current.fireQuality = "ok";
+        sfx.fire();
+        phase = "windup";
+        phaseT = 0;
+      }
+      return;
     }
 
-    // hand off when this turn's projectile is done and a small recovery delay passes
-    if (current.hit && phaseT >= 0.22 + 0.55 + 0.35) {
-      // small pause before next turn
-      if (current.defSide.knockedOut && current.defSide.koTime > 0.8) {
-        battleOver = true;
-        current = null;
-        finishBattle();
-        return;
+    if (phase === "windup") {
+      const lunge = Math.min(1, phaseT / 0.22);
+      const lungeOffset = current.atkSide.facing * 20 * lunge * (1 - lunge);
+      ensureBodyAt(current.atkSide, atkHome.x + lungeOffset, atkHome.y);
+      if (phaseT >= 0.22) spawnTurnProjectile();
+      return;
+    }
+
+    if (phase === "telegraph") {
+      telegraphT += dt;
+      telegraphBeepT -= dt;
+      if (telegraphBeepT <= 0) { sfx.telegraph(); telegraphBeepT = 0.26; }
+      // defender draws back, glowing
+      const k = telegraphT / TELEGRAPH_DUR;
+      const draw = current.atkSide.facing * 16 * Math.min(1, k);
+      ensureBodyAt(current.atkSide, atkHome.x + draw, atkHome.y - Math.sin(k * Math.PI) * 4);
+      current.atkSide.flashTime = Math.max(current.atkSide.flashTime, 0.12);
+      if (telegraphT >= TELEGRAPH_DUR) {
+        const lungeOffset = current.atkSide.facing * 20;
+        ensureBodyAt(current.atkSide, atkHome.x + lungeOffset, atkHome.y);
+        spawnTurnProjectile();
       }
-      advance();
+      return;
+    }
+
+    if (phase === "flight") {
+      // projectile motion + onHit handled by tickProjectiles()
+      if (current.hit) { phase = "recover"; phaseT = 0; }
+      return;
+    }
+
+    if (phase === "recover") {
+      if (phaseT >= 0.55) {
+        if (current.defSide.knockedOut && current.defSide.koTime > 0.8) {
+          battleOver = true;
+          current = null;
+          phase = "done";
+          finishBattle();
+          return;
+        }
+        advance();
+      }
+    }
+  }
+
+  function tickProjectiles(dt) {
+    for (const p of projectiles) {
+      if (p.done) continue;
+      if (p.t >= p.dur && !p.exploded) {
+        p.exploded = true;
+        p.done = true;
+        if (typeof p.onHit === "function") p.onHit();
+      }
+    }
+    for (let i = projectiles.length - 1; i >= 0; i--) {
+      if (projectiles[i].done && projectiles[i].t > projectiles[i].dur + 0.2) projectiles.splice(i, 1);
     }
   }
 
@@ -5099,6 +6502,21 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
       challengerWon,
     });
     renderMap();
+    // Final flourish
+    if (challengerWon) {
+      sfx.victory();
+      flashWhole = Math.max(flashWhole, 0.3);
+      popComic("VICTORY!", W / 2, H * 0.4, "#7cf0c6", true);
+      for (let i = 0; i < 5; i++) {
+        setTimeout(() => {
+          if (!document.body.contains(challenge)) return;
+          popSparks(W * (0.2 + Math.random() * 0.6), H * (0.25 + Math.random() * 0.3), ["#7cf0c6", "#ffe27a", "#8fb4ff", "#ff8d9e"][i % 4], 16, 220);
+        }, i * 130);
+      }
+    } else {
+      sfx.defeat();
+      popComic("DEFEAT", W / 2, H * 0.42, "#ff8ca6", true);
+    }
     status.innerHTML = `<span class="${challengerWon ? "success" : "fail"}">${challengerWon ? "Victory!" : "Defeat!"}</span> ${summary}`;
     cancel.classList.add("hidden");
     continueBtn.classList.remove("hidden");
@@ -5127,14 +6545,28 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
     activeChallenge = null;
     document.removeEventListener("keydown", onKey);
   }
-  function onKey(ev) { if (ev.key === "Escape") closeChallenge(); }
+  function onKey(ev) {
+    if (ev.key === "Escape") { closeChallenge(); return; }
+    if (ev.key === " " || ev.key === "Spacebar" || ev.key === "Enter") {
+      ev.preventDefault();
+      onPlayerAction();
+    }
+  }
+  function onCanvasTap(ev) {
+    ev.preventDefault();
+    onPlayerAction();
+  }
   document.addEventListener("keydown", onKey);
+  canvas.addEventListener("pointerdown", onCanvasTap);
+  canvas.style.touchAction = "manipulation";
+  canvas.style.cursor = "pointer";
   cancel.addEventListener("click", closeChallenge);
 
   // intro pause then kick off
   setHpBar(challenger, "challenger");
   setHpBar(defender, "defender");
-  setTimeout(advance, 600);
+  status.innerHTML = `<strong>Battle start!</strong> ${escapeHtml(profile?.name || "You")} challenge ${escapeHtml(championBefore.trainer)}…`;
+  setTimeout(advance, 700);
   raf = requestAnimationFrame(loop);
 }
 
@@ -5176,6 +6608,9 @@ function onPositionUpdate(pos) {
   renderMap();
   renderCards();
   updateBucketLabel();
+  // Become discoverable for trading promptly on the first fix instead of
+  // waiting up to a full heartbeat; throttled so a chatty GPS watch can't spam.
+  publishPresence();
 }
 
 function onPositionError(err) {
@@ -5344,11 +6779,11 @@ if (typeof document !== "undefined") {
     }
   });
 
-  // Touch-friendly: 10 rapid taps on the location pill opens the debug dialog.
+  // Touch-friendly: rapid taps on the location pill opens the debug dialog.
   const pill = el.locationStatus;
   if (pill) {
-    const TAP_TARGET = 10;
-    const TAP_WINDOW_MS = 2500;
+    const TAP_TARGET = 7;
+    const TAP_WINDOW_MS = 3000;
     let tapCount = 0;
     let tapTimer = null;
     let originalText = "";
@@ -5364,7 +6799,10 @@ if (typeof document !== "undefined") {
     pill.style.userSelect = "none";
     pill.style.webkitUserSelect = "none";
     pill.style.webkitTapHighlightColor = "transparent";
-    pill.addEventListener("click", () => {
+    // Count on pointerdown (not click): fires once per tap, immediately, and
+    // is never swallowed by the iOS double-tap-zoom guard below.
+    function registerTap(ev) {
+      ev.preventDefault();
       if (tapCount === 0) originalText = pill.textContent;
       tapCount += 1;
       if (tapTimer) clearTimeout(tapTimer);
@@ -5378,8 +6816,31 @@ if (typeof document !== "undefined") {
         pill.dataset.tapping = "1";
         pill.textContent = `Debug ${tapCount}/${TAP_TARGET}…`;
       }
-    });
+    }
+    if (window.PointerEvent) {
+      pill.addEventListener("pointerdown", registerTap);
+    } else {
+      pill.addEventListener("touchstart", registerTap, { passive: false });
+      pill.addEventListener("click", registerTap);
+    }
   }
+
+  // ---- iOS zoom guard ----
+  // iOS Safari ignores `user-scalable=no`, so rapid multi-taps and pinches on
+  // the full-screen map still trigger a page zoom. Suppress the double-tap
+  // zoom (without killing single-tap clicks) and the pinch gesture.
+  let lastTouchEnd = 0;
+  document.addEventListener(
+    "touchend",
+    (ev) => {
+      const now = Date.now();
+      if (now - lastTouchEnd <= 320) ev.preventDefault();
+      lastTouchEnd = now;
+    },
+    { passive: false }
+  );
+  document.addEventListener("gesturestart", (ev) => ev.preventDefault());
+  document.addEventListener("dblclick", (ev) => ev.preventDefault());
 }
 
 async function bootstrapLocation() {
@@ -5436,8 +6897,10 @@ function connectFeed() {
     );
     if (alreadyThere) return;
     recentEvents.push(event);
-    if (event.lat && event.lng && event.trainer !== profile?.name) {
-      trainerLocations.set(event.trainer, { lat: event.lat, lng: event.lng, ts: event.ts });
+    if (event.trainer && event.trainer !== profile?.name) {
+      const prev = trainerLocations.get(event.trainer);
+      const merged = mergeTrainerLocation(prev, event);
+      if (merged && merged !== prev) trainerLocations.set(event.trainer, merged);
     }
     if (recentEvents.length > 100) recentEvents.shift();
     renderFeed();
@@ -5462,6 +6925,40 @@ function connectGridCaught() {
       renderCards();
       renderMap();
     }
+  });
+}
+
+// Presence: a single overwrite-in-place node per trainer keyed by name. This
+// publishes the same coarse lat/lng a catch event already exposes on the
+// public feed — no new privacy surface — but keeps idle trainers visible for
+// trading. Like trades/champions there's no auth, so a name can be spoofed;
+// the public datastore + the on-map range gate make that easier to spot than
+// to prevent, consistent with the rest of the multiplayer model.
+function publishPresence(force = false) {
+  if (!presenceNode || !profile?.name || !playerLocation) return;
+  const now = Date.now();
+  // The periodic heartbeat forces a write; opportunistic callers (e.g. a
+  // noisy GPS watch) are throttled so we don't hammer the relay.
+  if (!force && now - lastPresenceSentAt < PRESENCE_HEARTBEAT_MS) return;
+  lastPresenceSentAt = now;
+  try {
+    presenceNode.get(profile.name).put({
+      lat: playerLocation.lat,
+      lng: playerLocation.lng,
+      ts: now,
+    });
+  } catch {}
+}
+
+function subscribePresence() {
+  if (!presenceNode) return;
+  presenceNode.map().on((raw, name) => {
+    if (!raw || !name || name === profile?.name) return;
+    const prev = trainerLocations.get(name);
+    const merged = mergeTrainerLocation(prev, raw);
+    if (!merged || merged === prev) return;
+    trainerLocations.set(name, merged);
+    renderMap();
   });
 }
 
@@ -5631,7 +7128,20 @@ function publishBattleEvent(event) {
 
 let tradesNode = null;
 const tradeRequests = new Map(); // requestId -> normalized request
-const appliedTrades = new Set();
+// Which trade ids have already been applied to MY inventory. Persisted: a
+// completed trade lives in GUN forever, so subscribeTrades re-emits it on
+// every reload — without a durable guard the swap would re-apply each refresh
+// and keep re-adding the received Fokémon. Bounded so it can't grow forever.
+const APPLIED_TRADES_KEY = "fokemon_applied_trades";
+const appliedTrades = new Set(
+  (Array.isArray(safeStorageGet(APPLIED_TRADES_KEY, [])) ? safeStorageGet(APPLIED_TRADES_KEY, []) : []).map(String)
+);
+function rememberAppliedTrade(id) {
+  appliedTrades.add(id);
+  try {
+    localStorage.setItem(APPLIED_TRADES_KEY, JSON.stringify([...appliedTrades].slice(-400)));
+  } catch {}
+}
 const notifiedTradeKeys = new Set(); // `${id}:${status}` already surfaced as a toast
 const locallyCancelledTrades = new Set(); // ids I cancelled/declined myself
 let openTradeRequestId = null;
@@ -5656,15 +7166,13 @@ function packInstanceForTrade(entry) {
 }
 
 function normalizeTradeOffer(raw) {
-  if (!raw || typeof raw !== "object") return null;
-  if (!raw.uid || !raw.cardId) return null;
-  if (!cardsById.has(String(raw.cardId))) return null;
-  return {
-    uid: String(raw.uid),
-    cardId: String(raw.cardId),
-    boosts: normalizeBoosts(raw.boosts),
-    caughtAt: Number(raw.caughtAt) || 0,
-  };
+  // `raw` is whatever GUN handed us: the JSON-string wire format on a peer, or
+  // a plain object for a local echo. parseTradeOffer fixes the shape; we only
+  // add the card-existence gate (it needs the live card index).
+  const offer = parseTradeOffer(raw);
+  if (!offer) return null;
+  if (!cardsById.has(offer.cardId)) return null;
+  return offer;
 }
 
 function normalizeTradeRequest(raw) {
@@ -5690,12 +7198,18 @@ function normalizeTradeRequest(raw) {
 
 function publishTradeRequest(req) {
   if (!tradesNode) return;
+  // offer/counterOffer go on the wire as JSON *strings*, not nested objects:
+  // GUN's tradesNode.map().on() never resolves nested child nodes, so an
+  // object would reach peers as an unresolved link and the request would be
+  // silently dropped. Strings sync verbatim. parseTradeOffer rebuilds the
+  // shape on receipt. (Even though encryptedPut wraps the whole payload as a
+  // single ciphertext envelope, we keep the serialize for defence in depth.)
   encryptedPut(tradesNode.get(req.id), {
     id: req.id,
     from: req.from,
     to: req.to,
-    offer: req.offer ? { ...req.offer, boosts: { ...req.offer.boosts } } : null,
-    counterOffer: req.counterOffer ? { ...req.counterOffer, boosts: { ...req.counterOffer.boosts } } : null,
+    offer: serializeTradeOffer(req.offer),
+    counterOffer: req.counterOffer ? serializeTradeOffer(req.counterOffer) : null,
     status: req.status,
     createdAt: req.createdAt,
     updatedAt: Date.now(),
@@ -5712,7 +7226,7 @@ function nearbyTrainerEntries() {
     if (!Number.isFinite(loc.lat) || !Number.isFinite(loc.lng)) continue;
     const dist = distanceMeters(playerLocation, loc);
     if (dist > TRADE_RANGE_METERS) continue;
-    if (Date.now() - (loc.ts || 0) > 15 * 60 * 1000) continue;
+    if (Date.now() - (loc.ts || 0) > TRADE_DISCOVERY_TTL_MS) continue;
     out.push({ name, distance: Math.round(dist), lat: loc.lat, lng: loc.lng, ts: loc.ts });
   }
   out.sort((a, b) => a.distance - b.distance);
@@ -5728,12 +7242,27 @@ function pendingIncomingTrades() {
   });
 }
 
+// Finished trades stay in GUN, so they survive a refresh — surface the recent
+// ones so a completed/cancelled swap leaves a visible trace instead of
+// silently vanishing from the lobby.
+const RECENT_TRADE_WINDOW_MS = 24 * 60 * 60 * 1000;
+function recentFinishedTrades(max = 6) {
+  const me = profile?.name;
+  return [...tradeRequests.values()]
+    .filter((r) =>
+      (r.from === me || r.to === me) &&
+      (r.status === "completed" || r.status === "cancelled") &&
+      Date.now() - (r.updatedAt || r.createdAt) <= RECENT_TRADE_WINDOW_MS)
+    .sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt))
+    .slice(0, max);
+}
+
 function applyIncomingCompletedTrade(req) {
   // I'm the originator and the counterparty has countered+accepted. Add their
   // instance to my inventory and remove what I offered. Idempotent via appliedTrades.
   if (!req.counterOffer) return;
   if (appliedTrades.has(req.id)) return;
-  appliedTrades.add(req.id);
+  rememberAppliedTrade(req.id);
   // Remove my offered instance (might already be gone if deployed elsewhere or released).
   if (req.offer && getInstance(req.offer.uid)) {
     caught = caught.filter((c) => c.uid !== req.offer.uid);
@@ -5761,7 +7290,7 @@ function applyAcceptedTradeAsRecipient(req) {
   // I'm the recipient and have countered with my own instance — finalize swap
   // by removing what I offered and adding what they offered.
   if (appliedTrades.has(req.id)) return;
-  appliedTrades.add(req.id);
+  rememberAppliedTrade(req.id);
   if (req.counterOffer && getInstance(req.counterOffer.uid)) {
     caught = caught.filter((c) => c.uid !== req.counterOffer.uid);
   }
@@ -5933,20 +7462,112 @@ function maybeNotifyTrade(req) {
   }
 }
 
-function offerSummaryHtml(offer) {
-  if (!offer) return "<em>Nothing offered</em>";
+// Completion animations should fire once, not on every background re-render.
+const celebratedTrades = new Set();
+
+function trainerHue(name) {
+  return seedFromStrings(String(name || "?")) % 360;
+}
+
+// A chunky coloured trainer badge — a stand-in "avatar" so trainers feel like
+// characters, not rows in a list. Colour is stable per name.
+function trainerOrbHtml(name, size = "md") {
+  const initial = (String(name || "?").trim()[0] || "?").toUpperCase();
+  return `<span class="trainer-orb orb-${size}" style="--orb-h:${trainerHue(name)}deg" aria-hidden="true">${escapeHtml(initial)}</span>`;
+}
+
+// Three-stop progress ribbon so a player can always see WHERE in the swap they
+// are. `active` is the 1-based current step; `complete` lights every node.
+function tradeRailHtml(active, { complete = false, cancelled = false } = {}) {
+  const steps = ["Send yours", "Trade back", "Seal it"];
+  let html = `<div class="trade-rail${cancelled ? " is-cancelled" : ""}" aria-hidden="true">`;
+  steps.forEach((label, i) => {
+    const n = i + 1;
+    const done = !cancelled && (complete || n < active);
+    const now = !cancelled && !complete && n === active;
+    if (i > 0) html += `<i class="rail-link${!cancelled && (complete || active >= n) ? " lit" : ""}"></i>`;
+    html += `<span class="rail-node ${done ? "done" : now ? "now" : "off"}"><b>${done ? "✓" : n}</b><em>${label}</em></span>`;
+  });
+  return html + "</div>";
+}
+
+// A cartoon speech bubble paired with the speaker's orb.
+function tradeTalkHtml(name, html, mood = "neutral") {
+  return `<div class="trade-talk mood-${mood}">${trainerOrbHtml(name, "sm")}<div class="trade-bubble">${html}</div></div>`;
+}
+
+const liveDots = `<span class="live-dots"><i></i><i></i><i></i></span>`;
+
+// A virtual trading card — the same foil/rarity language as the immersive card
+// viewer, shrunk to fit two-up on the trade table. `offer` is a packed trade
+// offer ({uid,cardId,boosts}); null/missing renders a face-down "?" slot.
+function tradeMiniCard(offer, opts = {}) {
+  const { waitingLabel = "Waiting…", pop = false } = opts;
+  if (!offer) {
+    return `<div class="tcard tcard-ghost"><span class="tcard-foil"></span><span class="tcard-q">?</span><span class="tcard-wait">${escapeHtml(waitingLabel)}</span></div>`;
+  }
   const card = cardsById.get(offer.cardId);
-  if (!card) return "<em>Unknown Fokemon</em>";
-  const trained = (offer.boosts?.hp || 0) + (offer.boosts?.atk || 0) + (offer.boosts?.def || 0) + (offer.boosts?.spd || 0);
+  if (!card) {
+    return `<div class="tcard tcard-ghost"><span class="tcard-q">?</span><span class="tcard-wait">Unknown Fokémon</span></div>`;
+  }
   const colors = colorsFor(card);
+  const b = offer.boosts || {};
+  const trained = (b.hp || 0) + (b.atk || 0) + (b.def || 0) + (b.spd || 0);
+  const si = speciesIndexForInstance(offer.uid);
+  const dex = si && si.total > 1 ? ` <span class="tcard-dex">#${si.idx}</span>` : "";
   return `
-    <div class="trade-offer-card" style="--type-light:${colors.light};--type-dark:${colors.dark};--type-accent:${colors.accent};">
-      <strong>${escapeHtml(card.name)}</strong>
-      <span class="type-pill" style="background:${colors.accent};color:#061226;">${escapeHtml(card.type)}</span>
+    <div class="tcard rarity-${card.rarity || "common"}${pop ? " tcard-pop" : ""}" style="--type-light:${colors.light};--type-dark:${colors.dark};--type-accent:${colors.accent};">
+      <span class="tcard-foil"></span>
+      <span class="tcard-glare"></span>
+      <header class="tcard-head">
+        <strong>${escapeHtml(card.name)}${dex}</strong>
+        <span class="type-pill" style="background:${colors.accent};color:#061226;">${escapeHtml(card.type)}</span>
+      </header>
+      <canvas class="tcard-art" data-card="${escapeHtml(card.id)}" width="260" height="150" aria-hidden="true"></canvas>
       ${instanceStatRowsHtml(card, offer.boosts)}
-      ${trained ? `<small>Trained +${trained}</small>` : `<small>Untrained</small>`}
-    </div>
-  `;
+      <footer class="tcard-foot">
+        ${trained
+          ? `<span class="tcard-ribbon">★ Trained +${trained}</span>`
+          : `<span class="tcard-ribbon plain">Wild &amp; untrained</span>`}
+      </footer>
+    </div>`;
+}
+
+// A pickable card button (same face as tradeMiniCard, plus a power tag).
+function tradePickCardHtml(entry) {
+  const card = cardsById.get(entry.id);
+  if (!card) return "";
+  const colors = colorsFor(card);
+  const power = instancePower(entry);
+  const b = entry.boosts || {};
+  const trained = (b.hp || 0) + (b.atk || 0) + (b.def || 0) + (b.spd || 0);
+  const si = speciesIndexForInstance(entry.uid);
+  const dex = si && si.total > 1 ? ` <span class="tcard-dex">#${si.idx}</span>` : "";
+  return `
+    <button type="button" class="tcard tcard-pick rarity-${card.rarity || "common"}" data-uid="${escapeHtml(entry.uid)}" style="--type-light:${colors.light};--type-dark:${colors.dark};--type-accent:${colors.accent};">
+      <span class="tcard-foil"></span>
+      <span class="tcard-glare"></span>
+      <span class="tcard-power">⚡ ${power}</span>
+      <header class="tcard-head">
+        <strong>${escapeHtml(card.name)}${dex}</strong>
+        <span class="type-pill" style="background:${colors.accent};color:#061226;">${escapeHtml(card.type)}</span>
+      </header>
+      <canvas class="tcard-art" data-card="${escapeHtml(card.id)}" width="260" height="140" aria-hidden="true"></canvas>
+      ${instanceStatRowsHtml(card, entry.boosts)}
+      <span class="tcard-send">${trained ? `★ +${trained} · ` : ""}Tap to send →</span>
+    </button>`;
+}
+
+// Paint the actual creature onto every card canvas after the markup is in the
+// DOM (deferred a frame so the canvas has a measured size).
+function hydrateTradeArt(root) {
+  if (!root) return;
+  requestAnimationFrame(() => {
+    root.querySelectorAll("canvas.tcard-art[data-card]").forEach((cv) => {
+      const card = cardsById.get(cv.dataset.card);
+      if (card) try { renderPortrait(cv, card); } catch {}
+    });
+  });
 }
 
 function openTradeModal(initialRequestId = null, options = {}) {
@@ -5958,12 +7579,12 @@ function openTradeModal(initialRequestId = null, options = {}) {
   overlay.className = "battle-site-modal trade-modal";
   overlay.innerHTML = `
     <div class="site-card trade-card" role="dialog" aria-modal="true" aria-label="Trade with trainers">
-      <header class="site-head">
+      <header class="site-head trade-head">
         <div>
-          <p class="eyebrow">Peer trade</p>
-          <h3>Nearby trainers</h3>
+          <p class="eyebrow">🤝 Trade Station</p>
+          <h3>Swap a Fokémon</h3>
         </div>
-        <button class="ghost trade-close" aria-label="Close">Close</button>
+        <button class="ghost trade-close" aria-label="Close">✕</button>
       </header>
       <div class="trade-body"></div>
     </div>
@@ -5985,6 +7606,12 @@ function openTradeModal(initialRequestId = null, options = {}) {
   overlay.addEventListener("click", (ev) => { if (ev.target === overlay) close(); });
   document.addEventListener("keydown", onKey);
 
+  function paint(html) {
+    bodyEl.innerHTML = html;
+    hydrateTradeArt(bodyEl);
+    bodyEl.querySelector(".trade-back")?.addEventListener("click", (ev) => { ev.preventDefault(); renderList(); });
+  }
+
   function renderList() {
     openTradeRequestId = "list";
     const nearby = nearbyTrainerEntries();
@@ -5993,100 +7620,132 @@ function openTradeModal(initialRequestId = null, options = {}) {
       r.from === profile?.name && r.status !== "completed" && r.status !== "cancelled"
     );
 
-    bodyEl.innerHTML = `
-      ${incoming.length ? `
-        <section class="trade-section">
-          <h4>Incoming trade requests</h4>
-          <ul class="trade-list">
-            ${incoming.map((req) => `
-              <li>
-                <span><strong>${escapeHtml(req.from)}</strong> offers a ${escapeHtml(cardsById.get(req.offer.cardId)?.name || "Fokemon")}</span>
-                <button type="button" class="primary view-trade" data-id="${escapeHtml(req.id)}">Review</button>
-              </li>
-            `).join("")}
-          </ul>
-        </section>
-      ` : ""}
-      ${myOutgoing.length ? `
-        <section class="trade-section">
-          <h4>Your pending offers</h4>
-          <ul class="trade-list">
-            ${myOutgoing.map((req) => `
-              <li>
-                <span>To <strong>${escapeHtml(req.to)}</strong> — ${escapeHtml(req.status)}</span>
-                <button type="button" class="ghost view-trade" data-id="${escapeHtml(req.id)}">Review</button>
-              </li>
-            `).join("")}
-          </ul>
-        </section>
-      ` : ""}
-      <section class="trade-section">
-        <h4>Nearby trainers (≤ ${TRADE_RANGE_METERS}m)</h4>
-        ${nearby.length ? `
-          <ul class="trade-list">
-            ${nearby.map((t) => `
-              <li>
-                <span><strong>${escapeHtml(t.name)}</strong> &mdash; ${t.distance}m away</span>
-                <button type="button" class="primary start-trade" data-name="${escapeHtml(t.name)}">Trade</button>
-              </li>
-            `).join("")}
-          </ul>
-        ` : `<p class="empty-state">No trainers in range. Trade is unlocked when another player catches a Fokemon within ${TRADE_RANGE_METERS}m of you.</p>`}
-      </section>
-    `;
+    const incomingHtml = incoming.length ? `
+      <section class="trade-group">
+        <h4 class="trade-group-title hot">⚡ Someone wants to trade!</h4>
+        <div class="trade-tiles">
+          ${incoming.map((req) => {
+            const cn = cardsById.get(req.offer.cardId)?.name || "a Fokémon";
+            return `
+              <div class="trade-tile tile-hot">
+                ${trainerOrbHtml(req.from)}
+                <div class="tile-text">
+                  <strong>${escapeHtml(req.from)}</strong>
+                  <span>offers their <b>${escapeHtml(cn)}</b></span>
+                </div>
+                <button type="button" class="trade-cta trade-open" data-id="${escapeHtml(req.id)}">Open&nbsp;→</button>
+              </div>`;
+          }).join("")}
+        </div>
+      </section>` : "";
 
-    bodyEl.querySelectorAll(".start-trade").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        renderOffer(btn.dataset.name);
-      });
-    });
-    bodyEl.querySelectorAll(".view-trade").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        renderRequest(btn.dataset.id);
-      });
-    });
+    const outgoingHtml = myOutgoing.length ? `
+      <section class="trade-group">
+        <h4 class="trade-group-title">📤 Your offers</h4>
+        <div class="trade-tiles">
+          ${myOutgoing.map((req) => {
+            const yourMove = req.status === "countered";
+            const chip = yourMove
+              ? `<span class="tile-chip go">Your move!</span>`
+              : `<span class="tile-chip wait">Waiting${liveDots}</span>`;
+            return `
+              <div class="trade-tile">
+                ${trainerOrbHtml(req.to)}
+                <div class="tile-text">
+                  <strong>${escapeHtml(req.to)}</strong>
+                  ${chip}
+                </div>
+                <button type="button" class="trade-cta ghost trade-open" data-id="${escapeHtml(req.id)}">View</button>
+              </div>`;
+          }).join("")}
+        </div>
+      </section>` : "";
+
+    const recent = recentFinishedTrades();
+    const recentHtml = recent.length ? `
+      <section class="trade-group">
+        <h4 class="trade-group-title">🕘 Recent trades</h4>
+        <div class="trade-tiles">
+          ${recent.map((r) => {
+            const me = profile?.name;
+            const other = r.from === me ? r.to : r.from;
+            const done = r.status === "completed";
+            const gotOffer = r.from === me ? r.counterOffer : r.offer;
+            const gotName = gotOffer ? (cardsById.get(gotOffer.cardId)?.name || "a Fokémon") : "a Fokémon";
+            return `
+              <div class="trade-tile${done ? "" : " tile-faded"}">
+                ${trainerOrbHtml(other)}
+                <div class="tile-text">
+                  <strong>${escapeHtml(other)}</strong>
+                  <span>${done ? `🤝 You got <b>${escapeHtml(gotName)}</b>` : "😕 Called off"}</span>
+                </div>
+                <button type="button" class="trade-cta ghost trade-open" data-id="${escapeHtml(r.id)}">View</button>
+              </div>`;
+          }).join("")}
+        </div>
+      </section>` : "";
+
+    const nearbyHtml = nearby.length ? `
+      <div class="trade-tiles">
+        ${nearby.map((t) => `
+          <div class="trade-tile">
+            ${trainerOrbHtml(t.name)}
+            <div class="tile-text">
+              <strong>${escapeHtml(t.name)}</strong>
+              <span class="tile-dist"><i class="ping"></i>${t.distance}m away</span>
+            </div>
+            <button type="button" class="trade-cta trade-start" data-name="${escapeHtml(t.name)}">Trade</button>
+          </div>`).join("")}
+      </div>`
+      : `
+      <div class="trade-radar">
+        <div class="radar-scope"><span class="radar-sweep"></span><span class="radar-blip b1"></span><span class="radar-blip b2"></span></div>
+        <p class="radar-title">Scanning for trainers…</p>
+        <p class="radar-sub">Nobody's within <b>${TRADE_RANGE_METERS}m</b> right now. Open Fokémon on another phone close by — they'll pop up here the moment they're in range.</p>
+      </div>`;
+
+    paint(`
+      ${incomingHtml}
+      ${outgoingHtml}
+      <section class="trade-group">
+        <h4 class="trade-group-title">🛰️ Trainers near you <span class="title-note">≤ ${TRADE_RANGE_METERS}m</span></h4>
+        ${nearbyHtml}
+      </section>
+      ${recentHtml}
+    `);
+
+    bodyEl.querySelectorAll(".trade-start").forEach((btn) =>
+      btn.addEventListener("click", () => renderOffer(btn.dataset.name)));
+    bodyEl.querySelectorAll(".trade-open").forEach((btn) =>
+      btn.addEventListener("click", () => renderRequest(btn.dataset.id)));
   }
 
   function renderOffer(recipientName) {
     openTradeRequestId = "list";
     const available = availableInstances(caught);
     if (!available.length) {
-      bodyEl.innerHTML = `
-        <p><a href="#" class="back-link">&larr; Back</a></p>
-        <p class="empty-state">You don't have any Fokemon free to trade. Recall one from a gym first.</p>
-      `;
-      bodyEl.querySelector(".back-link").addEventListener("click", (ev) => { ev.preventDefault(); renderList(); });
+      paint(`
+        <button type="button" class="trade-back">‹ Back</button>
+        <div class="trade-empty">
+          <span class="empty-emoji">🎒</span>
+          <p><b>Your bench is empty!</b></p>
+          <p class="muted">Every Fokémon you own is deployed at a gym. Recall one first, then come back to trade.</p>
+        </div>
+      `);
       return;
     }
-    bodyEl.innerHTML = `
-      <p><a href="#" class="back-link">&larr; Back</a></p>
-      <h4>Offer a Fokemon to <strong>${escapeHtml(recipientName)}</strong></h4>
-      <p class="picker-prompt">Pick the individual you want to send:</p>
-      <div class="picker-grid">
-        ${available.map((entry) => {
-          const card = cardsById.get(entry.id);
-          if (!card) return "";
-          const colors = colorsFor(card);
-          const total = instancePower(entry);
-          const trained = (entry.boosts?.hp || 0) + (entry.boosts?.atk || 0) + (entry.boosts?.def || 0) + (entry.boosts?.spd || 0);
-          const { idx, total: of } = speciesIndexForInstance(entry.uid);
-          return `
-            <button class="picker-card" data-uid="${escapeHtml(entry.uid)}" style="--type-light:${colors.light};--type-dark:${colors.dark};--type-accent:${colors.accent};">
-              <span class="picker-power">⚡${total}</span>
-              <strong>${escapeHtml(card.name)}${of > 1 ? ` <small>#${idx}</small>` : ""}</strong>
-              <small>${escapeHtml(card.type)}${trained ? ` • +${trained} trained` : ""}</small>
-              ${pickerStatsHtml(card, entry.boosts)}
-            </button>
-          `;
-        }).join("")}
+    paint(`
+      <button type="button" class="trade-back">‹ Back</button>
+      ${tradeTalkHtml(recipientName, `Pick the Fokémon you want to send to <b>${escapeHtml(recipientName)}</b>!`, "happy")}
+      <div class="trade-picker">
+        ${available.map((entry) => tradePickCardHtml(entry)).join("")}
       </div>
-    `;
-    bodyEl.querySelector(".back-link").addEventListener("click", (ev) => { ev.preventDefault(); renderList(); });
-    bodyEl.querySelectorAll(".picker-card").forEach((btn) => {
+    `);
+    bodyEl.querySelectorAll(".tcard-pick").forEach((btn) => {
       btn.addEventListener("click", () => {
-        const uid = btn.dataset.uid;
-        const entry = getInstance(uid);
+        const entry = getInstance(btn.dataset.uid);
         if (!entry || entry.deployedAt) return;
+        btn.classList.add("tcard-chosen");
         const req = {
           id: makeRequestId(),
           from: profile.name,
@@ -6110,105 +7769,111 @@ function openTradeModal(initialRequestId = null, options = {}) {
     const req = tradeRequests.get(reqId);
     if (!req) { renderList(); return; }
     openTradeRequestId = reqId;
-    const card = cardsById.get(req.offer.cardId);
-    const counterCard = req.counterOffer ? cardsById.get(req.counterOffer.cardId) : null;
     const iAmFrom = req.from === profile?.name;
     const iAmTo = req.to === profile?.name;
+    const me = profile?.name;
+    const them = iAmFrom ? req.to : req.from;
 
-    let actionsHtml = "";
+    // --- The pending recipient still owes a counter: show their picker. ---
     if (req.status === "pending" && iAmTo) {
-      // Recipient picks their counter-offer.
       const available = availableInstances(caught);
+      const fromCardName = cardsById.get(req.offer.cardId)?.name || "a Fokémon";
       if (!available.length) {
-        actionsHtml = `<p class="empty-state">You have no Fokemon free to offer back. Recall one from a gym first.</p>
-          <button type="button" class="ghost reject-trade">Decline</button>`;
+        paint(`
+          <button type="button" class="trade-back">‹ Back</button>
+          ${tradeRailHtml(2)}
+          ${tradeTalkHtml(req.from, `<b>${escapeHtml(req.from)}</b> offered you a <b>${escapeHtml(fromCardName)}</b> — but every Fokémon you own is at a gym. Recall one to trade back.`, "sad")}
+          <div class="trade-cards"><div class="trade-slot">${tradeMiniCard(req.offer)}</div></div>
+          <div class="trade-actions"><button type="button" class="trade-cta danger trade-decline">Decline</button></div>
+        `);
       } else {
-        actionsHtml = `
-          <p class="picker-prompt">Offer one of yours in return:</p>
-          <div class="picker-grid">
-            ${available.map((entry) => {
-              const c = cardsById.get(entry.id);
-              if (!c) return "";
-              const colors = colorsFor(c);
-              const total = instancePower(entry);
-              const trained = (entry.boosts?.hp || 0) + (entry.boosts?.atk || 0) + (entry.boosts?.def || 0) + (entry.boosts?.spd || 0);
-              const { idx, total: of } = speciesIndexForInstance(entry.uid);
-              return `
-                <button class="picker-card" data-uid="${escapeHtml(entry.uid)}" style="--type-light:${colors.light};--type-dark:${colors.dark};--type-accent:${colors.accent};">
-                  <span class="picker-power">⚡${total}</span>
-                  <strong>${escapeHtml(c.name)}${of > 1 ? ` <small>#${idx}</small>` : ""}</strong>
-                  <small>${escapeHtml(c.type)}${trained ? ` • +${trained} trained` : ""}</small>
-                  ${pickerStatsHtml(c, entry.boosts)}
-                </button>
-              `;
-            }).join("")}
+        paint(`
+          <button type="button" class="trade-back">‹ Back</button>
+          ${tradeRailHtml(2)}
+          ${tradeTalkHtml(req.from, `<b>${escapeHtml(req.from)}</b> threw down a <b>${escapeHtml(fromCardName)}</b>! Pick one of yours to trade back 👇`, "happy")}
+          <div class="trade-cards">
+            <div class="trade-slot"><span class="slot-name">${escapeHtml(req.from)}</span>${tradeMiniCard(req.offer)}</div>
+            <span class="trade-swap-icon">⇄</span>
+            <div class="trade-slot"><span class="slot-name">You</span><div class="slot-empty">Pick below 👇</div></div>
           </div>
-          <div class="trade-actions">
-            <button type="button" class="ghost reject-trade">Decline</button>
+          <div class="trade-picker">
+            ${available.map((entry) => tradePickCardHtml(entry)).join("")}
           </div>
-        `;
+          <div class="trade-actions"><button type="button" class="trade-cta danger trade-decline">Decline trade</button></div>
+        `);
+        bodyEl.querySelectorAll(".tcard-pick").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            const entry = getInstance(btn.dataset.uid);
+            if (!entry || entry.deployedAt) return;
+            const updated = { ...req, counterOffer: packInstanceForTrade(entry), status: "countered", updatedAt: Date.now() };
+            tradeRequests.set(req.id, updated);
+            publishTradeRequest(updated);
+            renderRequest(req.id);
+          });
+        });
       }
-    } else if (req.status === "countered" && iAmFrom) {
-      actionsHtml = `
-        <div class="trade-actions">
-          <button type="button" class="primary confirm-trade">Confirm swap</button>
-          <button type="button" class="ghost cancel-trade">Cancel</button>
-        </div>
-      `;
-    } else if (req.status === "completed") {
-      actionsHtml = `<p class="trade-result success">Trade complete — check your collection.</p>`;
-    } else if (req.status === "cancelled") {
-      actionsHtml = `<p class="trade-result fail">Trade cancelled.</p>`;
-    } else if (req.status === "pending" && iAmFrom) {
-      actionsHtml = `
-        <p class="trade-status">Waiting for ${escapeHtml(req.to)} to respond…</p>
-        <div class="trade-actions">
-          <button type="button" class="ghost cancel-trade">Cancel</button>
-        </div>
-      `;
-    } else if (req.status === "countered" && iAmTo) {
-      actionsHtml = `<p class="trade-status">Waiting for ${escapeHtml(req.from)} to confirm…</p>
-        <div class="trade-actions">
-          <button type="button" class="ghost cancel-trade">Cancel</button>
-        </div>`;
+      wireTradeButtons(req);
+      return;
     }
 
-    bodyEl.innerHTML = `
-      <p><a href="#" class="back-link">&larr; Back</a></p>
-      <section class="trade-summary">
-        <div class="trade-side">
-          <p class="trade-side-label">${escapeHtml(req.from)} offers</p>
-          ${offerSummaryHtml(req.offer)}
-        </div>
-        <span class="trade-arrow">⇄</span>
-        <div class="trade-side">
-          <p class="trade-side-label">${escapeHtml(req.to)} ${req.counterOffer ? "offers" : "to respond"}</p>
-          ${req.counterOffer ? offerSummaryHtml(req.counterOffer) : `<p class="empty-state">Waiting…</p>`}
-        </div>
-      </section>
-      <section class="trade-actions-section">
-        ${actionsHtml}
-      </section>
-    `;
-    bodyEl.querySelector(".back-link")?.addEventListener("click", (ev) => { ev.preventDefault(); renderList(); });
+    // --- Everything else: the two-card "trade table". ---
+    let railStep = 2, railOpts = {};
+    let bubble = "";
+    let actions = "";
+    let tableClass = "";
 
-    bodyEl.querySelectorAll(".picker-card").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const uid = btn.dataset.uid;
-        const entry = getInstance(uid);
-        if (!entry || entry.deployedAt) return;
-        const updated = {
-          ...req,
-          counterOffer: packInstanceForTrade(entry),
-          status: "countered",
-          updatedAt: Date.now(),
-        };
-        tradeRequests.set(req.id, updated);
-        publishTradeRequest(updated);
-        renderRequest(req.id);
-      });
-    });
-    bodyEl.querySelector(".confirm-trade")?.addEventListener("click", () => {
+    if (req.status === "completed") {
+      railOpts = { complete: true };
+      const gainedCard = iAmFrom ? cardsById.get(req.counterOffer?.cardId) : cardsById.get(req.offer?.cardId);
+      const gained = gainedCard?.name || "a new Fokémon";
+      const fresh = !celebratedTrades.has(req.id);
+      celebratedTrades.add(req.id);
+      tableClass = fresh ? "is-swapping" : "is-swapped";
+      bubble = `<div class="trade-banner">🎉 <b>Trade complete!</b><span><b>${escapeHtml(gained)}</b> is now yours — it's in your collection.</span></div>`;
+      actions = `<button type="button" class="trade-cta big trade-done">Awesome! 🎈</button>`;
+    } else if (req.status === "cancelled") {
+      railOpts = { cancelled: true };
+      bubble = `<div class="trade-banner sad">😕 <b>Trade called off.</b><span>No Fokémon changed hands.</span></div>`;
+      actions = `<button type="button" class="trade-cta trade-back">‹ Back to trainers</button>`;
+    } else if (req.status === "pending" && iAmFrom) {
+      railStep = 2;
+      bubble = tradeTalkHtml(req.to, `Sent! Waiting for <b>${escapeHtml(req.to)}</b> to pick a card to trade back${liveDots}`, "wait");
+      actions = `<button type="button" class="trade-cta danger trade-cancel">Cancel offer</button>`;
+    } else if (req.status === "countered" && iAmFrom) {
+      railStep = 3;
+      const cn = cardsById.get(req.counterOffer?.cardId)?.name || "a Fokémon";
+      bubble = tradeTalkHtml(req.to, `<b>${escapeHtml(req.to)}</b> wants to trade their <b>${escapeHtml(cn)}</b> for yours. Seal the deal? 🤝`, "happy");
+      actions = `
+        <button type="button" class="trade-cta big trade-confirm">✓ Confirm swap</button>
+        <button type="button" class="trade-cta ghost trade-cancel">Cancel</button>`;
+    } else if (req.status === "countered" && iAmTo) {
+      railStep = 3;
+      bubble = tradeTalkHtml(req.from, `Card locked in! Waiting for <b>${escapeHtml(req.from)}</b> to seal the swap${liveDots}`, "wait");
+      actions = `<button type="button" class="trade-cta danger trade-cancel">Cancel</button>`;
+    }
+
+    const mineOffer = iAmTo ? req.counterOffer : req.offer;
+    const theirsOffer = iAmTo ? req.offer : req.counterOffer;
+    const myLabel = me ? escapeHtml(me) : "You";
+    const theirLabel = escapeHtml(them);
+
+    paint(`
+      <button type="button" class="trade-back">‹ Back</button>
+      ${tradeRailHtml(railStep, railOpts)}
+      ${bubble}
+      <div class="trade-table ${tableClass}">
+        <div class="trade-slot slot-mine"><span class="slot-name">${myLabel}</span>${tradeMiniCard(mineOffer, { waitingLabel: "You haven't picked yet" })}</div>
+        <span class="trade-swap-icon" aria-hidden="true">⇄</span>
+        <div class="trade-slot slot-theirs"><span class="slot-name">${theirLabel}</span>${tradeMiniCard(theirsOffer, { waitingLabel: `Waiting for ${escapeHtml(them)}…` })}</div>
+        <span class="spark-burst" aria-hidden="true">${"<i></i>".repeat(8)}</span>
+      </div>
+      <div class="trade-actions">${actions}</div>
+    `);
+    wireTradeButtons(req);
+  }
+
+  function wireTradeButtons(req) {
+    bodyEl.querySelector(".trade-confirm")?.addEventListener("click", () => {
       const finalized = { ...req, status: "completed", updatedAt: Date.now() };
       tradeRequests.set(req.id, finalized);
       publishTradeRequest(finalized);
@@ -6216,30 +7881,33 @@ function openTradeModal(initialRequestId = null, options = {}) {
       applyIncomingCompletedTrade(finalized);
       renderRequest(req.id);
     });
-    bodyEl.querySelector(".cancel-trade")?.addEventListener("click", () => {
+    bodyEl.querySelector(".trade-cancel")?.addEventListener("click", () => {
       const cancelled = { ...req, status: "cancelled", updatedAt: Date.now() };
       locallyCancelledTrades.add(req.id);
       tradeRequests.set(req.id, cancelled);
       publishTradeRequest(cancelled);
       renderRequest(req.id);
     });
-    bodyEl.querySelector(".reject-trade")?.addEventListener("click", () => {
+    bodyEl.querySelector(".trade-decline")?.addEventListener("click", () => {
       const cancelled = { ...req, status: "cancelled", updatedAt: Date.now() };
       locallyCancelledTrades.add(req.id);
       tradeRequests.set(req.id, cancelled);
       publishTradeRequest(cancelled);
       renderList();
     });
+    bodyEl.querySelector(".trade-done")?.addEventListener("click", close);
   }
 
   function renderOutOfRange(name) {
     openTradeRequestId = "list";
-    bodyEl.innerHTML = `
-      <p><a href="#" class="back-link">&larr; Back</a></p>
-      <h4>${escapeHtml(name)} is out of range</h4>
-      <p class="empty-state">You need to be within ${TRADE_RANGE_METERS}m of <strong>${escapeHtml(name)}</strong> (and they must have been active recently) to trade. Move closer and try again.</p>
-    `;
-    bodyEl.querySelector(".back-link").addEventListener("click", (ev) => { ev.preventDefault(); renderList(); });
+    paint(`
+      <button type="button" class="trade-back">‹ Back</button>
+      <div class="trade-empty">
+        <span class="empty-emoji">📡</span>
+        <p><b>${escapeHtml(name)} is too far away!</b></p>
+        <p class="muted">You need to be within <b>${TRADE_RANGE_METERS}m</b> of ${escapeHtml(name)} (and they must have been active recently). Walk closer and try again.</p>
+      </div>
+    `);
   }
 
   openTradeRefresh = () => {
@@ -6275,25 +7943,163 @@ function initGun() {
     battleSitesNode = root.get("battleSites");
     battleEventsNode = root.get("battleEvents");
     tradesNode = root.get("trades");
+    presenceNode = root.get("presence");
     connectFeed();
     connectGridCaught();
     subscribeChampionUpdates();
     subscribeTrades();
+    subscribePresence();
   } catch {
     eventsNode = FALLBACK_EVENTS_NODE;
   }
+}
+
+// ---- App-shell navigation ----------------------------------------------
+// The map is the persistent stage. The bottom bar + ticker raise
+// bottom-sheets *over* the still-running map; nothing here ever scrolls
+// the page. Gameplay modals (catch/battle/card-viewer) keep their higher
+// z-index and sit above all of this untouched.
+function initAppShell() {
+  if (typeof document === "undefined" || typeof document.querySelectorAll !== "function") return;
+  const scrim = el.sheetScrim;
+  if (!scrim) return;
+  const navButtons = Array.from(document.querySelectorAll(".nav-btn"));
+  const sheets = {
+    catch: document.getElementById("sheet-catch"),
+    collection: document.getElementById("sheet-collection"),
+    feed: document.getElementById("sheet-feed"),
+  };
+  let activeSheet = null;
+  let closeTimer = null;
+
+  function setActiveNav(name) {
+    navButtons.forEach((b) => {
+      const n = b.dataset.nav;
+      b.classList.toggle("is-active", name ? n === name : n === "map");
+    });
+  }
+
+  function openSheet(name) {
+    const sheet = sheets[name];
+    if (!sheet) return;
+    if (activeSheet && activeSheet !== name) {
+      const prev = sheets[activeSheet];
+      if (prev) prev.classList.remove("show"), prev.classList.add("hidden");
+    }
+    if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; }
+    activeSheet = name;
+    scrim.classList.remove("hidden");
+    sheet.classList.remove("hidden");
+    void sheet.offsetWidth; // reflow so the slide-up transition runs
+    requestAnimationFrame(() => {
+      scrim.classList.add("show");
+      sheet.classList.add("show");
+    });
+    setActiveNav(name);
+    // Refresh content that may have changed while the sheet was closed.
+    if (name === "catch") renderCards();
+    else if (name === "collection") renderCollection();
+    else if (name === "feed") renderFeed();
+  }
+
+  function closeSheet() {
+    if (!activeSheet) return;
+    const sheet = sheets[activeSheet];
+    activeSheet = null;
+    scrim.classList.remove("show");
+    if (sheet) sheet.classList.remove("show");
+    setActiveNav(null);
+    closeTimer = setTimeout(() => {
+      scrim.classList.add("hidden");
+      if (sheet) sheet.classList.add("hidden");
+      closeTimer = null;
+    }, 340);
+  }
+
+  navButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const nav = btn.dataset.nav;
+      if (nav === "map") {
+        if (activeSheet) closeSheet();
+        else recenterOnPlayer();
+        return;
+      }
+      if (activeSheet === nav) closeSheet();
+      else openSheet(nav);
+    });
+  });
+
+  if (el.feedTicker) {
+    el.feedTicker.addEventListener("click", () => {
+      if (activeSheet === "feed") closeSheet();
+      else openSheet("feed");
+    });
+  }
+
+  scrim.addEventListener("click", closeSheet);
+  document
+    .querySelectorAll("[data-sheet-close]")
+    .forEach((b) => b.addEventListener("click", closeSheet));
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && activeSheet) closeSheet();
+  });
+
+  // Swipe-down on a sheet header dismisses it (native bottom-sheet feel).
+  Object.values(sheets).forEach((sheet) => {
+    const head = sheet && sheet.querySelector(".sheet-head");
+    if (!head) return;
+    let startY = 0;
+    let dy = 0;
+    let dragging = false;
+    head.addEventListener(
+      "touchstart",
+      (e) => {
+        dragging = true;
+        startY = e.touches[0].clientY;
+        dy = 0;
+        sheet.style.transition = "none";
+      },
+      { passive: true }
+    );
+    head.addEventListener(
+      "touchmove",
+      (e) => {
+        if (!dragging) return;
+        dy = Math.max(0, e.touches[0].clientY - startY);
+        sheet.style.transform = `translate(-50%, ${dy}px)`;
+      },
+      { passive: true }
+    );
+    head.addEventListener("touchend", () => {
+      if (!dragging) return;
+      dragging = false;
+      sheet.style.transition = "";
+      sheet.style.transform = "";
+      if (dy > 90) closeSheet();
+    });
+  });
+
+  // Keep Leaflet sized to the full-screen container across viewport changes.
+  const resize = () => requestAnimationFrame(() => leafletMap?.invalidateSize());
+  window.addEventListener("resize", resize);
+  window.addEventListener("orientationchange", () => setTimeout(resize, 250));
 }
 
 function enterGame() {
   if (!el.auth || !el.game) return;
   el.auth.classList.add("hidden");
   el.game.classList.remove("hidden");
-  el.welcome.textContent = `Welcome, ${profile.name}`;
+  // Compact HUD chip — the "Live sync" eyebrow carries the context, so the
+  // headline is just the trainer name (it ellipsises within the chip).
+  el.welcome.textContent = profile.name;
   document.documentElement.style.setProperty(
     "--accent",
     profile.team === "violet" ? "#ca90ff" : profile.team === "sun" ? "#ffd173" : "#7cf0c6"
   );
   ensureMap();
+  // The map just went from display:none to a fixed full-viewport stage —
+  // give Leaflet a beat to pick up the new size (URL bar / font load too).
+  setTimeout(() => leafletMap?.invalidateSize(), 220);
   ensureFreshPlacements();
   renderBallCount();
   renderCards();
@@ -6339,11 +8145,40 @@ if (el.form) {
   });
 }
 
-if (el.reset) {
-  el.reset.addEventListener("click", () => {
+function confirmSwitchTrainer() {
+  if (document.getElementById("logoutConfirm")) return;
+  const overlay = document.createElement("div");
+  overlay.id = "logoutConfirm";
+  overlay.className = "modal";
+  const who = escapeHtml(profile?.name || "this trainer");
+  overlay.innerHTML = `
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="logoutConfirmTitle">
+      <p class="eyebrow">Switch trainer</p>
+      <h2 id="logoutConfirmTitle">Log out of ${who}?</h2>
+      <p>This signs out on this device and returns to the trainer setup screen. Your caught Fokemon and gym champions stay safe on the network — you can sign back in with the same name to pick up where you left off.</p>
+      <div class="debug-actions">
+        <button type="button" class="ghost lo-cancel">Stay logged in</button>
+        <button type="button" class="lo-confirm">Log out</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  function close() {
+    overlay.remove();
+    document.removeEventListener("keydown", onKey);
+  }
+  function onKey(ev) { if (ev.key === "Escape") close(); }
+  document.addEventListener("keydown", onKey);
+  overlay.addEventListener("click", (ev) => { if (ev.target === overlay) close(); });
+  overlay.querySelector(".lo-cancel").addEventListener("click", close);
+  overlay.querySelector(".lo-confirm").addEventListener("click", () => {
     try { localStorage.removeItem("fokemon_profile"); } catch {}
     location.reload();
   });
+}
+
+if (el.reset) {
+  el.reset.addEventListener("click", confirmSwitchTrainer);
 }
 
 if (el.enableLocation) {
@@ -6362,6 +8197,7 @@ if (el.tradeBtn) {
 
 
 initGun();
+initAppShell();
 
 if (profile?.name) enterGame();
 
@@ -6391,4 +8227,8 @@ if (typeof setInterval === "function") {
       if (typeof openSiteRefresh === "function") openSiteRefresh();
     }
   }, 1000);
+
+  // Idle heartbeat: keeps this trainer discoverable for trading even when
+  // they aren't catching anything. Forced (bypasses the publish throttle).
+  setInterval(() => publishPresence(true), PRESENCE_HEARTBEAT_MS);
 }

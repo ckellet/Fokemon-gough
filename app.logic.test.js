@@ -37,6 +37,11 @@ import {
   normalizeBoosts,
   computeGymRestGain,
   GYM_REST_HP_INTERVAL_MS,
+  serializeTradeOffer,
+  parseTradeOffer,
+  mergeTrainerLocation,
+  TRADE_DISCOVERY_TTL_MS,
+  PRESENCE_TTL_MS,
 } from './app.logic.js';
 
 test('computeCollectionStats returns total and unique counts', () => {
@@ -59,6 +64,87 @@ test('mergeRecentEvents enforces max items', () => {
   for (let i = 0; i < 5; i++) events = mergeRecentEvents(events, { trainer: 'T', card: String(i), ts: i }, 3);
   assert.equal(events.length, 3);
   assert.deepEqual(events.map((e) => e.card), ['2', '3', '4']);
+});
+
+test('presence windows: trade discovery is tighter than the map window', () => {
+  assert.equal(TRADE_DISCOVERY_TTL_MS, 15 * 60 * 1000);
+  assert.equal(PRESENCE_TTL_MS, 30 * 60 * 1000);
+  assert.ok(TRADE_DISCOVERY_TTL_MS < PRESENCE_TTL_MS);
+});
+
+test('trade offer survives the GUN wire as a JSON string round-trip', () => {
+  const offer = { uid: 'VoltLynx#abc', cardId: 'VoltLynx', boosts: { hp: 3, atk: 2, def: 0, spd: 1 }, caughtAt: 1700 };
+  const wire = serializeTradeOffer(offer);
+  assert.equal(typeof wire, 'string');
+  // What the *receiving* peer gets from tradesNode.map().on() is this string.
+  const decoded = parseTradeOffer(wire);
+  assert.deepEqual(decoded, {
+    uid: 'VoltLynx#abc',
+    cardId: 'VoltLynx',
+    boosts: { hp: 3, atk: 2, def: 0, spd: 1 },
+    caughtAt: 1700,
+  });
+});
+
+test('parseTradeOffer rejects an unresolved GUN link node (the original bug)', () => {
+  // GUN .map().on() hands nested objects over as link references, never data.
+  assert.equal(parseTradeOffer({ '#': 'fokemon/trades/trade-1/offer' }), null);
+  assert.equal(parseTradeOffer({ '#': 'soul', _: { '#': 'soul' } }), null);
+});
+
+test('parseTradeOffer accepts a plain object (local echo / legacy record)', () => {
+  const decoded = parseTradeOffer({ uid: 'u1', cardId: 'AquaPup', boosts: { hp: 1 }, caughtAt: 5 });
+  assert.equal(decoded.uid, 'u1');
+  assert.equal(decoded.cardId, 'AquaPup');
+  assert.deepEqual(decoded.boosts, { hp: 1, atk: 0, def: 0, spd: 0 });
+});
+
+test('trade offer serialization is null-safe on junk input', () => {
+  assert.equal(serializeTradeOffer(null), null);
+  assert.equal(serializeTradeOffer({ cardId: 'X' }), null); // no uid
+  assert.equal(parseTradeOffer(null), null);
+  assert.equal(parseTradeOffer('not json{'), null);
+  assert.equal(parseTradeOffer('{"cardId":"X"}'), null); // no uid
+});
+
+test('mergeTrainerLocation accepts a fresh signal when nothing is stored', () => {
+  const now = 1_700_000_000_000;
+  const merged = mergeTrainerLocation(undefined, { lat: 1, lng: 2, ts: now - 1000 }, now);
+  assert.deepEqual(merged, { lat: 1, lng: 2, ts: now - 1000 });
+});
+
+test('mergeTrainerLocation keeps the newer timestamp (heartbeat not clobbered by late catch)', () => {
+  const now = 1_700_000_000_000;
+  const fresh = { lat: 1, lng: 2, ts: now - 1000 };
+  // A late-arriving older catch event must not overwrite a fresher heartbeat.
+  const kept = mergeTrainerLocation(fresh, { lat: 9, lng: 9, ts: now - 60_000 }, now);
+  assert.equal(kept, fresh, 'should return the existing entry by reference, unchanged');
+  // A newer signal does replace it.
+  const updated = mergeTrainerLocation(fresh, { lat: 5, lng: 6, ts: now - 10 }, now);
+  assert.deepEqual(updated, { lat: 5, lng: 6, ts: now - 10 });
+});
+
+test('mergeTrainerLocation drops signals older than the TTL', () => {
+  const now = 1_700_000_000_000;
+  const stale = mergeTrainerLocation(undefined, { lat: 1, lng: 2, ts: now - PRESENCE_TTL_MS - 1 }, now);
+  assert.equal(stale, null, 'too old to ever display -> not stored');
+  const existing = { lat: 1, lng: 2, ts: now - 1000 };
+  // A stale incoming signal leaves an existing entry untouched (no deletion).
+  assert.equal(
+    mergeTrainerLocation(existing, { lat: 7, lng: 8, ts: now - PRESENCE_TTL_MS - 1 }, now),
+    existing
+  );
+});
+
+test('mergeTrainerLocation rejects non-finite coordinates without losing prior data', () => {
+  const now = 1_700_000_000_000;
+  const existing = { lat: 1, lng: 2, ts: now - 1000 };
+  assert.equal(mergeTrainerLocation(existing, null, now), existing);
+  assert.equal(mergeTrainerLocation(existing, { lat: 'x', lng: 2, ts: now }, now), existing);
+  assert.equal(mergeTrainerLocation(undefined, { lat: 1, lng: 2, ts: NaN }, now), null);
+  // A catch event with null coords must not land the trainer at 0,0.
+  assert.equal(mergeTrainerLocation(undefined, { lat: null, lng: null, ts: now }, now), null);
+  assert.equal(mergeTrainerLocation(existing, { lat: null, lng: null, ts: now }, now), existing);
 });
 
 test('getGridKey returns stable geographic bucket at coarse cell', () => {

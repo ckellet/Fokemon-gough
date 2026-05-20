@@ -13,6 +13,15 @@ export const CHAMPION_TTL_MS = 24 * 60 * 60 * 1000;
 // still the way to push other stats.
 export const GYM_REST_HP_INTERVAL_MS = 30 * 60 * 1000;
 
+// How long a trainer stays on the map / discoverable for trading after their
+// last location signal (catch event OR presence heartbeat). Two windows,
+// matching what the UI already used inline before presence existed:
+//   - TRADE_DISCOVERY_TTL_MS: still selectable as a nearby trade partner.
+//   - PRESENCE_TTL_MS: still drawn as a map marker (the more forgiving one,
+//     also the cutoff below which we don't even bother storing a location).
+export const TRADE_DISCOVERY_TTL_MS = 15 * 60 * 1000;
+export const PRESENCE_TTL_MS = 30 * 60 * 1000;
+
 // Conservative open-ocean exclusion boxes. Cells whose centre falls inside one
 // of these boxes get no POIs or battle sites — keeps mid-ocean clear without
 // risking false exclusions over coasts or islands.
@@ -181,6 +190,52 @@ export function normalizeBoosts(raw) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Trade offer wire format
+// ---------------------------------------------------------------------------
+// A trade record syncs through `fokemon/trades/<id>` and is read on every peer
+// via `tradesNode.map().on()`. GUN's `.map().on()` does NOT resolve nested
+// child objects — a `put({ offer: { ... } })` is stored as a *separate graph
+// node*, so the receiver sees `offer` as an unresolved link (`{ '#': soul }`),
+// never the real `{ uid, cardId, boosts }`. The originator's own callback fires
+// with the full object only because GUN already has that subgraph cached
+// locally from its own `.put()` — which is exactly why "I can send a trade but
+// the other player never receives it" happens in two-browser testing.
+//
+// Fix: keep the offer as a single JSON *string* scalar. Strings sync verbatim
+// through `.map().on()`, so both peers reconstruct an identical offer.
+export function serializeTradeOffer(offer) {
+  if (!offer || typeof offer !== "object") return null;
+  if (!offer.uid || !offer.cardId) return null;
+  return JSON.stringify({
+    uid: String(offer.uid),
+    cardId: String(offer.cardId),
+    boosts: normalizeBoosts(offer.boosts),
+    caughtAt: Number(offer.caughtAt) || 0,
+  });
+}
+
+// Accepts what a peer actually receives: a JSON string (the wire format), or a
+// plain object (a local echo before it round-trips, or a legacy record). An
+// unresolved GUN link (`{ '#': ... }`, no uid/cardId) yields null so a partial
+// graph read can't masquerade as a real offer. Card-existence is the caller's
+// job (it needs the live card index); this only fixes the shape.
+export function parseTradeOffer(raw) {
+  if (!raw) return null;
+  let obj = raw;
+  if (typeof raw === "string") {
+    try { obj = JSON.parse(raw); } catch { return null; }
+  }
+  if (!obj || typeof obj !== "object") return null;
+  if (!obj.uid || !obj.cardId) return null;
+  return {
+    uid: String(obj.uid),
+    cardId: String(obj.cardId),
+    boosts: normalizeBoosts(obj.boosts),
+    caughtAt: Number(obj.caughtAt) || 0,
+  };
+}
+
 export function migrateCaughtEntries(entries) {
   // Assign uid/boosts/deployedAt to legacy entries while preserving any newer
   // fields. Returns a new array; safe to call multiple times.
@@ -230,6 +285,35 @@ export function mergeRecentEvents(currentEvents, incomingEvent, maxItems = 100) 
   const merged = [...currentEvents, incomingEvent];
   if (merged.length > maxItems) return merged.slice(merged.length - maxItems);
   return merged;
+}
+
+// Decide how an incoming location signal should update the in-memory
+// trainerLocations entry for one trainer. Used for BOTH catch events and
+// presence heartbeats so the two stay consistent:
+//   - Newest timestamp wins, so a late-arriving stale catch event can never
+//     clobber a fresh presence heartbeat (or vice versa).
+//   - Anything already older than ttlMs is dropped — it would never be shown
+//     anyway, and this keeps the map from accumulating ancient trainers when
+//     a peer replays a long-dormant presence record on connect.
+// Returns the entry to keep (the existing one unchanged when nothing should
+// change, a new entry when it should update, or null when there's nothing
+// worth storing). Pure: callers diff by reference to decide whether to redraw.
+export function mergeTrainerLocation(existing, incoming, now = Date.now(), ttlMs = PRESENCE_TTL_MS) {
+  if (!incoming) return existing ?? null;
+  // Reject nullish coords explicitly: a catch event may publish lat/lng:null,
+  // and Number(null) === 0 would otherwise drop the trainer onto null island.
+  if (incoming.lat == null || incoming.lng == null || incoming.ts == null) {
+    return existing ?? null;
+  }
+  const lat = Number(incoming.lat);
+  const lng = Number(incoming.lng);
+  const ts = Number(incoming.ts);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || !Number.isFinite(ts)) {
+    return existing ?? null;
+  }
+  if (now - ts > ttlMs) return existing ?? null;
+  if (existing && Number.isFinite(existing.ts) && existing.ts >= ts) return existing;
+  return { lat, lng, ts };
 }
 
 export function getGridKey(lat, lon, cellSizeDegrees = SPAWN_CELL_DEGREES) {
