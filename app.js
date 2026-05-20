@@ -27,7 +27,6 @@ import {
   deployedInstanceAtSite,
   mergeBoosts,
   normalizeBoosts,
-  serializeTradeOffer,
   parseTradeOffer,
   COLLECTION_SORTS,
   groupCollection,
@@ -7198,18 +7197,16 @@ function normalizeTradeRequest(raw) {
 
 function publishTradeRequest(req) {
   if (!tradesNode) return;
-  // offer/counterOffer go on the wire as JSON *strings*, not nested objects:
-  // GUN's tradesNode.map().on() never resolves nested child nodes, so an
-  // object would reach peers as an unresolved link and the request would be
-  // silently dropped. Strings sync verbatim. parseTradeOffer rebuilds the
-  // shape on receipt. (Even though encryptedPut wraps the whole payload as a
-  // single ciphertext envelope, we keep the serialize for defence in depth.)
+  // The whole payload gets encrypted into a single ciphertext string before
+  // it hits Gun, so the "Gun won't resolve nested child nodes via map().on()"
+  // hazard doesn't apply here — nested offer/counterOffer survive the round
+  // trip inside the SEA envelope.
   encryptedPut(tradesNode.get(req.id), {
     id: req.id,
     from: req.from,
     to: req.to,
-    offer: serializeTradeOffer(req.offer),
-    counterOffer: req.counterOffer ? serializeTradeOffer(req.counterOffer) : null,
+    offer: req.offer ? { ...req.offer, boosts: { ...req.offer.boosts } } : null,
+    counterOffer: req.counterOffer ? { ...req.counterOffer, boosts: { ...req.counterOffer.boosts } } : null,
     status: req.status,
     createdAt: req.createdAt,
     updatedAt: Date.now(),
