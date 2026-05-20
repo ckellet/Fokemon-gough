@@ -950,6 +950,18 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
 .picker-card strong { font-size: .9rem; }
 .picker-card small { color: var(--muted); font-size: .68rem; letter-spacing: .04em; }
 .picker-card:hover { transform: translateY(-1px); border-color: rgba(255, 255, 255, .5); box-shadow: 0 6px 22px rgba(0, 0, 0, .35); }
+.picker-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .12rem .55rem;
+  margin-top: .25rem;
+  font-size: .68rem;
+  color: rgba(245, 247, 255, .82);
+  letter-spacing: .03em;
+}
+.picker-stats span { display: flex; justify-content: space-between; gap: .35rem; }
+.picker-stats span b { font-weight: 700; color: #f5f7ff; }
+.picker-stats .stat-boost { color: var(--type-accent, #ffd966); font-weight: 700; margin-left: .2rem; }
 .picker-power {
   position: absolute;
   top: .35rem;

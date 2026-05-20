@@ -8,6 +8,10 @@ export const BATTLE_SITE_MACRO_SIZE = 3;
 export const MAX_TRAINING_BOOST_PER_STAT = 28;
 export const MAX_CHAMPION_DEFENSES = 5;
 export const CHAMPION_TTL_MS = 24 * 60 * 60 * 1000;
+// Champions resting on guard duty accrue +1 HP boost per interval, capped by
+// MAX_TRAINING_BOOST_PER_STAT. Slower than the training drill so the drill is
+// still the way to push other stats.
+export const GYM_REST_HP_INTERVAL_MS = 30 * 60 * 1000;
 
 // Conservative open-ocean exclusion boxes. Cells whose centre falls inside one
 // of these boxes get no POIs or battle sites — keeps mid-ocean clear without
@@ -489,6 +493,25 @@ export function effectiveStats(card, champion) {
     def: apply(card.def ?? 0, boosts.def, 1),
     spd: apply(card.spd ?? 0, boosts.spd, 0.8),
   };
+}
+
+export function computeGymRestGain({ boosts, restAccruedAt, placedAt, now }, intervalMs = GYM_REST_HP_INTERVAL_MS) {
+  // Pure: how many HP-boost slices a champion has accrued since the last
+  // credit. Time always advances (even when capped), so capped tenure doesn't
+  // bank slices for later. 0 is a valid timestamp, so prefer Number.isFinite
+  // over truthiness when picking the start point.
+  const restValid = Number.isFinite(restAccruedAt) && restAccruedAt > 0;
+  const placedValid = Number.isFinite(placedAt) && placedAt >= 0;
+  const start = restValid ? Number(restAccruedAt) : (placedValid ? Number(placedAt) : (Number(now) || 0));
+  const t = Number(now) || 0;
+  const interval = Math.max(1, Number(intervalMs) || 1);
+  const elapsed = Math.max(0, t - start);
+  const slicesAvailable = Math.floor(elapsed / interval);
+  const currentHp = Math.max(0, Number(boosts?.hp) || 0);
+  const headroom = Math.max(0, MAX_TRAINING_BOOST_PER_STAT - currentHp);
+  const gain = Math.min(slicesAvailable, headroom);
+  const nextAccruedAt = start + slicesAvailable * interval;
+  return { gain, nextAccruedAt };
 }
 
 export function isChampionRetired(champion, now = Date.now()) {

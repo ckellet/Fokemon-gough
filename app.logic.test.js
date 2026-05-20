@@ -35,6 +35,8 @@ import {
   deployedInstanceAtSite,
   mergeBoosts,
   normalizeBoosts,
+  computeGymRestGain,
+  GYM_REST_HP_INTERVAL_MS,
 } from './app.logic.js';
 
 test('computeCollectionStats returns total and unique counts', () => {
@@ -451,4 +453,38 @@ test('flattenCollectionGroups yields a rep-first linear sequence', () => {
 test('groupCollection handles empty input', () => {
   assert.deepEqual(groupCollection([], collLookup, 'recent'), []);
   assert.deepEqual(flattenCollectionGroups([]), []);
+});
+
+test('computeGymRestGain awards one HP per interval', () => {
+  const placedAt = 0;
+  const now = placedAt + GYM_REST_HP_INTERVAL_MS * 3 + 500;
+  const out = computeGymRestGain({ boosts: { hp: 0 }, placedAt, restAccruedAt: 0, now });
+  assert.equal(out.gain, 3);
+  assert.equal(out.nextAccruedAt, placedAt + GYM_REST_HP_INTERVAL_MS * 3);
+});
+
+test('computeGymRestGain returns zero before the first interval elapses', () => {
+  const placedAt = 0;
+  const now = GYM_REST_HP_INTERVAL_MS - 1;
+  const out = computeGymRestGain({ boosts: { hp: 0 }, placedAt, restAccruedAt: 0, now });
+  assert.equal(out.gain, 0);
+  assert.equal(out.nextAccruedAt, placedAt);
+});
+
+test('computeGymRestGain caps gain at the boost ceiling', () => {
+  const placedAt = 0;
+  const now = GYM_REST_HP_INTERVAL_MS * 100;
+  const out = computeGymRestGain({ boosts: { hp: MAX_TRAINING_BOOST_PER_STAT - 2 }, placedAt, restAccruedAt: 0, now });
+  assert.equal(out.gain, 2);
+  // Time still advances even when capped, so capped tenure doesn't bank slices.
+  assert.equal(out.nextAccruedAt, GYM_REST_HP_INTERVAL_MS * 100);
+});
+
+test('computeGymRestGain resumes from prior restAccruedAt', () => {
+  const placedAt = 0;
+  const restAccruedAt = GYM_REST_HP_INTERVAL_MS * 2;
+  const now = restAccruedAt + GYM_REST_HP_INTERVAL_MS + 5;
+  const out = computeGymRestGain({ boosts: { hp: 5 }, placedAt, restAccruedAt, now });
+  assert.equal(out.gain, 1);
+  assert.equal(out.nextAccruedAt, restAccruedAt + GYM_REST_HP_INTERVAL_MS);
 });
