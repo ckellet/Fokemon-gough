@@ -56,6 +56,81 @@ const NEARBY_ZOOM_THRESHOLD = 15;
 const RECENTER_ZOOM = 18;
 const GUN_PEERS = ["https://relay.peer.ooo/gun", "https://gun.o8.is/gun"];
 
+// Public Gun relays hand the full graph to anyone who connects. Encrypting
+// payloads with a shared secret raises the bar from "curl one URL" to "read
+// the JS bundle" — enough to keep casual scrapers out of player locations and
+// trade data. Bumping FOKEMON_NS invalidates older plaintext records.
+const FOKEMON_NS = "fokemon-v2";
+const FOKEMON_SHARED_SECRET = "fokemon/trainers-only/2026-05";
+
+function seaReady() {
+  return typeof window !== "undefined" && window.Gun && window.Gun.SEA;
+}
+
+async function encryptPayload(plain) {
+  if (!seaReady()) return null;
+  try {
+    const cipher = await window.Gun.SEA.encrypt(plain, FOKEMON_SHARED_SECRET);
+    return cipher ? { c: cipher } : null;
+  } catch {
+    return null;
+  }
+}
+
+async function decryptPayload(raw) {
+  if (!raw || typeof raw !== "object" || typeof raw.c !== "string") return null;
+  if (!seaReady()) return null;
+  try {
+    const plain = await window.Gun.SEA.decrypt(raw.c, FOKEMON_SHARED_SECRET);
+    return plain ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function encryptedPut(node, plain) {
+  if (!node || typeof node.put !== "function") return;
+  if (plain === null) { try { node.put(null); } catch {} return; }
+  encryptPayload(plain).then((env) => {
+    if (!env) return;
+    try { node.put(env); } catch {}
+  });
+}
+
+function encryptedSet(node, plain) {
+  if (!node || typeof node.set !== "function") return;
+  encryptPayload(plain).then((env) => {
+    if (!env) return;
+    try { node.set(env); } catch {}
+  });
+}
+
+function encryptedOn(node, handler) {
+  if (!node || typeof node.on !== "function") return;
+  try {
+    node.on((raw, key) => {
+      if (!raw) { handler(null, key); return; }
+      decryptPayload(raw).then((plain) => {
+        if (plain === null) return; // drop foreign/legacy/corrupt records silently
+        handler(plain, key);
+      });
+    });
+  } catch {}
+}
+
+function encryptedMapOn(node, handler) {
+  if (!node || typeof node.map !== "function") return;
+  try {
+    node.map().on((raw, key) => {
+      if (!raw) { handler(null, key); return; }
+      decryptPayload(raw).then((plain) => {
+        if (plain === null) return;
+        handler(plain, key);
+      });
+    });
+  } catch {}
+}
+
 const FALLBACK_EVENTS_NODE = {
   set() {},
   map() {
@@ -1628,7 +1703,7 @@ function publishGridCatch(card, ts) {
   if (!gridCaughtNode || !playerLocation) return;
   const key = currentGridBucketKey();
   if (!key) return;
-  gridCaughtNode.get(key).get(card.id).put({ cardId: card.id, ts });
+  encryptedPut(gridCaughtNode.get(key).get(card.id), { cardId: card.id, ts });
 }
 
 function rebuildCaughtIndexes() {
@@ -1719,7 +1794,8 @@ function catchCard(card, placement) {
   renderCollection();
   renderCards();
   renderMap();
-  eventsNode.set(event);
+  if (eventsNode === FALLBACK_EVENTS_NODE) eventsNode.set(event);
+  else encryptedSet(eventsNode, event);
   publishGridCatch(card, event.ts);
 }
 
@@ -6805,7 +6881,11 @@ function connectFeed() {
   if (feedConnected) return;
   feedConnected = true;
 
-  eventsNode.map().on((event) => {
+  if (eventsNode === FALLBACK_EVENTS_NODE) {
+    eventsNode.map().on(() => {}); // noop on the stub
+    return;
+  }
+  encryptedMapOn(eventsNode, (event) => {
     if (!event || !event.ts || !event.trainer || !event.card) return;
     const alreadyThere = recentEvents.some(
       (e) => e.ts === event.ts && e.trainer === event.trainer && e.card === event.card
@@ -6833,7 +6913,7 @@ function connectGridCaught() {
   }
   gridCaughtIds.clear();
   lastGridKey = key;
-  gridCaughtNode.get(key).map().on((entry) => {
+  encryptedMapOn(gridCaughtNode.get(key), (entry) => {
     if (!entry?.cardId) return;
     if (!gridCaughtIds.has(entry.cardId)) {
       gridCaughtIds.add(entry.cardId);
@@ -6925,7 +7005,7 @@ function subscribeChampionUpdates() {
   currentBattleSites.forEach((site) => {
     if (subscribedChampionSites.has(site.id)) return;
     subscribedChampionSites.add(site.id);
-    battleSitesNode.get(site.id).on((raw) => {
+    encryptedOn(battleSitesNode.get(site.id), (raw) => {
       const champ = normalizeChampion(raw);
       const existing = championsBySite.get(site.id);
       if (!champ) {
@@ -6943,7 +7023,7 @@ function subscribeChampionUpdates() {
         championsBySite.delete(site.id);
         if (reclaimLostInstanceAtSite(site.id, champ)) renderCollection();
         // Auto-clear stale champion record so the site re-opens.
-        try { battleSitesNode.get(site.id).put(null); } catch {}
+        try { battleSitesNode.get(site.id).put(null); } catch {} // tombstone written as plain null is fine
         renderMap();
         refreshOpenSitePanel(site.id);
         return;
@@ -6969,28 +7049,26 @@ function subscribeChampionUpdates() {
 
 function publishChampion(siteId, champion) {
   if (!battleSitesNode) return;
-  try {
-    battleSitesNode.get(siteId).put({
-      trainer: champion.trainer,
-      team: champion.team,
-      cardId: champion.cardId,
-      instanceUid: champion.instanceUid || null,
-      boosts: { ...champion.boosts },
-      defenses: champion.defenses,
-      placedAt: champion.placedAt,
-      lastBattleAt: champion.lastBattleAt || 0,
-    });
-  } catch {}
+  encryptedPut(battleSitesNode.get(siteId), {
+    trainer: champion.trainer,
+    team: champion.team,
+    cardId: champion.cardId,
+    instanceUid: champion.instanceUid || null,
+    boosts: { ...champion.boosts },
+    defenses: champion.defenses,
+    placedAt: champion.placedAt,
+    lastBattleAt: champion.lastBattleAt || 0,
+  });
 }
 
 function publishChampionRemoved(siteId) {
   if (!battleSitesNode) return;
-  try { battleSitesNode.get(siteId).put(null); } catch {}
+  encryptedPut(battleSitesNode.get(siteId), null);
 }
 
 function publishBattleEvent(event) {
   if (!battleEventsNode) return;
-  try { battleEventsNode.set(event); } catch {}
+  encryptedSet(battleEventsNode, event);
 }
 
 // ===========================================================================
@@ -7079,24 +7157,22 @@ function normalizeTradeRequest(raw) {
 
 function publishTradeRequest(req) {
   if (!tradesNode) return;
-  try {
-    // offer/counterOffer go on the wire as JSON *strings*, not nested objects:
-    // GUN's tradesNode.map().on() never resolves nested child nodes, so an
-    // object here would reach peers as an unresolved link and the request
-    // would be silently dropped. Strings sync verbatim. See app.logic.js.
-    tradesNode.get(req.id).put({
-      id: req.id,
-      from: req.from,
-      to: req.to,
-      offer: serializeTradeOffer(req.offer),
-      counterOffer: req.counterOffer ? serializeTradeOffer(req.counterOffer) : null,
-      status: req.status,
-      createdAt: req.createdAt,
-      updatedAt: Date.now(),
-      lat: req.lat ?? null,
-      lng: req.lng ?? null,
-    });
-  } catch {}
+  // The whole payload gets encrypted into a single ciphertext string before
+  // it hits Gun, so the "Gun won't resolve nested child nodes via map().on()"
+  // hazard doesn't apply here — nested offer/counterOffer survive the round
+  // trip inside the SEA envelope.
+  encryptedPut(tradesNode.get(req.id), {
+    id: req.id,
+    from: req.from,
+    to: req.to,
+    offer: req.offer ? { ...req.offer, boosts: { ...req.offer.boosts } } : null,
+    counterOffer: req.counterOffer ? { ...req.counterOffer, boosts: { ...req.counterOffer.boosts } } : null,
+    status: req.status,
+    createdAt: req.createdAt,
+    updatedAt: Date.now(),
+    lat: req.lat ?? null,
+    lng: req.lng ?? null,
+  });
 }
 
 function nearbyTrainerEntries() {
@@ -7195,7 +7271,7 @@ function applyAcceptedTradeAsRecipient(req) {
 
 function subscribeTrades() {
   if (!tradesNode) return;
-  tradesNode.map().on((raw, id) => {
+  encryptedMapOn(tradesNode, (raw, id) => {
     if (!raw) {
       if (tradeRequests.has(id)) {
         tradeRequests.delete(id);
@@ -7818,7 +7894,7 @@ function initGun() {
   if (typeof window === "undefined" || typeof window.Gun !== "function") return;
   try {
     const gun = window.Gun({ peers: GUN_PEERS, localStorage: true });
-    const root = gun.get("fokemon");
+    const root = gun.get(FOKEMON_NS);
     eventsNode = root.get("events");
     gridCaughtNode = root.get("caughtByGrid");
     battleSitesNode = root.get("battleSites");
