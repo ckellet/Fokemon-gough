@@ -2903,24 +2903,25 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
   border-radius: 12px;
   display: grid;
   place-items: center;
-  background: rgba(9, 14, 28, .82);
-  border: 1px solid var(--line);
+  background: rgba(9, 14, 28, .92);
+  border: 1px solid rgba(255, 255, 255, .35);
   color: var(--text);
   cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .35);
   transition: transform .15s ease, border-color .2s ease, color .2s ease;
 }
 .music-toggle .music-toggle-icon {
-  font-size: 1.05rem;
+  font-size: 1.15rem;
   line-height: 1;
   transition: opacity .2s ease;
 }
 .music-toggle[aria-pressed="true"] {
-  color: #b6ffe1;
-  border-color: rgba(124, 240, 198, .45);
-  box-shadow: 0 0 0 1px rgba(124, 240, 198, .15);
+  color: #d8fff0;
+  border-color: rgba(124, 240, 198, .8);
+  box-shadow: 0 0 0 1px rgba(124, 240, 198, .35), 0 2px 10px rgba(124, 240, 198, .25);
 }
 .music-toggle[aria-pressed="false"] {
-  color: var(--muted);
+  color: #e6ecff;
   position: relative;
 }
 .music-toggle[aria-pressed="false"]::after {
