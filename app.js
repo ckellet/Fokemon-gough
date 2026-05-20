@@ -13,6 +13,8 @@ import {
   MAX_TRAINING_BOOST_PER_STAT,
   MAX_CHAMPION_DEFENSES,
   CHAMPION_TTL_MS,
+  GYM_REST_HP_INTERVAL_MS,
+  computeGymRestGain,
   typeMultiplier,
   filterUncaughtSpawns,
   getGridKey,
@@ -25,7 +27,6 @@ import {
   deployedInstanceAtSite,
   mergeBoosts,
   normalizeBoosts,
-  serializeTradeOffer,
   parseTradeOffer,
   COLLECTION_SORTS,
   groupCollection,
@@ -3966,6 +3967,7 @@ function openBattleSite(site) {
   document.addEventListener("keydown", onKey);
 
   function render() {
+    creditGymRestForOwnedChampions();
     const champion = activeChampionFor(site.id);
     const meters = playerLocation
       ? Math.round(distanceMeters(playerLocation, { lat: site.lat, lng: site.lng }))
@@ -3996,6 +3998,7 @@ function openBattleSite(site) {
               defenses: 0,
               placedAt: Date.now(),
               lastBattleAt: 0,
+              restAccruedAt: Date.now(),
             };
             markInstanceDeployed(entry.uid, site.id);
             championsBySite.set(site.id, champ);
@@ -6468,6 +6471,7 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
         defenses: 0,
         placedAt,
         lastBattleAt: placedAt,
+        restAccruedAt: placedAt,
       };
       championsBySite.set(site.id, newChampion);
       publishChampion(site.id, newChampion);
@@ -6974,6 +6978,7 @@ function normalizeChampion(raw) {
     defenses: Math.max(0, Math.min(MAX_CHAMPION_DEFENSES, Number(raw.defenses) || 0)),
     placedAt: Number(raw.placedAt) || Date.now(),
     lastBattleAt: Number(raw.lastBattleAt) || 0,
+    restAccruedAt: Number(raw.restAccruedAt) || 0,
   };
   if (!cardsById.has(champ.cardId)) return null;
   return champ;
@@ -7047,6 +7052,40 @@ function subscribeChampionUpdates() {
   });
 }
 
+function creditGymRestForOwnedChampions() {
+  // Award passive HP boosts for champions I own that have been resting on
+  // guard duty. Pure calc in app.logic.js; we just persist + publish here.
+  if (!profile?.name || !championsBySite.size) return false;
+  const now = Date.now();
+  let anyChange = false;
+  for (const [siteId, champion] of championsBySite) {
+    if (!champion || champion.trainer !== profile.name) continue;
+    if (isChampionRetired(champion, now)) continue;
+    const { gain, nextAccruedAt } = computeGymRestGain({
+      boosts: champion.boosts,
+      restAccruedAt: champion.restAccruedAt,
+      placedAt: champion.placedAt,
+      now,
+    });
+    if (nextAccruedAt === (champion.restAccruedAt || champion.placedAt || 0) && gain === 0) continue;
+    const updated = {
+      ...champion,
+      boosts: {
+        ...champion.boosts,
+        hp: clampBoost((champion.boosts?.hp || 0) + gain),
+      },
+      restAccruedAt: nextAccruedAt,
+    };
+    championsBySite.set(siteId, updated);
+    publishChampion(siteId, updated);
+    if (gain > 0 && updated.instanceUid && getInstance(updated.instanceUid)) {
+      applyInstanceBoosts(updated.instanceUid, updated.boosts);
+    }
+    anyChange = true;
+  }
+  return anyChange;
+}
+
 function publishChampion(siteId, champion) {
   if (!battleSitesNode) return;
   encryptedPut(battleSitesNode.get(siteId), {
@@ -7058,6 +7097,7 @@ function publishChampion(siteId, champion) {
     defenses: champion.defenses,
     placedAt: champion.placedAt,
     lastBattleAt: champion.lastBattleAt || 0,
+    restAccruedAt: champion.restAccruedAt || 0,
   });
 }
 
@@ -8178,6 +8218,11 @@ if (typeof setInterval === "function") {
     }
     updateBucketLabel();
     renderTradeBadge();
+    if (creditGymRestForOwnedChampions()) {
+      renderCollection();
+      renderMap();
+      if (typeof openSiteRefresh === "function") openSiteRefresh();
+    }
   }, 1000);
 
   // Idle heartbeat: keeps this trainer discoverable for trading even when
