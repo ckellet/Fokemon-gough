@@ -43,7 +43,30 @@
     <div class="bg-orb orb-2"></div>
 
     <main class="app-shell">
-      <section class="card auth-card" id="authCard">
+      <section class="splash" id="splash" aria-label="FokéGo intro">
+        <div class="splash-stage" aria-hidden="true">
+          <span class="splash-ring splash-ring-1"></span>
+          <span class="splash-ring splash-ring-2"></span>
+          <span class="splash-ring splash-ring-3"></span>
+          <span class="splash-cast">
+            <span class="splash-mon m-electric" style="--delay:.0s;--drift:14px"><span class="mon-body"><span class="mon-eye left"></span><span class="mon-eye right"></span></span></span>
+            <span class="splash-mon m-leaf" style="--delay:.6s;--drift:-18px"><span class="mon-body"><span class="mon-eye left"></span><span class="mon-eye right"></span></span></span>
+            <span class="splash-mon m-water" style="--delay:1.1s;--drift:22px"><span class="mon-body"><span class="mon-eye left"></span><span class="mon-eye right"></span></span></span>
+            <span class="splash-mon m-fire" style="--delay:.3s;--drift:-12px"><span class="mon-body"><span class="mon-eye left"></span><span class="mon-eye right"></span></span></span>
+            <span class="splash-mon m-shadow" style="--delay:.9s;--drift:16px"><span class="mon-body"><span class="mon-eye left"></span><span class="mon-eye right"></span></span></span>
+            <span class="splash-mon m-cosmic" style="--delay:.4s;--drift:-20px"><span class="mon-body"><span class="mon-eye left"></span><span class="mon-eye right"></span></span></span>
+          </span>
+        </div>
+        <div class="splash-copy">
+          <p class="splash-eyebrow">Folder creatures, in the wild</p>
+          <h1 class="splash-title">FokéGo</h1>
+          <p class="splash-tag">They were sleeping in your folders. Now they're out there. Walk, catch, and hold the gyms.</p>
+          <button type="button" id="splashStart" class="splash-cta">Tap to begin</button>
+          <p class="splash-hint">Original soundtrack plays once you tap · mute any time</p>
+        </div>
+      </section>
+
+      <section class="card auth-card hidden" id="authCard">
         <div class="brand">
           <p class="eyebrow">Fokemon Trainer Net</p>
           <h1>Start your local FokéGo adventure</h1>
@@ -103,6 +126,16 @@
               <span aria-hidden="true">🔄</span>
               <span class="trade-btn-label">Trade</span>
               <span id="tradeIncomingBadge" class="trade-badge hidden" aria-hidden="true">0</span>
+            </button>
+            <button
+              id="musicToggle"
+              class="ghost music-toggle"
+              type="button"
+              aria-pressed="true"
+              aria-label="Mute soundtrack"
+              title="Mute soundtrack"
+            >
+              <span class="music-toggle-icon" aria-hidden="true">♪</span>
             </button>
           </div>
           <small id="locationStatus" class="loc-pill" aria-live="polite">Locating…</small>
