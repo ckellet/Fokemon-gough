@@ -2952,3 +2952,435 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
   .splash-title,
   .splash-cta { animation: none !important; }
 }
+
+/* =========================================================================
+   UberMax raid bosses
+   ------------------------------------------------------------------------- */
+.ubermax-marker {
+  position: relative;
+  width: 112px;
+  display: grid;
+  justify-items: center;
+  gap: 3px;
+  color: #fff7e0;
+  filter: drop-shadow(0 6px 14px rgba(0, 0, 0, .6));
+  pointer-events: auto;
+}
+.ubermax-marker .um-banner {
+  font-size: .56rem;
+  font-weight: 800;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  background: linear-gradient(90deg, #ffd166, #ff7af0 60%, #b27cff);
+  color: #1b0a2a;
+  border-radius: 999px;
+  padding: 2px 9px;
+  border: 1px solid rgba(255, 255, 255, .55);
+  box-shadow: 0 2px 8px rgba(255, 122, 240, .45);
+  white-space: nowrap;
+}
+.ubermax-marker .um-medal {
+  position: relative;
+  width: 62px;
+  height: 62px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 32% 28%, #fff8d6, transparent 58%),
+    radial-gradient(circle at 70% 80%, var(--um-dark, #4a1e7a), var(--um-dark, #2c0e4f) 70%),
+    linear-gradient(140deg, var(--um-light, #ffd166), var(--um-accent, #ff7af0) 60%, var(--um-dark, #2c0e4f));
+  border: 3px solid #ffe28a;
+  box-shadow:
+    0 0 22px var(--um-accent, #ffd166),
+    0 0 38px rgba(255, 122, 240, .45),
+    inset 0 -8px 14px rgba(0, 0, 0, .35);
+  display: grid;
+  place-items: center;
+}
+.ubermax-marker .um-medal-glyph {
+  font-family: "Outfit", sans-serif;
+  font-size: 1.7rem;
+  font-weight: 800;
+  color: #fff7d4;
+  text-shadow: 0 2px 6px rgba(0, 0, 0, .65);
+}
+.ubermax-marker .um-medal-glow {
+  position: absolute;
+  inset: -10px;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--um-accent, #ffd166) 0%, transparent 65%);
+  filter: blur(6px);
+  opacity: .55;
+  z-index: -1;
+  animation: um-pulse 2.2s ease-in-out infinite;
+}
+.ubermax-marker .um-medal-crown {
+  position: absolute;
+  top: -8px;
+  right: -6px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: linear-gradient(180deg, #ffd166, #ff7a45);
+  color: #1b0a2a;
+  border: 2px solid #fff8d6;
+  font-size: .8rem;
+  font-weight: 800;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, .45);
+}
+.ubermax-marker .um-hp {
+  width: 96px;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(11, 18, 38, .82);
+  border: 1px solid rgba(255, 255, 255, .25);
+  overflow: hidden;
+  margin-top: 2px;
+}
+.ubermax-marker .um-hp-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #ff7a45, #ffd166);
+  transition: width .35s ease;
+}
+.ubermax-marker.joined .um-hp-fill { background: linear-gradient(90deg, #ff5a8a, #ffd166); }
+.ubermax-marker .um-label {
+  font-size: .58rem;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(11, 18, 38, .88);
+  border: 1px solid rgba(255, 209, 102, .55);
+  color: #fff7d4;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  max-width: 108px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ubermax-marker .um-army {
+  font-size: .54rem;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(124, 240, 198, .92);
+  color: #062118;
+  border: 1px solid rgba(255, 255, 255, .35);
+  letter-spacing: .04em;
+}
+.ubermax-marker.near .um-medal {
+  animation: um-pulse-medal 1.6s ease-in-out infinite;
+}
+.ubermax-marker.defeated .um-medal {
+  filter: grayscale(.7) brightness(.7);
+  opacity: .7;
+}
+.ubermax-marker.defeated .um-hp-fill { background: rgba(124, 240, 198, .85); }
+@keyframes um-pulse {
+  0%, 100% { transform: scale(1); opacity: .55; }
+  50% { transform: scale(1.18); opacity: .85; }
+}
+@keyframes um-pulse-medal {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.08); }
+}
+
+/* ---- UberMax raid modal ---- */
+.ubermax-modal {
+  position: fixed;
+  inset: 0;
+  background: radial-gradient(circle at 50% 30%, rgba(74, 30, 122, .55), rgba(4, 9, 20, .92) 65%);
+  backdrop-filter: blur(8px);
+  display: grid;
+  place-items: center;
+  z-index: 15;
+  padding: 1rem;
+}
+.ubermax-card {
+  width: min(720px, 96vw);
+  max-height: 92vh;
+  overflow-y: auto;
+  border: 1px solid rgba(255, 209, 102, .55);
+  background: linear-gradient(180deg, rgba(28, 14, 52, .96), rgba(8, 10, 26, .98));
+  border-radius: 22px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, .55), 0 0 0 1px rgba(255, 122, 240, .25) inset;
+  padding: 1.1rem 1.2rem 1.3rem;
+  color: #f5f7ff;
+}
+.ubermax-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: .8rem;
+  margin-bottom: .8rem;
+}
+.ubermax-head .eyebrow {
+  margin: 0;
+  font-size: .68rem;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: #ffd166;
+}
+.ubermax-title {
+  margin: .15rem 0 0;
+  font-size: 1.25rem;
+  font-weight: 800;
+  letter-spacing: .02em;
+  background: linear-gradient(90deg, #fff8d6, #ff7af0 80%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.ubermax-stage {
+  display: grid;
+  grid-template-columns: minmax(160px, 220px) 1fr;
+  gap: 1rem;
+  padding: .9rem;
+  border-radius: 16px;
+  background: linear-gradient(160deg, var(--um-dark, #2c0e4f) 0%, rgba(8, 10, 26, .9) 80%);
+  border: 1px solid rgba(255, 255, 255, .12);
+}
+.ubermax-portrait-wrap {
+  position: relative;
+  display: grid;
+  place-items: center;
+}
+.ubermax-portrait {
+  width: 100%;
+  max-width: 220px;
+  height: auto;
+}
+.ubermax-type-pill {
+  position: absolute;
+  bottom: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-weight: 800;
+  font-size: .68rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  border: 1px solid rgba(0, 0, 0, .25);
+}
+.ubermax-vitals { display: flex; flex-direction: column; gap: .55rem; }
+.ubermax-hp-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: .5rem;
+}
+.ubermax-hp-label {
+  font-size: .68rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: #ffd166;
+  font-weight: 800;
+}
+.ubermax-hp-num {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  font-size: .9rem;
+}
+.ubermax-hp-bar {
+  width: 100%;
+  height: 14px;
+  border-radius: 999px;
+  background: rgba(11, 18, 38, .85);
+  border: 1px solid rgba(255, 255, 255, .18);
+  overflow: hidden;
+  box-shadow: inset 0 1px 4px rgba(0, 0, 0, .55);
+}
+.ubermax-hp-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #ff5a8a, #ffd166 60%, #ff7af0);
+  transition: width .45s ease;
+  box-shadow: 0 0 10px rgba(255, 209, 102, .65);
+}
+.ubermax-hp-fill.drained {
+  background: linear-gradient(90deg, #7cf0c6, #7cf0c6);
+  box-shadow: 0 0 10px rgba(124, 240, 198, .55);
+}
+.ubermax-stats-row {
+  display: flex;
+  gap: .4rem;
+  flex-wrap: wrap;
+}
+.ubermax-status {
+  margin: .35rem 0 0;
+  font-size: .82rem;
+  font-weight: 600;
+  color: #cdd6ee;
+}
+.ubermax-status.live strong {
+  color: #ffd166;
+  font-variant-numeric: tabular-nums;
+}
+.ubermax-status.defeated {
+  color: #7cf0c6;
+  font-weight: 800;
+  font-size: .95rem;
+  text-shadow: 0 0 14px rgba(124, 240, 198, .45);
+}
+.ubermax-status.escaped { color: #ff9a8c; }
+
+.ubermax-army { margin-top: 1rem; }
+.ubermax-army-head {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  margin-bottom: .55rem;
+  flex-wrap: wrap;
+}
+.ubermax-army-head strong {
+  font-size: .82rem;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: #ffd166;
+}
+.ubermax-army-roster {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: .5rem;
+}
+.ubermax-roster-card {
+  display: flex;
+  flex-direction: column;
+  gap: .15rem;
+  padding: .55rem .65rem;
+  border-radius: 12px;
+  background: linear-gradient(140deg, var(--type-light, #cfd8ff), var(--type-dark, #3d4d8a));
+  color: #061226;
+  border: 1px solid rgba(0, 0, 0, .25);
+  box-shadow: 0 4px 10px rgba(0, 0, 0, .35);
+}
+.ubermax-roster-card.is-me {
+  outline: 2px solid #7cf0c6;
+  outline-offset: 1px;
+}
+.ubermax-roster-card .roster-trainer {
+  font-size: .65rem;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  opacity: .8;
+}
+.ubermax-roster-card strong { font-size: .95rem; font-weight: 800; }
+.ubermax-roster-card small { font-size: .72rem; opacity: .85; }
+.ubermax-empty {
+  grid-column: 1 / -1;
+  text-align: center;
+  padding: 1rem .5rem;
+}
+
+.ubermax-actions {
+  margin-top: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: .55rem;
+}
+.ubermax-actions .ubermax-close-btn {
+  width: 100%;
+  background: linear-gradient(90deg, #ffd166, #ff7af0);
+  color: #1b0a2a;
+  border: none;
+  padding: .75rem 1rem;
+  border-radius: 12px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  cursor: pointer;
+  box-shadow: 0 8px 18px rgba(255, 122, 240, .45);
+}
+.ubermax-actions .ubermax-close-btn:hover { transform: translateY(-1px); }
+.ubermax-picker .picker-prompt {
+  font-size: .82rem;
+  margin-bottom: .35rem;
+  color: #ffd166;
+  font-weight: 700;
+}
+.ubermax-picker .picker-card .picker-power {
+  background: linear-gradient(90deg, #ffd166, #ff7af0);
+  color: #1b0a2a;
+}
+.matchup {
+  display: inline-block;
+  margin-left: .3rem;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: .58rem;
+  font-weight: 800;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.matchup.super { background: #7cf0c6; color: #062118; }
+.matchup.weak { background: #ff9a8c; color: #1b0a2a; }
+
+/* Collection laurel for UberMax trophies */
+.gallery-card.ubermax {
+  outline: 2px solid #ffd166;
+  outline-offset: -2px;
+  box-shadow: 0 0 18px rgba(255, 209, 102, .35);
+}
+.ubermax-laurel {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 3;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: .58rem;
+  font-weight: 800;
+  letter-spacing: .12em;
+  background: linear-gradient(90deg, #ffd166, #ff7af0);
+  color: #1b0a2a;
+  border: 1px solid #fff8d6;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, .45);
+  box-shadow: 0 4px 10px rgba(255, 122, 240, .45);
+}
+
+/* Victory / escape toasts */
+.raid-victory-toast {
+  position: fixed;
+  top: 12vh;
+  left: 50%;
+  transform: translate(-50%, -16px);
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: .65rem;
+  padding: .85rem 1.05rem;
+  border-radius: 14px;
+  background: linear-gradient(140deg, #2c0e4f, #1a1238);
+  border: 1px solid #ffd166;
+  color: #fff7d4;
+  box-shadow: 0 14px 32px rgba(0, 0, 0, .55), 0 0 24px rgba(255, 209, 102, .35);
+  opacity: 0;
+  transition: opacity .25s ease, transform .35s ease;
+  max-width: min(420px, 92vw);
+}
+.raid-victory-toast.show {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+.raid-victory-toast .rvt-laurel { font-size: 1.6rem; }
+.raid-victory-toast strong { display: block; font-size: .95rem; }
+.raid-victory-toast small { color: #cdd6ee; font-size: .8rem; }
+.raid-victory-toast.raid-escape-toast {
+  border-color: #ff9a8c;
+  box-shadow: 0 14px 32px rgba(0, 0, 0, .55), 0 0 18px rgba(255, 154, 140, .25);
+}
+
+@media (max-width: 520px) {
+  .ubermax-stage {
+    grid-template-columns: 1fr;
+    text-align: center;
+  }
+  .ubermax-portrait-wrap { justify-self: center; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ubermax-marker .um-medal-glow,
+  .ubermax-marker.near .um-medal { animation: none !important; }
+  .ubermax-hp-fill { transition: none; }
+}

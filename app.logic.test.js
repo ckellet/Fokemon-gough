@@ -42,6 +42,15 @@ import {
   mergeTrainerLocation,
   TRADE_DISCOVERY_TTL_MS,
   PRESENCE_TTL_MS,
+  computeUberMaxPlacements,
+  ubermaxStats,
+  ubermaxDamageFor,
+  computeRaidState,
+  isRaidExpired,
+  UBERMAX_INTERVAL_MS,
+  UBERMAX_HP_MULT,
+  UBERMAX_HP_BONUS,
+  UBERMAX_REWARD_BOOSTS,
 } from './app.logic.js';
 
 test('computeCollectionStats returns total and unique counts', () => {
@@ -573,4 +582,152 @@ test('computeGymRestGain resumes from prior restAccruedAt', () => {
   const out = computeGymRestGain({ boosts: { hp: 5 }, placedAt, restAccruedAt, now });
   assert.equal(out.gain, 1);
   assert.equal(out.nextAccruedAt, restAccruedAt + GYM_REST_HP_INTERVAL_MS);
+});
+
+// --- UberMax raid bosses ----------------------------------------------------
+
+const UM_BOSS_CARD = { id: 'thundake', name: 'Thundake', type: 'Electric', rarity: 'epic',
+  hp: 68, atk: 90, def: 52, spd: 92 };
+const UM_POOL = [
+  UM_BOSS_CARD,
+  { id: 'vulpyre', name: 'Vulpyre', type: 'Fire', rarity: 'epic', hp: 62, atk: 92, def: 50, spd: 86 },
+  { id: 'boscarapod', name: 'Boscarapod', type: 'Leaf', rarity: 'epic', hp: 92, atk: 78, def: 88, spd: 32 },
+];
+const UM_LOOKUP = new Map(UM_POOL.map((c) => [c.id, c]));
+
+test('ubermaxStats inflates HP/ATK so the boss is a real challenge', () => {
+  const stats = ubermaxStats(UM_BOSS_CARD);
+  // Hard floor: HP grows by mult + bonus → way bigger than the base card.
+  const expectedHp = Math.round(UM_BOSS_CARD.hp * UBERMAX_HP_MULT) + UBERMAX_HP_BONUS;
+  assert.equal(stats.hp, expectedHp);
+  assert.ok(stats.hp > UM_BOSS_CARD.hp * 3, 'UberMax HP should be at least 3× base');
+  assert.ok(stats.atk > UM_BOSS_CARD.atk, 'UberMax ATK should be higher than base');
+  // SPD drops because it's a giant.
+  assert.ok(stats.spd <= UM_BOSS_CARD.spd, 'UberMax SPD should not exceed base');
+});
+
+test('ubermaxDamageFor rewards type advantage and training boosts', () => {
+  const water = { id: 'aq', name: 'AquaPup', type: 'Water', hp: 60, atk: 70, def: 50, spd: 55 };
+  const fireBoss = { id: 'fb', name: 'FireBoss', type: 'Fire', hp: 80, atk: 80, def: 60, spd: 60 };
+  const neutralBoss = { id: 'nb', name: 'GhostBoss', type: 'Shadow', hp: 80, atk: 80, def: 60, spd: 60 };
+  const noBoost = { hp: 0, atk: 0, def: 0, spd: 0 };
+  const trained = { hp: 10, atk: 20, def: 5, spd: 5 };
+
+  const superDmg = ubermaxDamageFor(water, noBoost, fireBoss);
+  const neutralDmg = ubermaxDamageFor(water, noBoost, neutralBoss);
+  assert.ok(superDmg > neutralDmg, `super-effective should beat neutral; ${superDmg} > ${neutralDmg}`);
+
+  const trainedDmg = ubermaxDamageFor(water, trained, fireBoss);
+  assert.ok(trainedDmg > superDmg, `trained should out-hit untrained; ${trainedDmg} > ${superDmg}`);
+});
+
+test('computeRaidState aggregates contributors and flags defeat', () => {
+  const contributors = [
+    { trainer: 'A', cardId: 'thundake', boosts: { hp: 0, atk: 0, def: 0, spd: 0 } },
+    { trainer: 'B', cardId: 'thundake', boosts: { hp: 0, atk: 0, def: 0, spd: 0 } },
+  ];
+  const state = computeRaidState(UM_BOSS_CARD, contributors, UM_LOOKUP);
+  assert.equal(state.maxHp, ubermaxStats(UM_BOSS_CARD).hp);
+  assert.equal(state.armySize, 2);
+  assert.ok(state.damage > 0);
+  assert.ok(state.remainingHp >= 0);
+  assert.equal(state.defeated, state.damage >= state.maxHp);
+});
+
+test('computeRaidState marks defeated when army out-damages HP', () => {
+  // Stack lots of strong contributors so damage clearly exceeds HP.
+  const contributors = Array.from({ length: 10 }, (_, i) => ({
+    trainer: `T${i}`,
+    cardId: 'vulpyre', // Fire vs Electric is neutral here, but raw atk = 92
+    boosts: { hp: 28, atk: 28, def: 0, spd: 0 },
+  }));
+  const state = computeRaidState(UM_BOSS_CARD, contributors, UM_LOOKUP);
+  assert.equal(state.defeated, true);
+  assert.equal(state.remainingHp, 0);
+});
+
+test('computeRaidState ignores unknown cardIds without crashing', () => {
+  const contributors = [
+    { trainer: 'A', cardId: 'ghost-card', boosts: { hp: 0, atk: 0, def: 0, spd: 0 } },
+    { trainer: 'B', cardId: 'thundake', boosts: { hp: 0, atk: 0, def: 0, spd: 0 } },
+  ];
+  const state = computeRaidState(UM_BOSS_CARD, contributors, UM_LOOKUP);
+  assert.equal(state.armySize, 1, 'ghost card is dropped, real one counted');
+  assert.ok(state.damage > 0);
+});
+
+test('computeUberMaxPlacements is deterministic per location + time bucket', () => {
+  const opts = { timeMs: 1_700_000_000_000, neighborhoodCells: 6, macroSize: 7 };
+  const a = computeUberMaxPlacements(51.5074, -0.1278, UM_POOL, opts);
+  const b = computeUberMaxPlacements(51.5074, -0.1278, UM_POOL, opts);
+  assert.deepEqual(a, b);
+  for (const p of a) {
+    assert.ok(typeof p.id === 'string' && p.id.startsWith('um|'));
+    assert.ok(Number.isFinite(p.lat) && Number.isFinite(p.lng));
+    assert.ok(UM_LOOKUP.has(p.cardId), `placement should pick from the pool: ${p.cardId}`);
+    assert.equal(p.expiresAt - p.startsAt, UBERMAX_INTERVAL_MS);
+  }
+});
+
+test('computeUberMaxPlacements respects ocean exclusion', () => {
+  // Mid North Pacific
+  const ocean = computeUberMaxPlacements(35, -140, UM_POOL, { neighborhoodCells: 10 });
+  assert.equal(ocean.length, 0);
+});
+
+test('computeUberMaxPlacements rolls differently across time buckets', () => {
+  const opts = { neighborhoodCells: 6 };
+  const bucketA = computeUberMaxPlacements(51.5074, -0.1278, UM_POOL, {
+    ...opts, timeMs: 1_700_000_000_000,
+  });
+  const bucketB = computeUberMaxPlacements(51.5074, -0.1278, UM_POOL, {
+    ...opts, timeMs: 1_700_000_000_000 + UBERMAX_INTERVAL_MS * 10,
+  });
+  // Across 10 buckets the lineup almost certainly shifts (different IDs).
+  const idsA = bucketA.map((p) => p.id).sort().join(',');
+  const idsB = bucketB.map((p) => p.id).sort().join(',');
+  assert.notEqual(idsA, idsB, 'placements should evolve across buckets');
+});
+
+test('computeUberMaxPlacements stays sparser than battle sites', () => {
+  let totalUm = 0;
+  let totalBs = 0;
+  for (let i = 0; i < 20; i++) {
+    const lat = 51 + i * 0.02;
+    const lon = -0.1 + i * 0.02;
+    totalUm += computeUberMaxPlacements(lat, lon, UM_POOL).length;
+    totalBs += computeBattleSitePlacements(lat, lon).length;
+  }
+  assert.ok(totalUm < totalBs, `UberMax should be sparser than gyms; got ${totalUm} vs ${totalBs}`);
+});
+
+test('isRaidExpired flips at the bucket boundary', () => {
+  const placements = computeUberMaxPlacements(51.5074, -0.1278, UM_POOL, {
+    timeMs: 1_700_000_000_000,
+    neighborhoodCells: 6,
+  });
+  // If by chance the neighborhood has no spawn at this bucket, retry with a different seed.
+  const raid = placements[0] || { expiresAt: 1_700_000_000_000 + UBERMAX_INTERVAL_MS };
+  assert.equal(isRaidExpired(raid, raid.expiresAt - 1), false);
+  assert.equal(isRaidExpired(raid, raid.expiresAt), true);
+  assert.equal(isRaidExpired(raid, raid.expiresAt + 1), true);
+});
+
+test('UBERMAX_REWARD_BOOSTS provides meaningful trophy buffs', () => {
+  assert.ok(UBERMAX_REWARD_BOOSTS.hp > 10);
+  assert.ok(UBERMAX_REWARD_BOOSTS.atk > 10);
+});
+
+test('migrateCaughtEntries preserves ubermax + raidId + raidParked flags', () => {
+  const out = migrateCaughtEntries([
+    { id: 'thundake', ts: 1, uid: 'u1', ubermax: true, raidId: 'um|1:1|123' },
+    { id: 'vulpyre', ts: 2, uid: 'u2', raidParked: 'um|2:2|123' },
+  ]);
+  assert.equal(out[0].ubermax, true);
+  assert.equal(out[0].raidId, 'um|1:1|123');
+  assert.equal(out[1].raidParked, 'um|2:2|123');
+  // Idempotent round trip.
+  const round = migrateCaughtEntries(out);
+  assert.equal(round[0].ubermax, true);
+  assert.equal(round[1].raidParked, 'um|2:2|123');
 });
