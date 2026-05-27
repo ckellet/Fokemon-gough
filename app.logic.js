@@ -244,13 +244,20 @@ export function migrateCaughtEntries(entries) {
     if (!entry || typeof entry !== "object") return entry;
     const id = String(entry.id || "");
     const ts = Number(entry.ts) || Date.now();
-    return {
+    const migrated = {
       id,
       ts,
       uid: entry.uid || makeInstanceUid(id, ts),
       boosts: normalizeBoosts(entry.boosts),
       deployedAt: entry.deployedAt ? String(entry.deployedAt) : null,
     };
+    // Preserve raid trophy metadata across reloads — these flags drive UI
+    // affordances (the UBERMAX laurel) and lifecycle gates (raid-parked
+    // instances can't double-deploy).
+    if (entry.ubermax) migrated.ubermax = true;
+    if (entry.raidId) migrated.raidId = String(entry.raidId);
+    if (entry.raidParked) migrated.raidParked = String(entry.raidParked);
+    return migrated;
   });
 }
 
@@ -553,6 +560,186 @@ export function siteTheme(siteId) {
 export function clampBoost(value) {
   if (!Number.isFinite(value)) return 0;
   return Math.max(0, Math.min(MAX_TRAINING_BOOST_PER_STAT, Math.round(value)));
+}
+
+// ---------------------------------------------------------------------------
+// UberMax raid bosses
+// ---------------------------------------------------------------------------
+// Giant co-op bosses. One raid lives at a (macro cell × time bucket); any
+// trainer within UBERMAX_RANGE_METERS can commit a Fokemon to the shared
+// army. Each contribution chips real HP off the boss. If the army drops the
+// HP to 0 before the bucket ends, every contributor gets to keep an UberMax
+// copy. If the timer expires first, the boss escapes and contributors get a
+// FokéBall consolation. Placements are deterministic so every peer sees the
+// same raid at the same coordinates; the live state syncs through GUN.
+export const UBERMAX_INTERVAL_MS = 30 * 60 * 1000;
+export const UBERMAX_MACRO_SIZE = 7;           // ~777m macro — much sparser than gyms
+export const UBERMAX_NEIGHBORHOOD_CELLS = 6;   // visible from further out than gyms/spawns
+export const UBERMAX_SPAWN_RATE = 0.45;        // ~45% of land macros host a raid per bucket
+export const UBERMAX_RANGE_METERS = 250;       // bigger interact range than a gym
+export const UBERMAX_MAX_CONTRIBUTORS = 24;    // soft cap so a 20-person mob doesn't trivialise it
+export const UBERMAX_HP_MULT = 4.8;
+export const UBERMAX_HP_BONUS = 240;
+export const UBERMAX_ATK_MULT = 2.4;
+export const UBERMAX_DEF_MULT = 2.0;
+export const UBERMAX_DAMAGE_MULT = 2.2;        // scales per-contributor damage so 3–4 trainers can win
+export const UBERMAX_REWARD_BOOST_HP = 24;
+export const UBERMAX_REWARD_BOOST_ATK = 22;
+export const UBERMAX_REWARD_BOOST_DEF = 18;
+export const UBERMAX_REWARD_BOOST_SPD = 14;
+
+export function ubermaxStats(card) {
+  if (!card) return { hp: 0, atk: 0, def: 0, spd: 0 };
+  return {
+    hp: Math.round((card.hp || 0) * UBERMAX_HP_MULT) + UBERMAX_HP_BONUS,
+    atk: Math.round((card.atk || 0) * UBERMAX_ATK_MULT) + 40,
+    def: Math.round((card.def || 0) * UBERMAX_DEF_MULT) + 30,
+    spd: Math.max(20, Math.round((card.spd || 0) * 0.6)),
+  };
+}
+
+// Stat block applied as boosts onto the captured UberMax copy so the trophy
+// actually feels gigantic in the collection. Capped by clampBoost downstream.
+export const UBERMAX_REWARD_BOOSTS = Object.freeze({
+  hp: UBERMAX_REWARD_BOOST_HP,
+  atk: UBERMAX_REWARD_BOOST_ATK,
+  def: UBERMAX_REWARD_BOOST_DEF,
+  spd: UBERMAX_REWARD_BOOST_SPD,
+});
+
+// Damage one contributor's Fokemon deals to the boss. Type advantage matters
+// — a Water Fokemon vs a Fire UberMax actually closes the HP bar fast. Boosts
+// from training carry over (incentive to bring your trained heavyweights).
+export function ubermaxDamageFor(contributorCard, contributorBoosts, ubermaxCard) {
+  if (!contributorCard || !ubermaxCard) return 0;
+  const stats = effectiveStats(contributorCard, { boosts: contributorBoosts || EMPTY_BOOSTS, defenses: 0 });
+  const mult = typeMultiplier(contributorCard.type, ubermaxCard.type);
+  // Soft bonus per stat point of training: each +1 boost adds a little extra
+  // pop on top of the linear stats so a fully-trained Fokemon really shines.
+  const trained =
+    (contributorBoosts?.hp || 0) +
+    (contributorBoosts?.atk || 0) +
+    (contributorBoosts?.def || 0) +
+    (contributorBoosts?.spd || 0);
+  const base = stats.atk * UBERMAX_DAMAGE_MULT * mult;
+  return Math.max(1, Math.round(base + trained * 0.5));
+}
+
+// Roll up the live raid state from the contributor list. Returns a snapshot
+// callers can render directly: HP gauge, defeat flag, total army stats.
+export function computeRaidState(ubermaxCard, contributors, cardLookup) {
+  const stats = ubermaxStats(ubermaxCard);
+  const get = typeof cardLookup === "function"
+    ? cardLookup
+    : (id) => (cardLookup && typeof cardLookup.get === "function" ? cardLookup.get(id) : undefined);
+  let damage = 0;
+  let armyAtk = 0;
+  let armyHp = 0;
+  let valid = 0;
+  for (const c of contributors || []) {
+    const card = get(c?.cardId);
+    if (!card) continue;
+    valid += 1;
+    damage += ubermaxDamageFor(card, c.boosts, ubermaxCard);
+    const eff = effectiveStats(card, { boosts: c.boosts || EMPTY_BOOSTS, defenses: 0 });
+    armyAtk += eff.atk;
+    armyHp += eff.hp;
+  }
+  const maxHp = stats.hp;
+  const remainingHp = Math.max(0, maxHp - damage);
+  return {
+    maxHp,
+    remainingHp,
+    damage,
+    defeated: damage >= maxHp,
+    armyAtk,
+    armyHp,
+    armySize: valid,
+    bossStats: stats,
+  };
+}
+
+export function isRaidExpired(raid, now = Date.now(), intervalMs = UBERMAX_INTERVAL_MS) {
+  if (!raid) return true;
+  const ends = Number(raid.expiresAt) || (Number(raid.bucket) || 0) * intervalMs + intervalMs;
+  return now >= ends;
+}
+
+// Deterministic placements: every peer at the same lat/lng/time sees the same
+// UberMax cast. Sparser than gyms (UBERMAX_MACRO_SIZE × MACRO_SIZE), and only
+// a slice of macros host a boss in any given bucket (UBERMAX_SPAWN_RATE).
+// `epicCards` is the species pool — typically the rare/epic cards.
+export function computeUberMaxPlacements(
+  lat,
+  lon,
+  epicCards,
+  {
+    timeMs = Date.now(),
+    cellSizeDegrees = SPAWN_CELL_DEGREES,
+    neighborhoodCells = UBERMAX_NEIGHBORHOOD_CELLS,
+    macroSize = UBERMAX_MACRO_SIZE,
+    intervalMs = UBERMAX_INTERVAL_MS,
+    spawnRate = UBERMAX_SPAWN_RATE,
+  } = {}
+) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return [];
+  if (!Array.isArray(epicCards) || !epicCards.length) return [];
+  const placements = [];
+  const seen = new Set();
+  const latBaseCell = Math.floor((lat + 90) / cellSizeDegrees);
+  const lonBaseCell = Math.floor((lon + 180) / cellSizeDegrees);
+  const bucket = Math.floor(timeMs / intervalMs);
+
+  const scan = neighborhoodCells + macroSize;
+  for (let dlat = -scan; dlat <= scan; dlat++) {
+    for (let dlon = -scan; dlon <= scan; dlon++) {
+      const latCell = latBaseCell + dlat;
+      const lonCell = lonBaseCell + dlon;
+      const macroLat = Math.floor(latCell / macroSize);
+      const macroLon = Math.floor(lonCell / macroSize);
+      const macroKey = `${macroLat}:${macroLon}`;
+      if (seen.has(macroKey)) continue;
+      seen.add(macroKey);
+
+      // Per-bucket roll: does this macro host a raid this 30 min?
+      const roll = hashToUnitInterval(`um-spawn|${macroKey}|${bucket}`);
+      if (roll >= spawnRate) continue;
+
+      // Pick a cell inside the macro for the actual spawn point.
+      const slotCount = macroSize * macroSize;
+      const slot = Math.floor(hashToUnitInterval(`um-slot|${macroKey}|${bucket}`) * slotCount);
+      const slotLat = Math.floor(slot / macroSize);
+      const slotLon = slot % macroSize;
+      const chosenLatCell = macroLat * macroSize + slotLat;
+      const chosenLonCell = macroLon * macroSize + slotLon;
+
+      if (
+        Math.abs(chosenLatCell - latBaseCell) > neighborhoodCells ||
+        Math.abs(chosenLonCell - lonBaseCell) > neighborhoodCells
+      ) continue;
+
+      const latBase = chosenLatCell * cellSizeDegrees - 90;
+      const lonBase = chosenLonCell * cellSizeDegrees - 180;
+      if (isInOceanExclusion(latBase + cellSizeDegrees / 2, lonBase + cellSizeDegrees / 2)) continue;
+
+      const cellKey = `${chosenLatCell}:${chosenLonCell}`;
+      const cardIdx = Math.floor(hashToUnitInterval(`um-card|${macroKey}|${bucket}`) * epicCards.length);
+      const card = epicCards[Math.min(cardIdx, epicCards.length - 1)];
+      const startsAt = bucket * intervalMs;
+      placements.push({
+        id: `um|${cellKey}|${bucket}`,
+        grid: cellKey,
+        macro: macroKey,
+        bucket,
+        cardId: card.id,
+        lat: latBase + hashToUnitInterval(`um-lat|${macroKey}|${bucket}`) * cellSizeDegrees,
+        lng: lonBase + hashToUnitInterval(`um-lng|${macroKey}|${bucket}`) * cellSizeDegrees,
+        startsAt,
+        expiresAt: startsAt + intervalMs,
+      });
+    }
+  }
+  return placements;
 }
 
 export function totalBoostCapRemaining(boosts) {

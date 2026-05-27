@@ -2,6 +2,15 @@ import {
   computePoiPlacements,
   computeSpawnPlacements,
   computeBattleSitePlacements,
+  computeUberMaxPlacements,
+  ubermaxStats,
+  ubermaxDamageFor,
+  computeRaidState,
+  isRaidExpired,
+  UBERMAX_INTERVAL_MS,
+  UBERMAX_RANGE_METERS,
+  UBERMAX_MAX_CONTRIBUTORS,
+  UBERMAX_REWARD_BOOSTS,
   battleSiteName,
   siteTheme,
   effectiveStats,
@@ -145,6 +154,7 @@ let lastGridKey = null;
 let battleSitesNode = null;
 let battleEventsNode = null;
 let presenceNode = null;
+let ubermaxNode = null;
 let lastPresenceSentAt = 0;
 
 const cards = [
@@ -533,6 +543,29 @@ let currentBattleSitesCellKey = null;
 const championsBySite = new Map();
 const subscribedChampionSites = new Set();
 
+// UberMax raids — see app.logic.js for placement + state math.
+const ubermaxMarkers = new Map();
+let currentUberMax = [];
+let currentUberMaxCellKey = null;
+let currentUberMaxBucket = null;
+// raidId -> Map<trainerName, contribution>
+const ubermaxContributions = new Map();
+// raidId -> { resolvedAt, win, awarded } — local memory of how the raid ended.
+const ubermaxResolutions = new Map();
+const subscribedRaids = new Set();
+const APPLIED_RAIDS_KEY = "fokemon_applied_raids";
+const appliedRaids = new Set(
+  (Array.isArray(safeStorageGet(APPLIED_RAIDS_KEY, [])) ? safeStorageGet(APPLIED_RAIDS_KEY, []) : []).map(String)
+);
+function rememberAppliedRaid(id) {
+  appliedRaids.add(id);
+  try {
+    localStorage.setItem(APPLIED_RAIDS_KEY, JSON.stringify([...appliedRaids].slice(-200)));
+  } catch {}
+}
+let openRaidId = null;
+let openRaidRefresh = null;
+
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
@@ -647,6 +680,9 @@ function ensureFreshPlacements() {
     currentPoisCellKey = null;
     currentBattleSites = [];
     currentBattleSitesCellKey = null;
+    currentUberMax = [];
+    currentUberMaxCellKey = null;
+    currentUberMaxBucket = null;
     return;
   }
   const bucket = Math.floor(Date.now() / SPAWN_INTERVAL_MS);
@@ -680,7 +716,21 @@ function ensureFreshPlacements() {
     currentBattleSitesCellKey = anchorGridKey;
     subscribeChampionUpdates();
   }
+
+  // UberMax raids are bucketed in time as well as space, so recompute whenever
+  // either the anchor cell OR the 30-min bucket rolls over.
+  const ubermaxBucket = Math.floor(Date.now() / UBERMAX_INTERVAL_MS);
+  if (anchorGridKey !== currentUberMaxCellKey || ubermaxBucket !== currentUberMaxBucket) {
+    currentUberMax = computeUberMaxPlacements(anchor.lat, anchor.lng, ubermaxPool);
+    currentUberMaxCellKey = anchorGridKey;
+    currentUberMaxBucket = ubermaxBucket;
+    subscribeRaidUpdates();
+  }
 }
+
+// Species pool the boss is drawn from: epic + rare cards make the trophy
+// feel special. Computed once and reused per placement call.
+const ubermaxPool = cards.filter((c) => c.rarity === "epic" || c.rarity === "rare");
 
 function poiCatchable(poi) {
   if (!playerLocation || !poi) return false;
@@ -860,6 +910,7 @@ function renderCollection() {
           const vindex = vindexByUid.get(entry.uid) ?? 0;
           const classes = ["gallery-card"];
           if (deployed) classes.push("deployed");
+          if (entry.ubermax) classes.push("ubermax");
           if (isRep && isMulti) classes.push("stacked");
           if (!isRep) classes.push("member");
           if (isMulti && !isRep && !expanded) classes.push("collapsed");
@@ -867,6 +918,7 @@ function renderCollection() {
           return `
         <div class="${classes.join(" ")}" data-uid="${escapeHtml(entry.uid)}" data-species="${escapeHtml(group.id)}" data-vindex="${vindex}" tabindex="0" role="button" aria-label="Open ${escapeHtml(card.name)}${numLabel ? " " + numLabel : ""} card">
           ${isMulti ? `<span class="stack-badge" title="${group.count} ${escapeHtml(card.name)}">${isRep ? `×${group.count}` : escapeHtml(numLabel)}</span>` : ""}
+          ${entry.ubermax ? `<span class="ubermax-laurel" title="Won from an UberMax raid">UBERMAX</span>` : ""}
           ${deployed ? `<span class="deployed-pill" title="Deployed at ${escapeHtml(deployedLabel)}">At gym</span>` : ""}
           <canvas class="gallery-art" width="160" height="120" aria-hidden="true"></canvas>
           <div class="gallery-meta">
@@ -1461,6 +1513,79 @@ function siteIconSignature(site) {
   return { champion, near, status, sig, meters };
 }
 
+// ---------------------------------------------------------------------------
+// UberMax raid: marker + join-range helpers
+// ---------------------------------------------------------------------------
+function raidContributorsList(raidId) {
+  const m = ubermaxContributions.get(raidId);
+  return m ? Array.from(m.values()) : [];
+}
+
+function raidStateFor(raid) {
+  if (!raid) return null;
+  const card = cardsById.get(raid.cardId);
+  if (!card) return null;
+  const state = computeRaidState(card, raidContributorsList(raid.id), cardsById);
+  return { raid, card, state };
+}
+
+function raidJoinable(raid) {
+  if (!playerLocation || !raid) return false;
+  return distanceMeters(playerLocation, { lat: raid.lat, lng: raid.lng }) <= UBERMAX_RANGE_METERS;
+}
+
+function trainerHasContributed(raidId) {
+  if (!profile?.name) return false;
+  const m = ubermaxContributions.get(raidId);
+  return !!(m && m.has(profile.name));
+}
+
+function ubermaxIconSignature(raid) {
+  const ctx = raidStateFor(raid);
+  const meters = playerLocation
+    ? Math.round(distanceMeters(playerLocation, { lat: raid.lat, lng: raid.lng }))
+    : null;
+  const near = meters !== null && meters <= UBERMAX_RANGE_METERS;
+  const joined = trainerHasContributed(raid.id);
+  const remaining = ctx ? ctx.state.remainingHp : 0;
+  const maxHp = ctx ? ctx.state.maxHp : 0;
+  const pct = maxHp ? Math.round((remaining / maxHp) * 100) : 100;
+  const defeated = ctx ? ctx.state.defeated : false;
+  const armySize = ctx ? ctx.state.armySize : 0;
+  const sig = `${raid.id}|${pct}|${armySize}|${joined ? "j" : "n"}|${near ? "near" : "far"}|${defeated ? "won" : "live"}`;
+  return { ctx, near, joined, pct, defeated, armySize, sig, meters };
+}
+
+function makeUberMaxIcon(raid, info) {
+  const L = window.L;
+  const card = cardsById.get(raid.cardId);
+  const colors = card ? colorsFor(card) : { light: "#ffd166", dark: "#7a3aa0", accent: "#ffb84d" };
+  const hpPct = Math.max(0, Math.min(100, info.pct));
+  const minsLeft = Math.max(0, Math.floor((raid.expiresAt - Date.now()) / 60000));
+  const stateClass = info.defeated ? "defeated" : info.joined ? "joined" : "open";
+  return L.divIcon({
+    className: "",
+    html: `
+      <div class="ubermax-marker ${stateClass} ${info.near ? "near" : ""}"
+           style="--um-light:${colors.light};--um-dark:${colors.dark};--um-accent:${colors.accent};">
+        <span class="um-banner">UBERMAX · ${escapeHtml(card?.type || "Boss")}</span>
+        <span class="um-medal">
+          <span class="um-medal-glow" aria-hidden="true"></span>
+          <span class="um-medal-glyph" aria-hidden="true">${escapeHtml((card?.name || "?").slice(0, 1))}</span>
+          <span class="um-medal-crown" aria-hidden="true">★</span>
+        </span>
+        <div class="um-hp">
+          <div class="um-hp-fill" style="width:${hpPct}%"></div>
+        </div>
+        <small class="um-label">${escapeHtml(card?.name || "Boss")} · ${minsLeft}m</small>
+        ${info.armySize ? `<small class="um-army">⚔ ${info.armySize}</small>` : ""}
+      </div>
+    `,
+    iconSize: [112, 124],
+    iconAnchor: [56, 110],
+  });
+}
+
 function makeBattleSiteIcon(site, info) {
   const L = window.L;
   const name = battleSiteName(site.id);
@@ -1503,6 +1628,8 @@ function renderMap() {
     poiMarkers.clear();
     battleSiteMarkers.forEach((m) => m.remove());
     battleSiteMarkers.clear();
+    ubermaxMarkers.forEach((m) => m.remove());
+    ubermaxMarkers.clear();
     if (playerMarker) {
       playerMarker.remove();
       playerMarker = null;
@@ -1646,6 +1773,40 @@ function renderMap() {
     if (!wantedPoiKeys.has(key)) {
       marker.remove();
       poiMarkers.delete(key);
+    }
+  }
+
+  // UberMax raids — visible at all zoom levels because they're meant to be
+  // discoverable from far away (the whole point is to pull trainers together).
+  const wantedRaidKeys = new Set();
+  currentUberMax.forEach((raid) => {
+    if (isRaidExpired(raid)) return;
+    wantedRaidKeys.add(raid.id);
+    const info = ubermaxIconSignature(raid);
+    let marker = ubermaxMarkers.get(raid.id);
+    const onRaidClick = () => {
+      if (!raidJoinable(raid)) {
+        map.flyTo([raid.lat, raid.lng], 17, { duration: 0.8 });
+      }
+      openUberMaxRaid(raid);
+    };
+    if (!marker) {
+      marker = L.marker([raid.lat, raid.lng], {
+        icon: makeUberMaxIcon(raid, info),
+        zIndexOffset: 500,
+      }).addTo(map);
+      marker._raidSig = info.sig;
+      marker.on("click", onRaidClick);
+      ubermaxMarkers.set(raid.id, marker);
+    } else if (marker._raidSig !== info.sig) {
+      marker.setIcon(makeUberMaxIcon(raid, info));
+      marker._raidSig = info.sig;
+    }
+  });
+  for (const [key, marker] of ubermaxMarkers) {
+    if (!wantedRaidKeys.has(key)) {
+      marker.remove();
+      ubermaxMarkers.delete(key);
     }
   }
 
@@ -3901,12 +4062,14 @@ function statRowHtml(label, base, boost, max) {
 }
 
 function championPickerHtml(actionLabel) {
-  const entries = availableInstances(caught);
+  // raidParked Fokemon are committed to a UberMax raid and can't double-duty
+  // at a gym. They free up automatically once the raid ends (win or escape).
+  const entries = availableInstances(caught).filter((e) => !e.raidParked);
   if (!caught.length) {
     return `<p class="empty-state">Catch some Fokemon first — you can't deploy what you don't have.</p>`;
   }
   if (!entries.length) {
-    return `<p class="empty-state">Every one of your Fokemon is already deployed at a gym. Recall one before sending another into the ring.</p>`;
+    return `<p class="empty-state">Every one of your Fokemon is already deployed at a gym or committed to a raid. Recall one before sending another into the ring.</p>`;
   }
   // Sort by total power (with boosts) so the trained heavyweights are first.
   entries.sort((a, b) => instancePower(b) - instancePower(a));
@@ -4112,6 +4275,254 @@ function openBattleSite(site) {
   }
   openSiteRefresh = render;
   render();
+}
+
+// ---------------------------------------------------------------------------
+// UberMax raid sheet
+// ---------------------------------------------------------------------------
+function raidPickerHtml(actionLabel, raid) {
+  const entries = availableInstances(caught).filter(
+    (e) => !e.raidParked && !(appliedRaids.has(raid.id) && e.raidId === raid.id)
+  );
+  if (!caught.length) {
+    return `<p class="empty-state">Catch some Fokemon first — the army needs soldiers.</p>`;
+  }
+  if (!entries.length) {
+    return `<p class="empty-state">Every one of your Fokemon is already deployed or committed. Recall one to join the raid.</p>`;
+  }
+  const bossCard = cardsById.get(raid.cardId);
+  entries.sort((a, b) => {
+    const cardA = cardsById.get(a.id);
+    const cardB = cardsById.get(b.id);
+    if (!cardA || !cardB) return 0;
+    return ubermaxDamageFor(cardB, b.boosts, bossCard) - ubermaxDamageFor(cardA, a.boosts, bossCard);
+  });
+  return `
+    <p class="picker-prompt">Choose a Fokemon to ${escapeHtml(actionLabel)}:</p>
+    <div class="picker-grid">
+      ${entries.map((entry) => {
+        const card = cardsById.get(entry.id);
+        if (!card) return "";
+        const colors = colorsFor(card);
+        const dmg = ubermaxDamageFor(card, entry.boosts, bossCard);
+        const mult = bossCard ? typeMultiplier(card.type, bossCard.type) : 1;
+        const matchupTag = mult > 1 ? `<span class="matchup super">Super</span>` : mult < 1 ? `<span class="matchup weak">Weak</span>` : "";
+        return `
+          <button class="picker-card" data-uid="${escapeHtml(entry.uid)}" style="--type-light:${colors.light};--type-dark:${colors.dark};--type-accent:${colors.accent};">
+            <span class="picker-power">💥${dmg}</span>
+            <strong>${escapeHtml(card.name)}</strong>
+            <small>${escapeHtml(card.type)} ${matchupTag}</small>
+          </button>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+function openUberMaxRaid(raid) {
+  if (!raid) return;
+  if (openRaidId) return;
+  openRaidId = raid.id;
+
+  const overlay = document.createElement("div");
+  overlay.className = "ubermax-modal";
+  overlay.innerHTML = `
+    <div class="ubermax-card" role="dialog" aria-modal="true" aria-label="UberMax raid">
+      <header class="ubermax-head">
+        <div>
+          <p class="eyebrow">UberMax raid</p>
+          <h3 class="ubermax-title"></h3>
+        </div>
+        <button class="ghost ubermax-close" aria-label="Close">Close</button>
+      </header>
+      <div class="ubermax-body"></div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const titleEl = overlay.querySelector(".ubermax-title");
+  const bodyEl = overlay.querySelector(".ubermax-body");
+  const closeBtn = overlay.querySelector(".ubermax-close");
+
+  function close() {
+    overlay.remove();
+    openRaidId = null;
+    openRaidRefresh = null;
+    document.removeEventListener("keydown", onKey);
+  }
+  function onKey(ev) { if (ev.key === "Escape") close(); }
+  closeBtn.addEventListener("click", close);
+  overlay.addEventListener("click", (ev) => { if (ev.target === overlay) close(); });
+  document.addEventListener("keydown", onKey);
+
+  function render() {
+    const ctx = raidStateFor(raid);
+    if (!ctx) {
+      bodyEl.innerHTML = `<p class="empty-state">Raid data unavailable.</p>`;
+      titleEl.textContent = "Unknown UberMax";
+      return;
+    }
+    const { card, state } = ctx;
+    titleEl.textContent = `UberMax ${card.name}`;
+    const colors = colorsFor(card);
+    const meters = playerLocation
+      ? Math.round(distanceMeters(playerLocation, { lat: raid.lat, lng: raid.lng }))
+      : null;
+    const inRange = meters !== null && meters <= UBERMAX_RANGE_METERS;
+    const expired = isRaidExpired(raid);
+    const joined = trainerHasContributed(raid.id);
+    const won = state.defeated;
+    const hpPct = state.maxHp ? Math.max(0, Math.round((state.remainingHp / state.maxHp) * 100)) : 0;
+    const minsLeft = Math.max(0, Math.floor((raid.expiresAt - Date.now()) / 60000));
+    const secsLeft = Math.max(0, Math.floor(((raid.expiresAt - Date.now()) % 60000) / 1000));
+    const contributors = raidContributorsList(raid.id);
+    const trophyAwarded = appliedRaids.has(raid.id);
+
+    const status = won
+      ? `<p class="ubermax-status defeated">🏆 DEFEATED — ${escapeHtml(card.name)} has joined every contributor's collection!</p>`
+      : expired
+        ? `<p class="ubermax-status escaped">💨 The UberMax escaped. It was too strong this round.</p>`
+        : `<p class="ubermax-status live">⏳ Raid live · <strong>${minsLeft}:${String(secsLeft).padStart(2, "0")}</strong> remaining</p>`;
+
+    bodyEl.innerHTML = `
+      <div class="ubermax-stage" style="--um-light:${colors.light};--um-dark:${colors.dark};--um-accent:${colors.accent};">
+        <div class="ubermax-portrait-wrap">
+          <canvas class="ubermax-portrait" width="220" height="200" aria-hidden="true"></canvas>
+          <span class="ubermax-type-pill" style="background:${colors.accent};color:#061226;">${escapeHtml(card.type)}</span>
+        </div>
+        <div class="ubermax-vitals">
+          <div class="ubermax-hp-row">
+            <span class="ubermax-hp-label">BOSS HP</span>
+            <span class="ubermax-hp-num">${state.remainingHp.toLocaleString()} / ${state.maxHp.toLocaleString()}</span>
+          </div>
+          <div class="ubermax-hp-bar">
+            <div class="ubermax-hp-fill ${won ? "drained" : ""}" style="width:${hpPct}%"></div>
+          </div>
+          <div class="ubermax-stats-row">
+            <span class="badge">ATK ${state.bossStats.atk}</span>
+            <span class="badge">DEF ${state.bossStats.def}</span>
+            <span class="badge">SPD ${state.bossStats.spd}</span>
+          </div>
+          ${status}
+        </div>
+      </div>
+
+      <div class="ubermax-army">
+        <div class="ubermax-army-head">
+          <strong>Army</strong>
+          <span class="badge">${state.armySize} / ${UBERMAX_MAX_CONTRIBUTORS} trainers</span>
+          <span class="badge">⚔ ${state.armyAtk} ATK</span>
+        </div>
+        <div class="ubermax-army-roster">
+          ${contributors.length
+            ? contributors.map((c) => {
+                const cc = cardsById.get(c.cardId);
+                if (!cc) return "";
+                const cols = colorsFor(cc);
+                const dmg = ubermaxDamageFor(cc, c.boosts, card);
+                const me = c.trainer === profile?.name;
+                return `
+                  <div class="ubermax-roster-card ${me ? "is-me" : ""}" style="--type-light:${cols.light};--type-dark:${cols.dark};--type-accent:${cols.accent};">
+                    <span class="roster-trainer">${escapeHtml(c.trainer)}${me ? " (you)" : ""}</span>
+                    <strong>${escapeHtml(cc.name)}</strong>
+                    <small>${escapeHtml(cc.type)} · 💥 ${dmg}</small>
+                  </div>
+                `;
+              }).join("")
+            : `<p class="empty-state ubermax-empty">No-one has joined yet. Be the first to commit a Fokemon.</p>`}
+        </div>
+      </div>
+
+      <div class="ubermax-actions"></div>
+    `;
+
+    const portraitCanvas = bodyEl.querySelector(".ubermax-portrait");
+    if (portraitCanvas) renderUberMaxPortrait(portraitCanvas, card);
+
+    const actions = bodyEl.querySelector(".ubermax-actions");
+    if (won) {
+      if (joined && !trophyAwarded) {
+        // Late sync — award now.
+        awardUberMaxToTrainer(raid, ctx);
+      }
+      actions.innerHTML = joined
+        ? `<button class="primary ubermax-close-btn">Claim your trophy ✦</button>`
+        : `<p class="empty-state">This raid is over. The contributors took the spoils.</p>`;
+      const btn = actions.querySelector(".ubermax-close-btn");
+      if (btn) btn.addEventListener("click", close);
+      return;
+    }
+    if (expired) {
+      actions.innerHTML = `<p class="empty-state">Wait for the next raid window to spawn.</p>`;
+      return;
+    }
+    if (joined) {
+      actions.innerHTML = `<p class="empty-state">✓ You're in the army. Drag friends in or wait — every join chips the HP bar down.</p>`;
+      return;
+    }
+    if (!inRange) {
+      actions.innerHTML = `<p class="empty-state">Walk within ${UBERMAX_RANGE_METERS}m to join the raid (${meters ?? "?"}m away).</p>`;
+      return;
+    }
+    if (state.armySize >= UBERMAX_MAX_CONTRIBUTORS) {
+      actions.innerHTML = `<p class="empty-state">The army is full. Watch the bar drop!</p>`;
+      return;
+    }
+    actions.innerHTML = `
+      <div class="ubermax-picker">
+        ${raidPickerHtml("commit to the army", raid)}
+      </div>
+    `;
+    actions.querySelectorAll(".picker-card").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const uid = btn.dataset.uid;
+        const entry = getInstance(uid);
+        if (!entry || entry.deployedAt || entry.raidParked) return;
+        const cc = cardsById.get(entry.id);
+        if (!cc) return;
+        if (!profile?.name) return;
+        // Lock the instance locally so it can't double-contribute or deploy.
+        entry.raidParked = raid.id;
+        saveLocal();
+        const contribution = {
+          trainer: profile.name,
+          team: profile.team || "mint",
+          cardId: entry.id,
+          uid: entry.uid,
+          boosts: { ...(entry.boosts || {}) },
+          joinedAt: Date.now(),
+        };
+        // Optimistic local update so the bar moves immediately.
+        const map = ubermaxContributions.get(raid.id) || new Map();
+        map.set(contribution.trainer, contribution);
+        ubermaxContributions.set(raid.id, map);
+        publishContribution(raid, contribution);
+        handleRaidStateChanged(raid);
+        renderCollection();
+        render();
+      });
+    });
+  }
+
+  openRaidRefresh = render;
+  render();
+}
+
+// Reuse the catch-time creature renderer for the boss portrait — same look,
+// just at a chunky size that hints at the UberMax stature.
+function renderUberMaxPortrait(canvas, card) {
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  // Soft radial bloom behind the boss to sell the "giant".
+  const grad = ctx.createRadialGradient(canvas.width / 2, canvas.height / 2, 10, canvas.width / 2, canvas.height / 2, canvas.width / 1.6);
+  const colors = colorsFor(card);
+  grad.addColorStop(0, `${colors.accent}`);
+  grad.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.globalAlpha = 0.55;
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.globalAlpha = 1;
+  drawCreature(ctx, card, canvas.width / 2, canvas.height / 2 + 8, Math.min(canvas.width, canvas.height) * 0.42);
 }
 
 function launchPoiSpinner(poi) {
@@ -7055,6 +7466,209 @@ function subscribeChampionUpdates() {
   });
 }
 
+// ---------------------------------------------------------------------------
+// UberMax raids: GUN sync + contribution publish
+// ---------------------------------------------------------------------------
+// Each contribution lives at `ubermax/<raidId>/<trainerName>` as an encrypted
+// envelope (same SEA pattern the rest of the app uses). Keying by trainer
+// name means re-publishing overwrites in place, so a trainer can't double-pile
+// into the same raid. Every peer that subscribes sums the contributions to
+// render the shared HP bar.
+function normalizeContribution(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  if (!raw.trainer || !raw.cardId) return null;
+  if (!cardsById.has(String(raw.cardId))) return null;
+  return {
+    trainer: String(raw.trainer),
+    cardId: String(raw.cardId),
+    uid: raw.uid ? String(raw.uid) : null,
+    boosts: normalizeBoosts(raw.boosts),
+    joinedAt: Number(raw.joinedAt) || Date.now(),
+    team: raw.team ? String(raw.team) : "mint",
+  };
+}
+
+function subscribeRaidUpdates() {
+  if (!ubermaxNode) return;
+  const wanted = new Set(currentUberMax.map((r) => r.id));
+  for (const id of subscribedRaids) {
+    if (!wanted.has(id)) {
+      try { ubermaxNode.get(id).map().off(); } catch {}
+      subscribedRaids.delete(id);
+      ubermaxContributions.delete(id);
+    }
+  }
+  currentUberMax.forEach((raid) => {
+    if (subscribedRaids.has(raid.id)) return;
+    subscribedRaids.add(raid.id);
+    if (!ubermaxContributions.has(raid.id)) ubermaxContributions.set(raid.id, new Map());
+    encryptedMapOn(ubermaxNode.get(raid.id), (plain, trainerKey) => {
+      if (!trainerKey) return;
+      const map = ubermaxContributions.get(raid.id) || new Map();
+      ubermaxContributions.set(raid.id, map);
+      if (!plain) {
+        if (map.has(trainerKey)) {
+          map.delete(trainerKey);
+          handleRaidStateChanged(raid);
+        }
+        return;
+      }
+      const contribution = normalizeContribution(plain);
+      if (!contribution) return;
+      const prev = map.get(contribution.trainer);
+      const prevSig = prev ? `${prev.cardId}|${prev.joinedAt}|${prev.uid || ""}` : "";
+      const newSig = `${contribution.cardId}|${contribution.joinedAt}|${contribution.uid || ""}`;
+      if (prevSig === newSig) return;
+      map.set(contribution.trainer, contribution);
+      handleRaidStateChanged(raid);
+    });
+  });
+}
+
+function handleRaidStateChanged(raid) {
+  // Update the marker, the open sheet (if any), and trigger victory awarding
+  // when the boss has just dropped to 0 HP for the first time.
+  const ctx = raidStateFor(raid);
+  if (ctx && ctx.state.defeated && !appliedRaids.has(raid.id)) {
+    awardUberMaxToTrainer(raid, ctx);
+  }
+  renderMap();
+  if (openRaidId === raid.id && typeof openRaidRefresh === "function") {
+    openRaidRefresh();
+  }
+}
+
+function publishContribution(raid, contribution) {
+  if (!ubermaxNode || !raid || !contribution?.trainer) return;
+  encryptedPut(ubermaxNode.get(raid.id).get(contribution.trainer), {
+    trainer: contribution.trainer,
+    cardId: contribution.cardId,
+    uid: contribution.uid || null,
+    boosts: normalizeBoosts(contribution.boosts),
+    joinedAt: contribution.joinedAt || Date.now(),
+    team: contribution.team || "mint",
+  });
+}
+
+function awardUberMaxToTrainer(raid, ctx) {
+  // Called once per raid per device. Drops a giant copy of the boss into the
+  // local collection of every trainer who contributed. Locks via appliedRaids
+  // so it can't double-credit on refresh / late sync.
+  if (!profile?.name || appliedRaids.has(raid.id)) return;
+  const map = ubermaxContributions.get(raid.id);
+  if (!map || !map.has(profile.name)) return; // didn't join — no spoils
+  rememberAppliedRaid(raid.id);
+  const card = ctx?.card || cardsById.get(raid.cardId);
+  if (!card) return;
+  // The trophy is the *species*, but with a chunky boost stack so it actually
+  // feels like a giant version. We also tag it so the UI can render the laurel.
+  const ts = Date.now();
+  const uid = makeInstanceUid(card.id, ts);
+  const trophy = {
+    id: card.id,
+    ts,
+    uid,
+    boosts: normalizeBoosts(UBERMAX_REWARD_BOOSTS),
+    deployedAt: null,
+    ubermax: true,
+    raidId: raid.id,
+  };
+  caught.push(trophy);
+  caughtIds.add(card.id);
+  caughtByUid.set(uid, trophy);
+  saveLocal();
+  renderCollection();
+  // Also release the Fokemon they contributed back into their roster.
+  releaseContributedInstance(raid.id);
+  showRaidVictoryToast(card);
+}
+
+function releaseContributedInstance(raidId) {
+  // If the trainer parked an instance into the raid (we mark it via raidId on
+  // the entry), bring it home now that the raid is over.
+  let changed = false;
+  for (const entry of caught) {
+    if (entry && entry.raidParked === raidId) {
+      delete entry.raidParked;
+      changed = true;
+    }
+  }
+  if (changed) saveLocal();
+  return changed;
+}
+
+const escapedRaidsHandled = new Set();
+function reapExpiredRaids() {
+  // Walk the local raidParked Fokemon and free any tied to a raid window that
+  // has elapsed (whether won or escaped). On escape, hand out a consolation
+  // FokéBall so the contribution wasn't wasted.
+  const now = Date.now();
+  let changed = false;
+  const escapedNow = new Set();
+  for (const entry of caught) {
+    if (!entry?.raidParked) continue;
+    const raidId = entry.raidParked;
+    // raidId format: `um|<lat>:<lng>|<bucket>` — pull bucket → expiry.
+    const parts = raidId.split("|");
+    const bucket = Number(parts[parts.length - 1]);
+    if (!Number.isFinite(bucket)) continue;
+    const expiresAt = (bucket + 1) * UBERMAX_INTERVAL_MS;
+    if (now < expiresAt) continue;
+    delete entry.raidParked;
+    changed = true;
+    if (!appliedRaids.has(raidId) && !escapedRaidsHandled.has(raidId)) {
+      escapedNow.add(raidId);
+    }
+  }
+  if (changed) {
+    saveLocal();
+    renderCollection();
+  }
+  if (escapedNow.size) {
+    escapedNow.forEach((id) => escapedRaidsHandled.add(id));
+    addFokeBalls(escapedNow.size * 2);
+    showRaidEscapeToast(escapedNow.size);
+  }
+}
+
+function showRaidEscapeToast(count) {
+  if (typeof document === "undefined") return;
+  const toast = document.createElement("div");
+  toast.className = "raid-victory-toast raid-escape-toast";
+  toast.innerHTML = `
+    <span class="rvt-laurel">💨</span>
+    <div>
+      <strong>The UberMax escaped</strong>
+      <small>Consolation: +${count * 2} FokéBalls for trying.</small>
+    </div>
+  `;
+  document.body.appendChild(toast);
+  requestAnimationFrame(() => toast.classList.add("show"));
+  setTimeout(() => {
+    toast.classList.remove("show");
+    setTimeout(() => toast.remove(), 400);
+  }, 4200);
+}
+
+function showRaidVictoryToast(card) {
+  if (typeof document === "undefined") return;
+  const toast = document.createElement("div");
+  toast.className = "raid-victory-toast";
+  toast.innerHTML = `
+    <span class="rvt-laurel">🏆</span>
+    <div>
+      <strong>UberMax ${escapeHtml(card.name)} defeated!</strong>
+      <small>A giant ${escapeHtml(card.name)} joined your collection.</small>
+    </div>
+  `;
+  document.body.appendChild(toast);
+  requestAnimationFrame(() => toast.classList.add("show"));
+  setTimeout(() => {
+    toast.classList.remove("show");
+    setTimeout(() => toast.remove(), 400);
+  }, 4200);
+}
+
 function creditGymRestForOwnedChampions() {
   // Award passive HP boosts for champions I own that have been resting on
   // guard duty. Pure calc in app.logic.js; we just persist + publish here.
@@ -7729,7 +8343,7 @@ function openTradeModal(initialRequestId = null, options = {}) {
 
   function renderOffer(recipientName) {
     openTradeRequestId = "list";
-    const available = availableInstances(caught);
+    const available = availableInstances(caught).filter((e) => !e.raidParked);
     if (!available.length) {
       paint(`
         <button type="button" class="trade-back">‹ Back</button>
@@ -7783,7 +8397,7 @@ function openTradeModal(initialRequestId = null, options = {}) {
 
     // --- The pending recipient still owes a counter: show their picker. ---
     if (req.status === "pending" && iAmTo) {
-      const available = availableInstances(caught);
+      const available = availableInstances(caught).filter((e) => !e.raidParked);
       const fromCardName = cardsById.get(req.offer.cardId)?.name || "a Fokémon";
       if (!available.length) {
         paint(`
@@ -7951,9 +8565,11 @@ function initGun() {
     battleEventsNode = root.get("battleEvents");
     tradesNode = root.get("trades");
     presenceNode = root.get("presence");
+    ubermaxNode = root.get("ubermax");
     connectFeed();
     connectGridCaught();
     subscribeChampionUpdates();
+    subscribeRaidUpdates();
     subscribeTrades();
     subscribePresence();
   } catch {
@@ -8372,6 +8988,13 @@ if (typeof setInterval === "function") {
       renderMap();
       if (typeof openSiteRefresh === "function") openSiteRefresh();
     }
+    // Drive the live raid timer (countdown + raid-expired transitions).
+    if (currentUberMax.length || openRaidId) {
+      renderMap();
+      if (typeof openRaidRefresh === "function") openRaidRefresh();
+    }
+    // Reap any local raidParked instances whose window has elapsed.
+    reapExpiredRaids();
   }, 1000);
 
   // Idle heartbeat: keeps this trainer discoverable for trading even when
