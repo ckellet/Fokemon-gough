@@ -52,6 +52,7 @@ import {
   evoCostFor,
   evoDisplayName,
   normalizeFoodBag,
+  rollCacheFood,
   evolutionState,
 } from "./app.logic.js";
 
@@ -5152,6 +5153,9 @@ function launchPoiSpinner(poi) {
   let dragging = false;
   let lastAngle = 0;
   let lastTime = 0;
+  // Timestamp of the last pointer move that actually drove the wheel. Used to
+  // decide when a held-but-still finger should stop sustaining the spin.
+  let lastMoveTime = 0;
   let strokeTangentialAccum = 0;
   let collected = 0;
   let revAccum = 0;
@@ -5159,6 +5163,9 @@ function launchPoiSpinner(poi) {
   let lastPointerMoved = false;
   let bursts = [];
   let stopped = false;
+  let foodPops = [];
+  let foodRolled = false;
+  let foodBonusMsg = "";
 
   // ---------- juice: audio (synthesized, no asset files) ----------
   let audioCtx = null;
@@ -5213,6 +5220,7 @@ function launchPoiSpinner(poi) {
     lock() { tone({ freq: 520, freqEnd: 760, dur: 0.14, type: "triangle", vol: 0.06 }); },
     ball() { [659, 880, 1175].forEach((f, i) => tone({ freq: f, dur: 0.14, type: "triangle", vol: 0.085, delay: i * 0.06 })); },
     empty() { [523, 659, 784, 1047, 1319].forEach((f, i) => tone({ freq: f, dur: 0.2, type: "triangle", vol: 0.1, delay: i * 0.09 })); noiseBurst({ dur: 0.2, vol: 0.05, filter: 3200 }); },
+    foodReward() { [659, 880, 1047, 1319, 1568, 2093].forEach((f, i) => tone({ freq: f, dur: 0.18, type: "sine", vol: 0.085, delay: i * 0.07 })); noiseBurst({ dur: 0.3, vol: 0.04, filter: 6000 }); },
   };
 
   // ---------- juice: particles + screen shake ----------
@@ -5235,6 +5243,46 @@ function launchPoiSpinner(poi) {
       });
     }
     if (particles.length > 220) particles.splice(0, particles.length - 220);
+  }
+  // Golden shower for the bonus-food jackpot — warmer + longer-lived than the
+  // FokéBall burst so it reads as a distinct, rarer celebration.
+  function spawnFoodBurst(cx, cy) {
+    const cols = ["#ffe27a", "#ffd24a", "#fff3b0", "#ffb347", "#ffffff"];
+    for (let i = 0; i < 44; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = 130 + Math.random() * 300;
+      particles.push({
+        x: cx, y: cy,
+        vx: Math.cos(a) * sp,
+        vy: Math.sin(a) * sp - 90,
+        g: 360,
+        life: 0.7 + Math.random() * 0.8, maxLife: 1.5,
+        size: 2.2 + Math.random() * 3.6,
+        color: cols[i % cols.length],
+      });
+    }
+    if (particles.length > 280) particles.splice(0, particles.length - 280);
+  }
+  // A floating emoji + amount that rises and fades from the hub.
+  function spawnFoodPop(emoji, amount) {
+    foodPops.push({ emoji, amount, t: 0, life: 1.9, x: CX, y: CY - R * 0.08 });
+  }
+  // Once-per-cache surprise food, rolled at the moment the cache empties. Lands
+  // a random type's food (the cache isn't tied to one Fokemon) with full juice.
+  function tryCacheFood() {
+    if (foodRolled) return;
+    foodRolled = true;
+    const amount = rollCacheFood();
+    if (amount <= 0) return;
+    const types = Object.keys(TYPE_FOOD);
+    const type = types[Math.floor(Math.random() * types.length)];
+    const fd = foodForType(type);
+    grantFood(type, amount);
+    spawnFoodBurst(CX, CY);
+    spawnFoodPop(fd.emoji, amount);
+    addShake(7);
+    sfx.foodReward();
+    foodBonusMsg = ` <span class="food-gain">+${amount} ${fd.emoji} ${escapeHtml(fd.name)} bonus!</span>`;
   }
   function updateParticles(dt) {
     for (const p of particles) {
@@ -5271,7 +5319,7 @@ function launchPoiSpinner(poi) {
       const speed = Math.abs(omega);
       const pct = Math.min(1, speed / THRESHOLD);
       if (collected >= MAX_POI_REWARD) {
-        status.innerHTML = `<span class="success">Cache emptied!</span> +${collected} FokéBalls — nice spin.`;
+        status.innerHTML = `<span class="success">Cache emptied!</span> +${collected} FokéBalls — nice spin.${foodBonusMsg}`;
       } else if (speed >= THRESHOLD) {
         status.innerHTML = `<strong>Locked in!</strong> Keep her spinning…`;
       } else if (collected > 0) {
@@ -5305,6 +5353,7 @@ function launchPoiSpinner(poi) {
       // Cache fully drained — mark spent now.
       sfx.empty();
       addShake(8);
+      tryCacheFood();
       finalizeSpent();
       setStatus();
     }
@@ -5360,6 +5409,7 @@ function launchPoiSpinner(poi) {
     strokeTangentialAccum += Math.abs(delta);
     lastAngle = angle;
     lastTime = now;
+    lastMoveTime = now;
     lastPointerMoved = true;
   }
 
@@ -5405,7 +5455,12 @@ function launchPoiSpinner(poi) {
   }
 
   function step(dt) {
-    if (!dragging) {
+    // A held-but-motionless finger must NOT keep the wheel spinning — otherwise
+    // pressing and holding (e.g. in the hub) trivially sustains speed. The wheel
+    // only coasts input-free while a stroke is actively moving it; the moment the
+    // pointer stops moving (or lifts) it decays under normal damping.
+    const heldStill = dragging && performance.now() - lastMoveTime > 80;
+    if (!dragging || heldStill) {
       theta += omega * dt;
       omega -= omega * DAMPING * dt;
       if (Math.abs(omega) < 0.04) omega = 0;
@@ -5444,6 +5499,12 @@ function launchPoiSpinner(poi) {
     bursts = bursts.filter((b) => {
       b.t += dt;
       return b.t < b.life;
+    });
+
+    foodPops = foodPops.filter((fp) => {
+      fp.t += dt;
+      fp.y -= dt * 34;
+      return fp.t < fp.life;
     });
 
     updateParticles(dt);
@@ -5572,6 +5633,27 @@ function launchPoiSpinner(poi) {
     ctx.restore();
   }
 
+  function drawFoodPops() {
+    for (const fp of foodPops) {
+      const k = Math.max(0, 1 - fp.t / fp.life);
+      const scale = 1 + (1 - k) * 0.45;
+      ctx.save();
+      ctx.globalAlpha = k;
+      ctx.translate(fp.x, fp.y);
+      ctx.scale(scale, scale);
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.font = "30px system-ui, 'Apple Color Emoji', sans-serif";
+      ctx.fillText(fp.emoji, 0, -16);
+      ctx.font = "bold 22px system-ui, sans-serif";
+      ctx.shadowColor = "rgba(255, 210, 74, 0.9)";
+      ctx.shadowBlur = 14;
+      ctx.fillStyle = "#ffe27a";
+      ctx.fillText(`+${fp.amount}`, 0, 14);
+      ctx.restore();
+    }
+  }
+
   function draw() {
     ctx.clearRect(0, 0, W, H);
     ctx.save();
@@ -5580,6 +5662,7 @@ function launchPoiSpinner(poi) {
     }
     drawWheel();
     drawParticles();
+    drawFoodPops();
     ctx.restore();
   }
 

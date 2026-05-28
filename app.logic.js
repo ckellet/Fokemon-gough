@@ -646,6 +646,37 @@ export function normalizeFoodBag(raw) {
   return bag;
 }
 
+// FokéCache bonus food. Emptying a cache rolls once for a surprise food haul.
+// CACHE_FOOD_CHANCE is the odds of any drop; conditional on a drop the size
+// climbs a halving ladder, so 10 is common and a 100-haul is the rare jackpot.
+// The top tier soaks up the leftover probability so the weights sum to 1.
+export const CACHE_FOOD_CHANCE = 0.25;
+export const CACHE_FOOD_LADDER = [
+  { amount: 10, weight: 0.5 },
+  { amount: 25, weight: 0.25 },
+  { amount: 50, weight: 0.125 },
+  { amount: 100, weight: 0.125 },
+];
+
+// Pick a haul size from the ladder (assumes a drop already happened). `rng`
+// returns [0,1); injected so tests can pin outcomes.
+export function pickCacheFoodSize(rng = Math.random) {
+  const r = rng();
+  let acc = 0;
+  for (const tier of CACHE_FOOD_LADDER) {
+    acc += tier.weight;
+    if (r < acc) return tier.amount;
+  }
+  return CACHE_FOOD_LADDER[CACHE_FOOD_LADDER.length - 1].amount;
+}
+
+// Roll a cache's bonus food: the 1-in-4 gate, then a ladder draw. Returns the
+// food amount won, or 0 when nothing drops.
+export function rollCacheFood(rng = Math.random) {
+  if (rng() >= CACHE_FOOD_CHANCE) return 0;
+  return pickCacheFoodSize(rng);
+}
+
 // Whether an instance can evolve right now, plus everything the UI needs to
 // render the affordance (cost, have, short-by, next tier + name).
 export function evolutionState(card, entry, foodBag) {
