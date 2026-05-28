@@ -75,10 +75,10 @@ const RARITY_RANK = { epic: 0, rare: 1, common: 2 };
 function entryPower(entry, card) {
   if (!card) return 0;
   const b = entry?.boosts || EMPTY_BOOSTS;
-  return (
+  const total =
     (card.hp || 0) + (card.atk || 0) + (card.def || 0) + (card.spd || 0)
-    + (b.hp || 0) + (b.atk || 0) + (b.def || 0) + (b.spd || 0)
-  );
+    + (b.hp || 0) + (b.atk || 0) + (b.def || 0) + (b.spd || 0);
+  return Math.round(total * evoStatMult(entry?.evoStage));
 }
 
 function entryHp(entry, card) {
@@ -212,6 +212,7 @@ export function serializeTradeOffer(offer) {
     cardId: String(offer.cardId),
     boosts: normalizeBoosts(offer.boosts),
     caughtAt: Number(offer.caughtAt) || 0,
+    evoStage: clampEvoStage(offer.evoStage),
   });
 }
 
@@ -233,6 +234,7 @@ export function parseTradeOffer(raw) {
     cardId: String(obj.cardId),
     boosts: normalizeBoosts(obj.boosts),
     caughtAt: Number(obj.caughtAt) || 0,
+    evoStage: clampEvoStage(obj.evoStage),
   };
 }
 
@@ -257,6 +259,10 @@ export function migrateCaughtEntries(entries) {
     if (entry.ubermax) migrated.ubermax = true;
     if (entry.raidId) migrated.raidId = String(entry.raidId);
     if (entry.raidParked) migrated.raidParked = String(entry.raidParked);
+    // Evolution tier only stored when above base, so untouched entries stay
+    // byte-identical to the legacy shape.
+    const stage = clampEvoStage(entry.evoStage);
+    if (stage > 0) migrated.evoStage = stage;
     return migrated;
   });
 }
@@ -563,6 +569,111 @@ export function clampBoost(value) {
 }
 
 // ---------------------------------------------------------------------------
+// Evolution + type-food
+// ---------------------------------------------------------------------------
+// Catching any Fokemon yields food keyed to its TYPE (not its species). Spend a
+// type's food to evolve any caught Fokemon of that type up a tier. Higher tiers
+// are bigger, renamed (Super → Mega) and stat-multiplied (evoStatMult), so even
+// the most basic spawns stay worth catching — they're the evolution-fuel farm.
+
+// Per-catch food yield. Flat across rarities on purpose: commons spawn most
+// often, so a flat yield makes them the reliable fuel grind the loop wants.
+export const FOOD_PER_CATCH = 10;
+
+// Highest tier an instance can reach (0 = base, freshly caught).
+export const EVO_MAX_STAGE = 2;
+
+// Food cost to climb FROM the indexed stage to the next. index 0 = base→1.
+export const EVO_FOOD_COSTS = [50, 150];
+
+// Display-name prefix per stage. Stage 0 is the plain species name.
+export const EVO_NAME_PREFIX = ["", "Super ", "Mega "];
+
+// Multiplier applied to (base + boost) per stage in effectiveStats — the single
+// knob that makes an evolved Fokemon "more powerful" everywhere stats are read
+// (collection power, gym battles, raid damage).
+export const EVO_STAT_MULT = [1, 1.35, 1.85];
+
+// One food per type. `name` is surfaced in the UI; `emoji` rides the chips.
+export const TYPE_FOOD = {
+  Electric: { name: "Voltbites",    emoji: "⚡" },
+  Leaf:     { name: "Sproutsnacks", emoji: "🌿" },
+  Water:    { name: "Dewdrops",     emoji: "💧" },
+  Fire:     { name: "Cindersnaps",  emoji: "🔥" },
+  Shadow:   { name: "Umbragums",    emoji: "🌑" },
+  Ice:      { name: "Frostflakes",  emoji: "❄️" },
+  Wind:     { name: "Gustpuffs",    emoji: "🌬️" },
+  Rock:     { name: "Cragcrunch",   emoji: "🪨" },
+  Cosmic:   { name: "Stardrops",    emoji: "🌟" },
+  Spirit:   { name: "Wispwafers",   emoji: "👻" },
+  Bug:      { name: "Nectarnibs",   emoji: "🍯" },
+  Metal:    { name: "Cogchews",     emoji: "⚙️" },
+};
+
+export function foodForType(type) {
+  return TYPE_FOOD[type] || { name: `${type || "Mystery"} treats`, emoji: "🍬" };
+}
+
+export function clampEvoStage(value) {
+  const n = Math.floor(Number(value) || 0);
+  return Math.max(0, Math.min(EVO_MAX_STAGE, n));
+}
+
+export function evoStatMult(stage) {
+  return EVO_STAT_MULT[clampEvoStage(stage)] ?? 1;
+}
+
+// Food required to advance FROM `stage` to `stage + 1`, or null when maxed.
+export function evoCostFor(stage) {
+  const s = clampEvoStage(stage);
+  if (s >= EVO_MAX_STAGE) return null;
+  return EVO_FOOD_COSTS[s] ?? null;
+}
+
+export function evoDisplayName(name, stage) {
+  return `${EVO_NAME_PREFIX[clampEvoStage(stage)] || ""}${name || ""}`;
+}
+
+// Keep a food bag as a clean { [type]: positiveInt } map (drops zero/junk).
+export function normalizeFoodBag(raw) {
+  const bag = {};
+  if (raw && typeof raw === "object") {
+    for (const type of Object.keys(TYPE_FOOD)) {
+      const n = Math.floor(Number(raw[type]) || 0);
+      if (n > 0) bag[type] = n;
+    }
+  }
+  return bag;
+}
+
+// Whether an instance can evolve right now, plus everything the UI needs to
+// render the affordance (cost, have, short-by, next tier + name).
+export function evolutionState(card, entry, foodBag) {
+  if (!card) return { ok: false, reason: "unknown" };
+  const stage = clampEvoStage(entry?.evoStage);
+  const food = foodForType(card.type);
+  const have = Math.max(0, Math.floor(Number(foodBag?.[card.type]) || 0));
+  if (stage >= EVO_MAX_STAGE) {
+    return { ok: false, reason: "maxed", stage, nextStage: stage, cost: null, have, shortBy: 0, type: card.type, food, nextName: evoDisplayName(card.name, stage) };
+  }
+  const cost = evoCostFor(stage);
+  const deployed = !!(entry?.deployedAt || entry?.raidParked);
+  const ok = !deployed && cost != null && have >= cost;
+  return {
+    ok,
+    reason: deployed ? "deployed" : have < (cost ?? Infinity) ? "short" : "ready",
+    stage,
+    nextStage: stage + 1,
+    cost,
+    have,
+    shortBy: Math.max(0, (cost ?? 0) - have),
+    type: card.type,
+    food,
+    nextName: evoDisplayName(card.name, stage + 1),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // UberMax raid bosses
 // ---------------------------------------------------------------------------
 // Giant co-op bosses. One raid lives at a (macro cell × time bucket); any
@@ -610,9 +721,9 @@ export const UBERMAX_REWARD_BOOSTS = Object.freeze({
 // Damage one contributor's Fokemon deals to the boss. Type advantage matters
 // — a Water Fokemon vs a Fire UberMax actually closes the HP bar fast. Boosts
 // from training carry over (incentive to bring your trained heavyweights).
-export function ubermaxDamageFor(contributorCard, contributorBoosts, ubermaxCard) {
+export function ubermaxDamageFor(contributorCard, contributorBoosts, ubermaxCard, evoStage = 0) {
   if (!contributorCard || !ubermaxCard) return 0;
-  const stats = effectiveStats(contributorCard, { boosts: contributorBoosts || EMPTY_BOOSTS, defenses: 0 });
+  const stats = effectiveStats(contributorCard, { boosts: contributorBoosts || EMPTY_BOOSTS, defenses: 0, evoStage });
   const mult = typeMultiplier(contributorCard.type, ubermaxCard.type);
   // Soft bonus per stat point of training: each +1 boost adds a little extra
   // pop on top of the linear stats so a fully-trained Fokemon really shines.
@@ -640,8 +751,8 @@ export function computeRaidState(ubermaxCard, contributors, cardLookup) {
     const card = get(c?.cardId);
     if (!card) continue;
     valid += 1;
-    damage += ubermaxDamageFor(card, c.boosts, ubermaxCard);
-    const eff = effectiveStats(card, { boosts: c.boosts || EMPTY_BOOSTS, defenses: 0 });
+    damage += ubermaxDamageFor(card, c.boosts, ubermaxCard, c.evoStage);
+    const eff = effectiveStats(card, { boosts: c.boosts || EMPTY_BOOSTS, defenses: 0, evoStage: c.evoStage });
     armyAtk += eff.atk;
     armyHp += eff.hp;
   }
@@ -756,8 +867,9 @@ export function effectiveStats(card, champion) {
   const boosts = champion?.boosts || { hp: 0, atk: 0, def: 0, spd: 0 };
   const defenses = champion?.defenses || 0;
   const fatigue = Math.min(0.45, defenses * 0.09);
+  const mult = evoStatMult(champion?.evoStage);
   const apply = (base, boost, fatigueMul) =>
-    Math.max(1, Math.round((base + (boost || 0)) * (1 - fatigue * fatigueMul)));
+    Math.max(1, Math.round((base + (boost || 0)) * mult * (1 - fatigue * fatigueMul)));
   return {
     hp: apply(card.hp ?? 0, boosts.hp, 0.5),
     atk: apply(card.atk ?? 0, boosts.atk, 1),
