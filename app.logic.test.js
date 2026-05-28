@@ -51,6 +51,18 @@ import {
   UBERMAX_HP_MULT,
   UBERMAX_HP_BONUS,
   UBERMAX_REWARD_BOOSTS,
+  FOOD_PER_CATCH,
+  EVO_MAX_STAGE,
+  EVO_FOOD_COSTS,
+  EVO_STAT_MULT,
+  TYPE_FOOD,
+  foodForType,
+  clampEvoStage,
+  evoStatMult,
+  evoCostFor,
+  evoDisplayName,
+  normalizeFoodBag,
+  evolutionState,
 } from './app.logic.js';
 
 test('computeCollectionStats returns total and unique counts', () => {
@@ -92,7 +104,15 @@ test('trade offer survives the GUN wire as a JSON string round-trip', () => {
     cardId: 'VoltLynx',
     boosts: { hp: 3, atk: 2, def: 0, spd: 1 },
     caughtAt: 1700,
+    evoStage: 0,
   });
+});
+
+test('trade offer carries evolution tier across the wire', () => {
+  const wire = serializeTradeOffer({ uid: 'u9', cardId: 'Sparkit', boosts: {}, caughtAt: 9, evoStage: 2 });
+  assert.equal(parseTradeOffer(wire).evoStage, 2);
+  // clamps junk / over-cap values
+  assert.equal(serializeTradeOffer({ uid: 'u9', cardId: 'Sparkit', evoStage: 99 }), JSON.stringify({ uid: 'u9', cardId: 'Sparkit', boosts: { hp: 0, atk: 0, def: 0, spd: 0 }, caughtAt: 0, evoStage: EVO_MAX_STAGE }));
 });
 
 test('parseTradeOffer rejects an unresolved GUN link node (the original bug)', () => {
@@ -730,4 +750,103 @@ test('migrateCaughtEntries preserves ubermax + raidId + raidParked flags', () =>
   const round = migrateCaughtEntries(out);
   assert.equal(round[0].ubermax, true);
   assert.equal(round[1].raidParked, 'um|2:2|123');
+});
+
+// ---------------------------------------------------------------------------
+// Evolution + type-food
+// ---------------------------------------------------------------------------
+
+test('clampEvoStage floors, rounds down and caps at EVO_MAX_STAGE', () => {
+  assert.equal(clampEvoStage(undefined), 0);
+  assert.equal(clampEvoStage(-3), 0);
+  assert.equal(clampEvoStage(1.9), 1);
+  assert.equal(clampEvoStage(99), EVO_MAX_STAGE);
+});
+
+test('evoStatMult matches the EVO_STAT_MULT table and grows per tier', () => {
+  assert.equal(evoStatMult(0), EVO_STAT_MULT[0]);
+  assert.equal(evoStatMult(1), EVO_STAT_MULT[1]);
+  assert.equal(evoStatMult(2), EVO_STAT_MULT[2]);
+  assert.ok(evoStatMult(2) > evoStatMult(1) && evoStatMult(1) > evoStatMult(0));
+});
+
+test('evoCostFor returns climb cost per stage and null when maxed', () => {
+  assert.equal(evoCostFor(0), EVO_FOOD_COSTS[0]);
+  assert.equal(evoCostFor(1), EVO_FOOD_COSTS[1]);
+  assert.equal(evoCostFor(EVO_MAX_STAGE), null);
+});
+
+test('evoDisplayName prefixes Super / Mega and leaves base names untouched', () => {
+  assert.equal(evoDisplayName('Sparkit', 0), 'Sparkit');
+  assert.equal(evoDisplayName('Sparkit', 1), 'Super Sparkit');
+  assert.equal(evoDisplayName('Sparkit', 2), 'Mega Sparkit');
+});
+
+test('every type has a food definition with a name + emoji', () => {
+  const types = ['Electric', 'Leaf', 'Water', 'Fire', 'Shadow', 'Ice', 'Wind', 'Rock', 'Cosmic', 'Spirit', 'Bug', 'Metal'];
+  for (const t of types) {
+    assert.ok(TYPE_FOOD[t], `missing food for ${t}`);
+    assert.ok(TYPE_FOOD[t].name && TYPE_FOOD[t].emoji);
+  }
+  // Unknown type still yields a usable fallback.
+  assert.ok(foodForType('Mystery').name);
+});
+
+test('normalizeFoodBag drops zero/negative/unknown keys and floors counts', () => {
+  const bag = normalizeFoodBag({ Electric: 12.6, Leaf: 0, Fire: -3, Bogus: 50, Water: '7' });
+  assert.deepEqual(bag, { Electric: 12, Water: 7 });
+});
+
+test('effectiveStats multiplies base+boost by the evolution tier', () => {
+  const card = { hp: 80, atk: 60, def: 50, spd: 40, type: 'Leaf' };
+  const base = effectiveStats(card, { boosts: { hp: 0, atk: 10, def: 0, spd: 0 }, defenses: 0, evoStage: 0 });
+  const mega = effectiveStats(card, { boosts: { hp: 0, atk: 10, def: 0, spd: 0 }, defenses: 0, evoStage: 2 });
+  assert.equal(base.atk, 70);
+  assert.equal(mega.atk, Math.round(70 * EVO_STAT_MULT[2]));
+  assert.ok(mega.hp > base.hp);
+});
+
+test('ubermaxDamageFor scales up with evolution tier', () => {
+  const contributor = { hp: 60, atk: 70, def: 40, spd: 50, type: 'Water' };
+  const boss = { hp: 4000, atk: 200, def: 120, spd: 60, type: 'Fire' };
+  const base = ubermaxDamageFor(contributor, { hp: 0, atk: 0, def: 0, spd: 0 }, boss, 0);
+  const mega = ubermaxDamageFor(contributor, { hp: 0, atk: 0, def: 0, spd: 0 }, boss, 2);
+  assert.ok(mega > base, 'an evolved Fokemon should hit a raid boss harder');
+});
+
+test('migrateCaughtEntries preserves evoStage only when above base', () => {
+  const out = migrateCaughtEntries([
+    { id: 'sparkit', ts: 1, uid: 'u1' },
+    { id: 'sparkit', ts: 2, uid: 'u2', evoStage: 2 },
+    { id: 'sparkit', ts: 3, uid: 'u3', evoStage: 99 },
+  ]);
+  assert.equal('evoStage' in out[0], false, 'base entry stays byte-identical (no evoStage key)');
+  assert.equal(out[1].evoStage, 2);
+  assert.equal(out[2].evoStage, EVO_MAX_STAGE);
+});
+
+test('evolutionState reports ready / short / deployed / maxed', () => {
+  const card = { name: 'Sparkit', type: 'Electric', hp: 40, atk: 40, def: 40, spd: 40 };
+  const ready = evolutionState(card, { evoStage: 0 }, { Electric: EVO_FOOD_COSTS[0] });
+  assert.equal(ready.ok, true);
+  assert.equal(ready.nextStage, 1);
+  assert.equal(ready.nextName, 'Super Sparkit');
+
+  const short = evolutionState(card, { evoStage: 0 }, { Electric: EVO_FOOD_COSTS[0] - 1 });
+  assert.equal(short.ok, false);
+  assert.equal(short.reason, 'short');
+  assert.equal(short.shortBy, 1);
+
+  const deployed = evolutionState(card, { evoStage: 0, deployedAt: 'bs|1:1' }, { Electric: 9999 });
+  assert.equal(deployed.ok, false);
+  assert.equal(deployed.reason, 'deployed');
+
+  const maxed = evolutionState(card, { evoStage: EVO_MAX_STAGE }, { Electric: 9999 });
+  assert.equal(maxed.ok, false);
+  assert.equal(maxed.reason, 'maxed');
+});
+
+test('FOOD_PER_CATCH makes the first evolution reachable in a few catches', () => {
+  assert.ok(FOOD_PER_CATCH > 0);
+  assert.ok(EVO_FOOD_COSTS[0] / FOOD_PER_CATCH <= 8, 'tier-1 should be a handful of catches, not a slog');
 });

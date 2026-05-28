@@ -43,6 +43,16 @@ import {
   mergeTrainerLocation,
   TRADE_DISCOVERY_TTL_MS,
   PRESENCE_TTL_MS,
+  FOOD_PER_CATCH,
+  EVO_MAX_STAGE,
+  TYPE_FOOD,
+  foodForType,
+  clampEvoStage,
+  evoStatMult,
+  evoCostFor,
+  evoDisplayName,
+  normalizeFoodBag,
+  evolutionState,
 } from "./app.logic.js";
 
 const TRADE_RANGE_METERS = 200;
@@ -463,6 +473,7 @@ const el = {
   caughtCount: $("caughtCount"),
   uniqueCount: $("uniqueCount"),
   collection: $("collection"),
+  foodLarder: $("foodLarder"),
   collectionSort: $("collectionSort"),
   expandAllBtn: $("expandAllBtn"),
   cardViewer: $("cardViewer"),
@@ -516,6 +527,9 @@ let profile = safeStorageGet("fokemon_profile", null);
 let caught = migrateCaughtEntries(safeStorageGet("fokemon_caught", []));
 let fokeBalls = safeStorageGet("fokemon_balls", STARTING_FOKEBALLS);
 if (!Number.isFinite(fokeBalls) || fokeBalls < 0) fokeBalls = STARTING_FOKEBALLS;
+// Type-keyed evolution food. Catching any Fokemon tops up its type's food;
+// spending food evolves a caught Fokemon of that type up a tier.
+let foodBag = normalizeFoodBag(safeStorageGet("fokemon_food", {}));
 const poiSpent = safeStorageGet("fokemon_poi_spent", {}) || {};
 const recentEvents = [];
 const caughtIds = new Set(caught.map((c) => c.id));
@@ -589,6 +603,7 @@ function saveLocal() {
     localStorage.setItem("fokemon_profile", JSON.stringify(profile));
     localStorage.setItem("fokemon_caught", JSON.stringify(caught));
     localStorage.setItem("fokemon_balls", JSON.stringify(fokeBalls));
+    localStorage.setItem("fokemon_food", JSON.stringify(foodBag));
     localStorage.setItem("fokemon_poi_spent", JSON.stringify(poiSpent));
   } catch {
     /* private browsing — in-memory only */
@@ -613,6 +628,27 @@ function consumeFokeBall() {
   saveLocal();
   renderBallCount();
   renderCards();
+  return true;
+}
+
+function foodCount(type) {
+  return Math.max(0, Math.floor(Number(foodBag?.[type]) || 0));
+}
+
+function grantFood(type, n) {
+  if (!type || !n) return;
+  foodBag[type] = foodCount(type) + n;
+  saveLocal();
+  renderFoodLarder();
+}
+
+function spendFood(type, n) {
+  if (foodCount(type) < n) return false;
+  const left = foodCount(type) - n;
+  if (left > 0) foodBag[type] = left;
+  else delete foodBag[type];
+  saveLocal();
+  renderFoodLarder();
   return true;
 }
 
@@ -820,7 +856,8 @@ function statBars(card) {
   `;
 }
 
-function instanceStatRowsHtml(card, boosts) {
+function instanceStatRowsHtml(card, boosts, evoStage = 0) {
+  const mult = evoStatMult(evoStage);
   const rows = [
     ["HP", card.hp ?? 0, boosts?.hp || 0, 140],
     ["ATK", card.atk ?? 0, boosts?.atk || 0, 120],
@@ -830,13 +867,13 @@ function instanceStatRowsHtml(card, boosts) {
   return `
     <ul class="stats-list">
       ${rows.map(([label, base, boost, max]) => {
-        const total = base + boost;
+        const total = Math.max(1, Math.round((base + boost) * mult));
         const pct = Math.max(4, Math.min(100, (total / max) * 100));
         return `
           <li>
             <span class="stat-label">${label}</span>
             <span class="stat-bar"><span class="stat-fill" style="width:${pct}%"></span></span>
-            <span class="stat-val">${total}${boost ? `<span class="stat-boost"> +${boost}</span>` : ""}</span>
+            <span class="stat-val">${total}${boost ? `<span class="stat-boost"> +${boost}</span>` : ""}${mult > 1 ? `<span class="stat-evo" title="Evolution bonus"> ▲</span>` : ""}</span>
           </li>`;
       }).join("")}
     </ul>
@@ -870,7 +907,32 @@ function syncCollectionToolbar(multiSpeciesIds) {
   }
 }
 
+// The evolution-food larder atop the collection sheet: one chip per type the
+// trainer holds food for, biggest stash first. Called on catch/spend/evolve so
+// the live counts always match the bag.
+function renderFoodLarder() {
+  if (!el.foodLarder) return;
+  const types = Object.keys(foodBag)
+    .filter((t) => foodCount(t) > 0)
+    .sort((a, b) => foodCount(b) - foodCount(a));
+  if (!types.length) {
+    el.foodLarder.innerHTML = `<p class="larder-empty">🍽️ Catch Fokemon to gather evolution food — every catch drops food for that Fokemon's type.</p>`;
+    return;
+  }
+  const chips = types.map((t) => {
+    const f = foodForType(t);
+    const accent = (TYPE_COLORS[t] || {}).accent || "#7c8dff";
+    return `<span class="food-chip" title="${escapeHtml(f.name)} — evolves your ${escapeHtml(t)} Fokemon" style="--food-accent:${accent};">
+      <span class="food-emoji" aria-hidden="true">${escapeHtml(f.emoji)}</span>
+      <span class="food-amt">${foodCount(t)}</span>
+      <span class="food-name">${escapeHtml(f.name)}</span>
+    </span>`;
+  }).join("");
+  el.foodLarder.innerHTML = `<h4 class="larder-title">FokéFood larder <small>spend on evolutions</small></h4><div class="larder-row">${chips}</div>`;
+}
+
 function renderCollection() {
+  renderFoodLarder();
   if (!el.caughtCount) return;
   el.caughtCount.textContent = caught.length;
   const uniqueSpecies = new Set(caught.map((c) => c.id));
@@ -903,26 +965,31 @@ function renderCollection() {
           const colors = colorsFor(card);
           const power = instancePower(entry);
           const tier = powerTier(power);
+          const stage = clampEvoStage(entry.evoStage);
+          const displayName = evoDisplayName(card.name, stage);
+          const evoLabel = ["", "SUPER", "MEGA"][stage] || "";
           const trained = (entry.boosts?.hp || 0) + (entry.boosts?.atk || 0) + (entry.boosts?.def || 0) + (entry.boosts?.spd || 0);
           const deployed = !!entry.deployedAt;
           const deployedLabel = deployed ? battleSiteName(entry.deployedAt) : "";
-          const totalHp = (card.hp || 0) + (entry.boosts?.hp || 0);
+          const totalHp = effectiveStats(card, { boosts: entry.boosts, defenses: 0, evoStage: stage }).hp;
           const vindex = vindexByUid.get(entry.uid) ?? 0;
           const classes = ["gallery-card"];
           if (deployed) classes.push("deployed");
           if (entry.ubermax) classes.push("ubermax");
+          if (stage) classes.push("evolved");
           if (isRep && isMulti) classes.push("stacked");
           if (!isRep) classes.push("member");
           if (isMulti && !isRep && !expanded) classes.push("collapsed");
           const numLabel = isMulti ? `#${memberIdx + 1}/${group.count}` : "";
           return `
-        <div class="${classes.join(" ")}" data-uid="${escapeHtml(entry.uid)}" data-species="${escapeHtml(group.id)}" data-vindex="${vindex}" tabindex="0" role="button" aria-label="Open ${escapeHtml(card.name)}${numLabel ? " " + numLabel : ""} card">
+        <div class="${classes.join(" ")}" data-uid="${escapeHtml(entry.uid)}" data-species="${escapeHtml(group.id)}" data-vindex="${vindex}" tabindex="0" role="button" aria-label="Open ${escapeHtml(displayName)}${numLabel ? " " + numLabel : ""} card">
           ${isMulti ? `<span class="stack-badge" title="${group.count} ${escapeHtml(card.name)}">${isRep ? `×${group.count}` : escapeHtml(numLabel)}</span>` : ""}
+          ${evoLabel ? `<span class="evo-badge tier-${stage}" title="Evolved Fokemon">${evoLabel}</span>` : ""}
           ${entry.ubermax ? `<span class="ubermax-laurel" title="Won from an UberMax raid">UBERMAX</span>` : ""}
           ${deployed ? `<span class="deployed-pill" title="Deployed at ${escapeHtml(deployedLabel)}">At gym</span>` : ""}
           <canvas class="gallery-art" width="160" height="120" aria-hidden="true"></canvas>
           <div class="gallery-meta">
-            <strong>${escapeHtml(card.name)}</strong>
+            <strong>${escapeHtml(displayName)}</strong>
             <span class="type-pill" style="background:${colors.accent};color:#061226;">${escapeHtml(card.type)}</span>
           </div>
           <div class="gallery-meta" style="flex-direction:row;gap:.4rem;">
@@ -945,7 +1012,7 @@ function renderCollection() {
     if (!entry) return;
     const card = cardsById.get(entry.id);
     const canvas = node.querySelector(".gallery-art");
-    if (canvas && card) renderPortrait(canvas, card);
+    if (canvas && card) renderPortrait(canvas, card, entry.evoStage);
 
     const open = (ev) => {
       if (ev?.target && ev.target.closest(".expand-btn")) return;
@@ -994,14 +1061,18 @@ function cardViewerHtml(view) {
   const tier = powerTier(power);
   const rarity = card.rarity || "common";
   const typeClass = `type-${String(card.type || "spirit").toLowerCase()}`;
+  const stage = clampEvoStage(entry.evoStage);
+  const displayName = evoDisplayName(card.name, stage);
+  const evoLabel = ["", "SUPER", "MEGA"][stage] || "";
+  const eff = effectiveStats(card, { boosts: entry.boosts, defenses: 0, evoStage: stage });
   const trained = (entry.boosts?.hp || 0) + (entry.boosts?.atk || 0) + (entry.boosts?.def || 0) + (entry.boosts?.spd || 0);
   const deployed = !!entry.deployedAt;
   const deployedLabel = deployed ? battleSiteName(entry.deployedAt) : "";
   const numLabel = view.groupCount > 1 ? `#${view.indexInGroup + 1} of ${view.groupCount}` : "";
-  const stat = (label, base, boost) => `
-    <div><span>${base + (boost || 0)}${boost ? `<small class="stat-boost"> +${boost}</small>` : ""}</span><small>${label}</small></div>`;
+  const stat = (label, value, boost) => `
+    <div><span>${value}${boost ? `<small class="stat-boost"> +${boost}</small>` : ""}${stage ? `<small class="stat-evo"> ▲</small>` : ""}</span><small>${label}</small></div>`;
   return `
-    <div class="cv-card rarity-${escapeHtml(rarity)} ${typeClass}"
+    <div class="cv-card rarity-${escapeHtml(rarity)} ${typeClass}${stage ? ` evolved tier-${stage}` : ""}"
          style="--cv-edge:${colors.accent};--cv-glow:${colors.accent}55;"
          data-uid="${escapeHtml(entry.uid)}" tabindex="0">
       <div class="cv-flipper">
@@ -1009,10 +1080,10 @@ function cardViewerHtml(view) {
           <div class="cv-holo"></div><div class="cv-glare"></div>
           <div class="cv-body">
             <div class="cv-front-head">
-              <h2>${escapeHtml(card.name)}</h2>
+              <h2>${escapeHtml(displayName)}</h2>
               <span class="type-pill" style="background:${colors.accent};color:#061226;">${escapeHtml(card.type)}</span>
             </div>
-            <p class="rarity ${escapeHtml(rarity)}">${escapeHtml(rarity)}${numLabel ? ` &bull; ${escapeHtml(numLabel)}` : ""}</p>
+            <p class="rarity ${escapeHtml(rarity)}">${evoLabel ? `<span class="evo-tag tier-${stage}">${evoLabel}</span> &bull; ` : ""}${escapeHtml(rarity)}${numLabel ? ` &bull; ${escapeHtml(numLabel)}` : ""}</p>
             <canvas class="cv-art" width="320" height="240" aria-hidden="true"></canvas>
             <div class="cv-badges">
               <span class="power-chip ${tier}" title="Power level">⚡ ${power}</span>
@@ -1020,10 +1091,10 @@ function cardViewerHtml(view) {
               ${deployed ? `<span class="deployed-pill" style="position:static;">At ${escapeHtml(deployedLabel)}</span>` : ""}
             </div>
             <div class="cv-statline">
-              ${stat("HP", card.hp || 0, entry.boosts?.hp)}
-              ${stat("ATK", card.atk || 0, entry.boosts?.atk)}
-              ${stat("DEF", card.def || 0, entry.boosts?.def)}
-              ${stat("SPD", card.spd || 0, entry.boosts?.spd)}
+              ${stat("HP", eff.hp, entry.boosts?.hp)}
+              ${stat("ATK", eff.atk, entry.boosts?.atk)}
+              ${stat("DEF", eff.def, entry.boosts?.def)}
+              ${stat("SPD", eff.spd, entry.boosts?.spd)}
             </div>
             <div class="cv-foot">
               <span>${escapeHtml(formatCaughtDate(entry.ts))}</span>
@@ -1035,10 +1106,11 @@ function cardViewerHtml(view) {
           <div class="cv-holo"></div><div class="cv-glare"></div>
           <div class="cv-body">
             <header>
-              <strong>${escapeHtml(card.name)}${numLabel ? ` <small>${escapeHtml(numLabel)}</small>` : ""}</strong>
+              <strong>${escapeHtml(displayName)}${numLabel ? ` <small>${escapeHtml(numLabel)}</small>` : ""}</strong>
               <p class="rarity ${escapeHtml(rarity)}">${escapeHtml(rarity)} &bull; ${escapeHtml(card.type)}</p>
             </header>
-            ${instanceStatRowsHtml(card, entry.boosts)}
+            ${instanceStatRowsHtml(card, entry.boosts, stage)}
+            ${evolveSectionHtml(card, entry)}
             <p class="instance-status">${deployed
               ? `Deployed at <strong>${escapeHtml(deployedLabel)}</strong>.`
               : "Available to deploy or trade."}</p>
@@ -1053,6 +1125,35 @@ function cardViewerHtml(view) {
     </div>`;
 }
 
+// The evolve affordance on the card back: a food gauge + action that reads the
+// current evolutionState. Renders nothing for a maxed-out Fokemon.
+function evolveSectionHtml(card, entry) {
+  const state = evolutionState(card, entry, foodBag);
+  const food = state.food;
+  if (state.reason === "maxed") {
+    return `<div class="evolve-box maxed"><span class="evolve-line">Fully evolved — ${escapeHtml(evoDisplayName(card.name, state.stage))} is the final form.</span></div>`;
+  }
+  const pct = state.cost ? Math.max(0, Math.min(100, (state.have / state.cost) * 100)) : 0;
+  const ready = state.ok;
+  const blockedDeployed = state.reason === "deployed";
+  const tierLabel = ["", "SUPER", "MEGA"][state.nextStage] || "";
+  return `
+    <div class="evolve-box${ready ? " ready" : ""}">
+      <div class="evolve-head">
+        <span class="evolve-title">Evolve → <strong>${escapeHtml(state.nextName)}</strong>${tierLabel ? ` <span class="evo-tag tier-${state.nextStage}">${tierLabel}</span>` : ""}</span>
+        <span class="evolve-cost">${escapeHtml(food.emoji)} ${state.have} / ${state.cost}</span>
+      </div>
+      <div class="evolve-gauge"><span class="evolve-fill" style="width:${pct}%"></span></div>
+      <button type="button" class="primary cv-evolve" data-uid="${escapeHtml(entry.uid)}" ${ready ? "" : "disabled"}>
+        ${blockedDeployed
+          ? "Recall to evolve"
+          : ready
+            ? `Evolve with ${state.cost} ${escapeHtml(food.name)}`
+            : `Need ${state.shortBy} more ${escapeHtml(food.name)}`}
+      </button>
+    </div>`;
+}
+
 function renderCardViewer() {
   if (!el.cvStage) return;
   if (!viewerOrder.length) { closeCardViewer(); return; }
@@ -1064,7 +1165,7 @@ function renderCardViewer() {
   setViewerOrientation(0, 0); // reset tilt + resting highlight
   const card = cardsById.get(view.entry.id);
   const canvas = el.cvStage.querySelector(".cv-art");
-  if (canvas && card) renderPortrait(canvas, card);
+  if (canvas && card) renderPortrait(canvas, card, view.entry.evoStage);
 
   if (el.cvCounter) el.cvCounter.textContent = `${viewerIndex + 1} / ${viewerOrder.length}`;
   if (el.cvPrev) el.cvPrev.disabled = viewerIndex === 0;
@@ -1089,7 +1190,30 @@ function renderCardViewer() {
       }
     });
   }
+
+  const evolveBtn = el.cvStage.querySelector(".cv-evolve");
+  if (evolveBtn && !evolveBtn.disabled) {
+    evolveBtn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const targetUid = evolveBtn.dataset.uid;
+      if (cvEvolving) return;
+      const result = evolveInstance(targetUid);
+      if (!result) { renderCardViewer(); return; }
+      cvEvolving = true;
+      // Persisted already — the cinematic just celebrates the change, then we
+      // repaint the (now evolved) card and refresh the collection underneath.
+      playEvolutionCinematic(result.card, result.from, result.to, () => {
+        cvEvolving = false;
+        renderCollection();
+        renderMap();
+        renderFoodLarder();
+        renderCardViewer();
+      });
+    });
+  }
 }
+
+let cvEvolving = false;
 
 // Drive the holographic layers from a tilt angle (a notional overhead light
 // reflecting off the card) rather than the raw cursor, so the foil and glare
@@ -1925,13 +2049,31 @@ function restoreInstanceHome(uid, mergedBoosts) {
 function instancePower(entry) {
   const card = cardsById.get(entry.id);
   if (!card) return 0;
-  return (
+  const total =
     (card.hp || 0) + (card.atk || 0) + (card.def || 0) + (card.spd || 0)
     + (entry.boosts?.hp || 0)
     + (entry.boosts?.atk || 0)
     + (entry.boosts?.def || 0)
-    + (entry.boosts?.spd || 0)
-  );
+    + (entry.boosts?.spd || 0);
+  return Math.round(total * evoStatMult(entry.evoStage));
+}
+
+// Spend the type's food and advance the instance one tier. Returns the
+// before/after stages on success so the caller can drive the cinematic, or null
+// when the evolution isn't currently allowed (maxed, deployed, or short food).
+function evolveInstance(uid) {
+  const entry = getInstance(uid);
+  if (!entry) return null;
+  const card = cardsById.get(entry.id);
+  if (!card) return null;
+  const state = evolutionState(card, entry, foodBag);
+  if (!state.ok) return null;
+  if (!spendFood(card.type, state.cost)) return null;
+  const from = clampEvoStage(entry.evoStage);
+  const to = clampEvoStage(from + 1);
+  entry.evoStage = to;
+  saveLocal();
+  return { card, from, to };
 }
 
 function catchCard(card, placement) {
@@ -1955,6 +2097,8 @@ function catchCard(card, placement) {
   caughtIds.add(card.id);
   caughtByUid.set(entry.uid, entry);
   gridCaughtIds.add(card.id);
+  // Every catch tops up this type's evolution food — even a basic spawn is fuel.
+  grantFood(card.type, FOOD_PER_CATCH);
   saveLocal();
   renderCollection();
   renderCards();
@@ -2755,20 +2899,90 @@ function drawCreatureAccent(ctx, kind, r, colors) {
   ctx.restore();
 }
 
-function drawCreature(ctx, card, cx, cy, r) {
-  const colors = colorsFor(card);
-  const shape = card.body || "round";
+// Evolved Fokemon keep their exact silhouette but grow per tier — bigger,
+// wrapped in a type-coloured aura, and capped with a crest of accent shards so
+// a "Super"/"Mega" form reads instantly as the next version of the same beast.
+const EVO_DRAW_SCALE = [1, 1.14, 1.3];
+
+function hexA(hex, alpha) {
+  return `rgba(${hexInt(hex, 0)}, ${hexInt(hex, 1)}, ${hexInt(hex, 2)}, ${alpha})`;
+}
+
+function drawEvolutionAura(ctx, r, colors, stage) {
   ctx.save();
-  ctx.translate(cx, cy);
-  drawCreatureEars(ctx, card.ears || "round", r, colors);
-  drawCreatureBody(ctx, shape, r, colors);
-  drawCreatureMarkings(ctx, card.markings || "none", shape, r, colors);
-  drawCreatureEyes(ctx, shape, r, card.expression || "smile");
-  drawCreatureAccent(ctx, card.accent || "sparkle", r, colors);
+  const outer = r * (1.5 + stage * 0.18);
+  const glow = ctx.createRadialGradient(0, 0, r * 0.45, 0, 0, outer);
+  glow.addColorStop(0, hexA(colors.accent, 0));
+  glow.addColorStop(0.55, hexA(colors.accent, stage >= 2 ? 0.34 : 0.22));
+  glow.addColorStop(1, hexA(colors.accent, 0));
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(0, 0, outer, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalCompositeOperation = "lighter";
+  for (let i = 0; i < stage; i++) {
+    ctx.strokeStyle = hexA(colors.accent, 0.45 - i * 0.14);
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(0, 0, r * (1.24 + i * 0.15), 0, Math.PI * 2);
+    ctx.stroke();
+  }
   ctx.restore();
 }
 
-function renderPortrait(canvas, card) {
+function drawEvolutionCrest(ctx, r, colors, stage) {
+  ctx.save();
+  const topY = -r * 1.02;
+  const shards = stage >= 2 ? 3 : 2;
+  const spread = r * (stage >= 2 ? 0.46 : 0.32);
+  ctx.fillStyle = colors.accent;
+  ctx.strokeStyle = "rgba(7,13,28,0.32)";
+  ctx.lineWidth = 1;
+  const mid = (shards - 1) / 2;
+  for (let i = 0; i < shards; i++) {
+    const t = shards === 1 ? 0 : (i / (shards - 1)) * 2 - 1; // -1..1
+    const x = t * spread;
+    const h = r * (stage >= 2 && i === mid ? 0.5 : 0.34);
+    const w = r * 0.12;
+    ctx.beginPath();
+    ctx.moveTo(x - w, topY);
+    ctx.lineTo(x, topY - h);
+    ctx.lineTo(x + w, topY);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  }
+  ctx.globalCompositeOperation = "lighter";
+  ctx.fillStyle = colors.light;
+  const dots = stage >= 2 ? 5 : 3;
+  for (let i = 0; i < dots; i++) {
+    const a = (i / dots) * Math.PI * 2 + 0.4;
+    const rr = r * (1.12 + (i % 2) * 0.12);
+    ctx.beginPath();
+    ctx.arc(Math.cos(a) * rr, Math.sin(a) * rr * 0.82, r * 0.05, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawCreature(ctx, card, cx, cy, r, evoStage = 0) {
+  const colors = colorsFor(card);
+  const shape = card.body || "round";
+  const stage = clampEvoStage(evoStage);
+  const r2 = r * (EVO_DRAW_SCALE[stage] || 1);
+  ctx.save();
+  ctx.translate(cx, cy);
+  if (stage > 0) drawEvolutionAura(ctx, r2, colors, stage);
+  drawCreatureEars(ctx, card.ears || "round", r2, colors);
+  drawCreatureBody(ctx, shape, r2, colors);
+  drawCreatureMarkings(ctx, card.markings || "none", shape, r2, colors);
+  drawCreatureEyes(ctx, shape, r2, card.expression || "smile");
+  drawCreatureAccent(ctx, card.accent || "sparkle", r2, colors);
+  if (stage > 0) drawEvolutionCrest(ctx, r2, colors, stage);
+  ctx.restore();
+}
+
+function renderPortrait(canvas, card, evoStage = 0) {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const w = canvas.clientWidth || parseInt(canvas.getAttribute("width") || "120", 10);
   const h = canvas.clientHeight || parseInt(canvas.getAttribute("height") || "100", 10);
@@ -2784,7 +2998,11 @@ function renderPortrait(canvas, card) {
   bg.addColorStop(1, `rgba(${hexInt(colors.dark, 0)}, ${hexInt(colors.dark, 1)}, ${hexInt(colors.dark, 2)}, 0.4)`);
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, w, h);
-  drawCreature(ctx, card, w / 2, h * 0.6, Math.min(w, h) * 0.32);
+  // Pull the base radius in slightly as the creature grows so the larger
+  // evolved silhouette (plus aura + crest) still fits this fixed canvas.
+  const stage = clampEvoStage(evoStage);
+  const baseFrac = [0.32, 0.30, 0.285][stage] ?? 0.32;
+  drawCreature(ctx, card, w / 2, h * 0.6, Math.min(w, h) * baseFrac, stage);
 }
 
 function hexInt(hex, channel) {
@@ -2792,6 +3010,368 @@ function hexInt(hex, channel) {
   if (!m) return 60;
   const n = parseInt(m[1], 16);
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255][channel];
+}
+
+// ===========================================================================
+// Evolution cinematic — the "hook" moment.
+// ---------------------------------------------------------------------------
+// A full-screen overlay that charges up (inflowing sparks + rising arpeggio),
+// flickers the creature into a white silhouette, detonates in a flash + boom,
+// then reveals the bigger evolved form with confetti, a triumphant chord and
+// an EVOLVED! banner. Self-contained: own canvas, own WebAudio, own rAF loop.
+// onDone fires once on natural end OR skip so callers can repaint state.
+// ===========================================================================
+function playEvolutionCinematic(card, fromStage, toStage, onDone) {
+  let finished = false;
+  const finishOnce = () => {
+    if (finished) return;
+    finished = true;
+    cancelAnimationFrame(raf);
+    window.removeEventListener("resize", onResize);
+    document.body.style.overflow = "";
+    overlay.classList.add("closing");
+    setTimeout(() => overlay.remove(), 280);
+    try { onDone && onDone(); } catch {}
+  };
+
+  const colors = colorsFor(card);
+  const reduced = prefersReducedMotion();
+  const fromName = evoDisplayName(card.name, fromStage);
+  const toName = evoDisplayName(card.name, toStage);
+
+  const overlay = document.createElement("div");
+  overlay.className = "evo-cinematic";
+  overlay.style.setProperty("--evo-accent", colors.accent);
+  overlay.style.setProperty("--evo-light", colors.light);
+  overlay.innerHTML = `
+    <div class="evo-stage" role="dialog" aria-modal="true" aria-label="${escapeHtml(fromName)} is evolving">
+      <canvas class="evo-canvas" aria-hidden="true"></canvas>
+      <button type="button" class="evo-skip ghost">Skip ⏭</button>
+    </div>`;
+  document.body.appendChild(overlay);
+  document.body.style.overflow = "hidden";
+  void overlay.offsetWidth;
+  overlay.classList.add("show");
+
+  const stageEl = overlay.querySelector(".evo-stage");
+  const canvas = overlay.querySelector(".evo-canvas");
+  overlay.querySelector(".evo-skip").addEventListener("click", finishOnce);
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) finishOnce(); });
+
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const ctx = canvas.getContext("2d");
+  let W = 0, H = 0;
+  function size() {
+    const rect = stageEl.getBoundingClientRect();
+    W = Math.max(260, Math.floor(rect.width));
+    H = Math.max(260, Math.floor(rect.height));
+    canvas.width = W * dpr;
+    canvas.height = H * dpr;
+    canvas.style.width = `${W}px`;
+    canvas.style.height = `${H}px`;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  function onResize() { size(); }
+  size();
+  window.addEventListener("resize", onResize);
+
+  // ---------- audio (synthesized, no asset files) ----------
+  let audioCtx = null;
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (AC) { audioCtx = new AC(); if (audioCtx.state === "suspended") audioCtx.resume(); }
+  } catch { audioCtx = null; }
+  function tone({ freq = 440, freqEnd = freq, dur = 0.12, type = "triangle", vol = 0.1, delay = 0 }) {
+    if (!audioCtx) return;
+    const t0 = audioCtx.currentTime + delay;
+    const osc = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t0);
+    if (freqEnd !== freq) osc.frequency.exponentialRampToValueAtTime(Math.max(1, freqEnd), t0 + dur);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.linearRampToValueAtTime(vol, t0 + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(g).connect(audioCtx.destination);
+    osc.start(t0);
+    osc.stop(t0 + dur + 0.04);
+  }
+  function noiseBurst({ dur = 0.2, vol = 0.18, filter = 1200, delay = 0 }) {
+    if (!audioCtx) return;
+    const t0 = audioCtx.currentTime + delay;
+    const frames = Math.max(1, Math.floor(audioCtx.sampleRate * dur));
+    const buf = audioCtx.createBuffer(1, frames, audioCtx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < frames; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / frames);
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    const lp = audioCtx.createBiquadFilter();
+    lp.type = "lowpass";
+    lp.frequency.value = filter;
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(vol, t0);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    src.connect(lp).connect(g).connect(audioCtx.destination);
+    src.start(t0);
+    src.stop(t0 + dur);
+  }
+
+  // ---------- particles ----------
+  const particles = [];
+  const rings = [];
+  function addParticle(p) { particles.push(p); if (particles.length > 320) particles.splice(0, particles.length - 320); }
+  function spawnInflow() {
+    const a = Math.random() * Math.PI * 2;
+    const dist = Math.min(W, H) * (0.55 + Math.random() * 0.2);
+    addParticle({
+      x: W / 2 + Math.cos(a) * dist,
+      y: H * 0.46 + Math.sin(a) * dist,
+      tx: W / 2, ty: H * 0.46,
+      pull: 2.4 + Math.random() * 2.2,
+      life: 1, maxLife: 1,
+      size: 1.6 + Math.random() * 2.4,
+      color: Math.random() < 0.5 ? colors.accent : colors.light,
+      kind: "inflow",
+    });
+  }
+  function burst(n, speedMul = 1) {
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = (120 + Math.random() * 320) * speedMul;
+      addParticle({
+        x: W / 2, y: H * 0.46,
+        vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, g: 120,
+        life: 0.5 + Math.random() * 0.5, maxLife: 1,
+        size: 1.8 + Math.random() * 3, color: Math.random() < 0.5 ? colors.accent : "#ffffff",
+        kind: "spark",
+      });
+    }
+    rings.push({ r: 8, life: 0.6, maxLife: 0.6 });
+  }
+  function confetti() {
+    const cols = ["#7cf0c6", "#ffe27a", "#ff9c70", "#8fb4ff", "#ff8d9e", "#b57cff", colors.accent];
+    for (let i = 0; i < 60; i++) {
+      const a = -Math.PI / 2 + (Math.random() - 0.5) * 2.6;
+      const sp = 180 + Math.random() * 320;
+      addParticle({
+        x: W / 2, y: H * 0.42, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, g: 540, drag: 0.5,
+        sway: Math.random() * Math.PI * 2, swaySp: 4 + Math.random() * 4,
+        life: 1 + Math.random() * 0.9, maxLife: 1.9,
+        w: 4 + Math.random() * 5, h: 7 + Math.random() * 6,
+        rot: Math.random() * Math.PI, vr: (Math.random() - 0.5) * 18,
+        color: cols[i % cols.length], kind: "confetti",
+      });
+    }
+  }
+  function updateParticles(dt) {
+    for (const p of particles) {
+      p.life -= dt * (p.kind === "inflow" ? 1.1 : 1);
+      if (p.kind === "inflow") {
+        p.x += (p.tx - p.x) * Math.min(1, p.pull * dt);
+        p.y += (p.ty - p.y) * Math.min(1, p.pull * dt);
+      } else {
+        if (p.drag) p.vx *= 1 - p.drag * dt;
+        p.vy += (p.g || 0) * dt;
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        if (p.sway != null) { p.sway += p.swaySp * dt; p.x += Math.sin(p.sway) * 26 * dt; }
+        if (p.vr) p.rot += p.vr * dt;
+      }
+    }
+    for (let i = particles.length - 1; i >= 0; i--) if (particles[i].life <= 0) particles.splice(i, 1);
+    for (const rg of rings) { rg.life -= dt; rg.r += 420 * dt; }
+    for (let i = rings.length - 1; i >= 0; i--) if (rings[i].life <= 0) rings.splice(i, 1);
+  }
+  function drawParticles() {
+    for (const rg of rings) {
+      const k = rg.life / rg.maxLife;
+      ctx.save();
+      ctx.globalAlpha = k * 0.7;
+      ctx.globalCompositeOperation = "lighter";
+      ctx.strokeStyle = colors.light;
+      ctx.lineWidth = 4 * k + 1;
+      ctx.beginPath();
+      ctx.arc(W / 2, H * 0.46, rg.r, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+    for (const p of particles) {
+      const k = Math.max(0, Math.min(1, p.life / p.maxLife));
+      ctx.save();
+      ctx.globalAlpha = k;
+      if (p.kind === "confetti") {
+        ctx.translate(p.x, p.y);
+        ctx.rotate(p.rot);
+        ctx.fillStyle = p.color;
+        ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h);
+      } else {
+        ctx.globalCompositeOperation = "lighter";
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size * (0.5 + k * 0.6), 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+  }
+
+  // White silhouette flicker — the iconic evolution "blob".
+  function drawSilhouette(r) {
+    const { rx, ry } = bodyDims(card.body || "round", r);
+    ctx.save();
+    ctx.translate(W / 2, H * 0.46);
+    ctx.globalCompositeOperation = "lighter";
+    const g = ctx.createRadialGradient(0, 0, r * 0.1, 0, 0, r * 1.25);
+    g.addColorStop(0, "rgba(255,255,255,1)");
+    g.addColorStop(0.62, "rgba(255,255,255,0.92)");
+    g.addColorStop(1, hexA(colors.accent, 0.18));
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, rx * 1.12, ry * 1.12, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawText(t) {
+    // Banner appears in the reveal phase.
+    if (t < T_FLASH) return;
+    const since = t - T_FLASH;
+    const pop = Math.min(1, since / 0.32);
+    ctx.save();
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    // EVOLVED!
+    const s = 0.6 + pop * 0.5;
+    ctx.save();
+    ctx.translate(W / 2, H * 0.16);
+    ctx.scale(s, s);
+    ctx.globalAlpha = pop;
+    ctx.font = "900 40px 'Outfit', sans-serif";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = 8;
+    ctx.strokeStyle = "rgba(7,13,28,0.92)";
+    ctx.strokeText("EVOLVED!", 0, 0);
+    ctx.fillStyle = colors.light;
+    ctx.fillText("EVOLVED!", 0, 0);
+    ctx.restore();
+    // New name
+    ctx.globalAlpha = Math.min(1, Math.max(0, (since - 0.2) / 0.4));
+    ctx.font = "800 26px 'Outfit', sans-serif";
+    ctx.lineWidth = 6;
+    ctx.strokeStyle = "rgba(7,13,28,0.9)";
+    ctx.strokeText(toName, W / 2, H * 0.82);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText(toName, W / 2, H * 0.82);
+    ctx.restore();
+  }
+
+  // ---------- timeline (seconds) ----------
+  const T_CHARGE = reduced ? 0.25 : 1.4;     // pulse + inflow + flicker
+  const FLICKER_FROM = T_CHARGE - 0.6;
+  const T_FLASH = T_CHARGE + 0.16;           // white flash + boom
+  const T_REVEAL_END = T_FLASH + (reduced ? 1.0 : 1.6);
+  const TOTAL = T_REVEAL_END + 0.3;
+
+  // Scheduled audio: a rising arpeggio while charging, then the detonation and
+  // a triumphant chord on reveal.
+  if (audioCtx && !reduced) {
+    [0, 0.16, 0.31, 0.45, 0.58, 0.7, 0.8, 0.89, 0.96].forEach((d, i) =>
+      tone({ freq: 280 + i * 66, dur: 0.13, type: "triangle", vol: 0.05, delay: d * T_CHARGE })
+    );
+  }
+  if (audioCtx) {
+    noiseBurst({ dur: 0.32, vol: 0.22, filter: 1000, delay: T_CHARGE });
+    tone({ freq: 120, freqEnd: 60, dur: 0.3, type: "sawtooth", vol: 0.08, delay: T_CHARGE });
+    [523, 659, 784, 1047].forEach((f, i) =>
+      tone({ freq: f, dur: 0.5, type: "triangle", vol: 0.09, delay: T_FLASH + i * 0.06 })
+    );
+    tone({ freq: 1568, dur: 0.4, type: "sine", vol: 0.05, delay: T_FLASH + 0.18 });
+  }
+
+  let t = 0;
+  let last = performance.now();
+  let raf = 0;
+  let inflowCd = 0;
+  let burstFired = false;
+  let confettiFired = false;
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    t += dt;
+
+    const baseR = Math.min(W, H) * 0.17;
+    const fromR = baseR * (EVO_DRAW_SCALE[clampEvoStage(fromStage)] || 1);
+    const toR = baseR * (EVO_DRAW_SCALE[clampEvoStage(toStage)] || 1);
+
+    // screen shake intensifies through the charge, peaks at the flash
+    let shake = 0;
+    if (t < T_FLASH) shake = Math.min(10, (t / T_CHARGE) * 6 + (t > FLICKER_FROM ? 5 : 0));
+
+    if (t < T_CHARGE && !reduced) {
+      inflowCd -= dt;
+      const rate = 0.012 + 0.05 * (1 - t / T_CHARGE);
+      while (inflowCd <= 0) { spawnInflow(); inflowCd += rate; }
+    }
+    if (t >= T_CHARGE && !burstFired) { burst(reduced ? 40 : 90); burstFired = true; }
+    if (t >= T_FLASH && !confettiFired) { confetti(); confettiFired = true; }
+
+    updateParticles(dt);
+
+    // ---- paint ----
+    ctx.clearRect(0, 0, W, H);
+    const bg = ctx.createRadialGradient(W / 2, H * 0.46, 10, W / 2, H * 0.46, Math.max(W, H) * 0.7);
+    bg.addColorStop(0, hexA(colors.dark, 0.55));
+    bg.addColorStop(1, "rgba(4,7,16,0.92)");
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.save();
+    if (shake > 0) ctx.translate((Math.random() - 0.5) * shake, (Math.random() - 0.5) * shake);
+    drawParticles();
+
+    if (t < T_FLASH) {
+      // Charge + flicker phase.
+      const pulse = 1 + Math.sin(t * 10) * 0.04;
+      if (t >= FLICKER_FROM && !reduced) {
+        const into = (t - FLICKER_FROM) / (T_CHARGE - FLICKER_FROM); // 0..1
+        const freq = 12 + into * 34;
+        const white = Math.floor(t * freq) % 2 === 0;
+        const r = fromR + (toR - fromR) * Math.min(1, into);
+        if (white) drawSilhouette(r * pulse);
+        else drawCreature(ctx, card, W / 2, H * 0.46, fromR * pulse, fromStage);
+      } else {
+        drawCreature(ctx, card, W / 2, H * 0.46, fromR * pulse, fromStage);
+      }
+    } else {
+      // Reveal phase: evolved form pops in with an overshoot.
+      const since = t - T_FLASH;
+      const k = Math.min(1, since / 0.34);
+      const overshoot = 1 + Math.sin(Math.min(1, k) * Math.PI) * 0.16;
+      const r = toR * (0.6 + 0.4 * k) * overshoot;
+      drawCreature(ctx, card, W / 2, H * 0.46, r, toStage);
+    }
+    ctx.restore();
+
+    // White flash centred on the detonation.
+    if (t >= T_CHARGE && t < T_FLASH + 0.4) {
+      const peak = T_FLASH;
+      const fa = t < peak
+        ? (t - T_CHARGE) / (peak - T_CHARGE)
+        : Math.max(0, 1 - (t - peak) / 0.4);
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, Math.min(1, fa));
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, W, H);
+      ctx.restore();
+    }
+
+    drawText(t);
+
+    if (t >= TOTAL) { finishOnce(); return; }
+    raf = requestAnimationFrame(frame);
+  }
+  raf = requestAnimationFrame(frame);
 }
 
 function launchCatchChallenge(card, placement) {
@@ -3322,7 +3902,10 @@ function launchCatchChallenge(card, placement) {
   let dodgeTriggered = false;
 
   function statusText() {
-    if (finished && outcome === "caught") return `<span class="success">Captured!</span> ${escapeHtml(card.name)} joined your collection.`;
+    if (finished && outcome === "caught") {
+      const fd = foodForType(card.type);
+      return `<span class="success">Captured!</span> ${escapeHtml(card.name)} joined your collection. <span class="food-gain">+${FOOD_PER_CATCH} ${escapeHtml(fd.emoji)} ${escapeHtml(fd.name)}</span>`;
+    }
     if (finished && outcome === "escaped") return `<span class="fail">Out of FokéBalls!</span> ${escapeHtml(card.name)} got away.`;
     if (finished && outcome === "fled") return `<span class="fail">Escaped!</span> ${escapeHtml(card.name)} bolted off.`;
     if (aiming) return `FokéBalls: <strong>${fokeBalls}</strong> &bull; Release to fire!`;
@@ -4049,18 +4632,6 @@ function speciesIndexForInstance(uid) {
   return { idx: idx + 1, total: siblings.length };
 }
 
-function statRowHtml(label, base, boost, max) {
-  const total = base + boost;
-  const pct = Math.max(4, Math.min(100, (total / max) * 100));
-  return `
-    <li>
-      <span class="stat-label">${label}</span>
-      <span class="stat-bar"><span class="stat-fill" style="width:${pct}%"></span></span>
-      <span class="stat-val">${total}${boost ? `<span class="stat-boost"> +${boost}</span>` : ""}</span>
-    </li>
-  `;
-}
-
 function championPickerHtml(actionLabel) {
   // raidParked Fokemon are committed to a UberMax raid and can't double-duty
   // at a gym. They free up automatically once the raid ends (win or escape).
@@ -4161,6 +4732,7 @@ function openBattleSite(site) {
               cardId: entry.id,
               instanceUid: entry.uid,
               boosts: { ...entry.boosts },
+              evoStage: clampEvoStage(entry.evoStage),
               defenses: 0,
               placedAt: Date.now(),
               lastBattleAt: 0,
@@ -4204,14 +4776,9 @@ function openBattleSite(site) {
             </span>
           </div>
           <div class="champion-meta">
-            <h4>${escapeHtml(card.name)} <span class="type-pill" style="background:${colors.accent};color:#061226;">${escapeHtml(card.type)}</span></h4>
+            <h4>${escapeHtml(evoDisplayName(card.name, champion.evoStage))} <span class="type-pill" style="background:${colors.accent};color:#061226;">${escapeHtml(card.type)}</span></h4>
             <p class="champion-owner">Champion of <strong>${escapeHtml(champion.trainer)}</strong>${mine ? " (you)" : ""}</p>
-            <ul class="stats-list">
-              ${statRowHtml("HP", card.hp, champion.boosts.hp, 140)}
-              ${statRowHtml("ATK", card.atk, champion.boosts.atk, 120)}
-              ${statRowHtml("DEF", card.def, champion.boosts.def, 120)}
-              ${statRowHtml("SPD", card.spd, champion.boosts.spd, 120)}
-            </ul>
+            ${instanceStatRowsHtml(card, champion.boosts, champion.evoStage)}
             <p class="champion-meta-line">
               <span class="badge">Defenses ${champion.defenses}/${MAX_CHAMPION_DEFENSES}</span>
               <span class="badge">Time left ${hours}h ${minutes}m</span>
@@ -4225,7 +4792,7 @@ function openBattleSite(site) {
     `;
 
     const portraitCanvas = bodyEl.querySelector(".champ-art");
-    if (portraitCanvas) renderPortrait(portraitCanvas, card);
+    if (portraitCanvas) renderPortrait(portraitCanvas, card, champion.evoStage);
 
     if (!inRange) return;
 
@@ -4295,7 +4862,7 @@ function raidPickerHtml(actionLabel, raid) {
     const cardA = cardsById.get(a.id);
     const cardB = cardsById.get(b.id);
     if (!cardA || !cardB) return 0;
-    return ubermaxDamageFor(cardB, b.boosts, bossCard) - ubermaxDamageFor(cardA, a.boosts, bossCard);
+    return ubermaxDamageFor(cardB, b.boosts, bossCard, b.evoStage) - ubermaxDamageFor(cardA, a.boosts, bossCard, a.evoStage);
   });
   return `
     <p class="picker-prompt">Choose a Fokemon to ${escapeHtml(actionLabel)}:</p>
@@ -4304,13 +4871,14 @@ function raidPickerHtml(actionLabel, raid) {
         const card = cardsById.get(entry.id);
         if (!card) return "";
         const colors = colorsFor(card);
-        const dmg = ubermaxDamageFor(card, entry.boosts, bossCard);
+        const dmg = ubermaxDamageFor(card, entry.boosts, bossCard, entry.evoStage);
         const mult = bossCard ? typeMultiplier(card.type, bossCard.type) : 1;
         const matchupTag = mult > 1 ? `<span class="matchup super">Super</span>` : mult < 1 ? `<span class="matchup weak">Weak</span>` : "";
+        const stage = clampEvoStage(entry.evoStage);
         return `
-          <button class="picker-card" data-uid="${escapeHtml(entry.uid)}" style="--type-light:${colors.light};--type-dark:${colors.dark};--type-accent:${colors.accent};">
+          <button class="picker-card${stage ? " evolved" : ""}" data-uid="${escapeHtml(entry.uid)}" style="--type-light:${colors.light};--type-dark:${colors.dark};--type-accent:${colors.accent};">
             <span class="picker-power">💥${dmg}</span>
-            <strong>${escapeHtml(card.name)}</strong>
+            <strong>${escapeHtml(evoDisplayName(card.name, stage))}</strong>
             <small>${escapeHtml(card.type)} ${matchupTag}</small>
           </button>
         `;
@@ -4419,12 +4987,12 @@ function openUberMaxRaid(raid) {
                 const cc = cardsById.get(c.cardId);
                 if (!cc) return "";
                 const cols = colorsFor(cc);
-                const dmg = ubermaxDamageFor(cc, c.boosts, card);
+                const dmg = ubermaxDamageFor(cc, c.boosts, card, c.evoStage);
                 const me = c.trainer === profile?.name;
                 return `
                   <div class="ubermax-roster-card ${me ? "is-me" : ""}" style="--type-light:${cols.light};--type-dark:${cols.dark};--type-accent:${cols.accent};">
                     <span class="roster-trainer">${escapeHtml(c.trainer)}${me ? " (you)" : ""}</span>
-                    <strong>${escapeHtml(cc.name)}</strong>
+                    <strong>${escapeHtml(evoDisplayName(cc.name, c.evoStage))}</strong>
                     <small>${escapeHtml(cc.type)} · 💥 ${dmg}</small>
                   </div>
                 `;
@@ -4490,6 +5058,7 @@ function openUberMaxRaid(raid) {
           cardId: entry.id,
           uid: entry.uid,
           boosts: { ...(entry.boosts || {}) },
+          evoStage: clampEvoStage(entry.evoStage),
           joinedAt: Date.now(),
         };
         // Optimistic local update so the bar moves immediately.
@@ -5901,9 +6470,11 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
   const champCard = cardsById.get(championBefore.cardId);
   if (!champCard) return;
 
-  // Apply the challenger instance's accumulated training boosts in the fight.
+  // Apply the challenger instance's accumulated training boosts + evolution
+  // tier in the fight (defender's tier rides in on championBefore).
   const challengerBoosts = challengerInstance?.boosts || null;
-  const attackerStats = effectiveStats(challengerCard, challengerBoosts ? { boosts: challengerBoosts, defenses: 0 } : null);
+  const challengerEvo = clampEvoStage(challengerInstance?.evoStage);
+  const attackerStats = effectiveStats(challengerCard, { boosts: challengerBoosts || { hp: 0, atk: 0, def: 0, spd: 0 }, defenses: 0, evoStage: challengerEvo });
   const defenderStats = effectiveStats(champCard, championBefore);
   const seed = seedFromStrings(
     site.id,
@@ -7389,6 +7960,7 @@ function normalizeChampion(raw) {
       def: clampBoost(raw?.boosts?.def ?? 0),
       spd: clampBoost(raw?.boosts?.spd ?? 0),
     },
+    evoStage: clampEvoStage(raw.evoStage),
     defenses: Math.max(0, Math.min(MAX_CHAMPION_DEFENSES, Number(raw.defenses) || 0)),
     placedAt: Number(raw.placedAt) || Date.now(),
     lastBattleAt: Number(raw.lastBattleAt) || 0,
@@ -7483,6 +8055,7 @@ function normalizeContribution(raw) {
     cardId: String(raw.cardId),
     uid: raw.uid ? String(raw.uid) : null,
     boosts: normalizeBoosts(raw.boosts),
+    evoStage: clampEvoStage(raw.evoStage),
     joinedAt: Number(raw.joinedAt) || Date.now(),
     team: raw.team ? String(raw.team) : "mint",
   };
@@ -7545,6 +8118,7 @@ function publishContribution(raid, contribution) {
     cardId: contribution.cardId,
     uid: contribution.uid || null,
     boosts: normalizeBoosts(contribution.boosts),
+    evoStage: clampEvoStage(contribution.evoStage),
     joinedAt: contribution.joinedAt || Date.now(),
     team: contribution.team || "mint",
   });
@@ -7711,6 +8285,7 @@ function publishChampion(siteId, champion) {
     cardId: champion.cardId,
     instanceUid: champion.instanceUid || null,
     boosts: { ...champion.boosts },
+    evoStage: clampEvoStage(champion.evoStage),
     defenses: champion.defenses,
     placedAt: champion.placedAt,
     lastBattleAt: champion.lastBattleAt || 0,
@@ -7778,6 +8353,7 @@ function packInstanceForTrade(entry) {
     cardId: entry.id,
     boosts: { ...(entry.boosts || {}) },
     caughtAt: entry.ts || 0,
+    evoStage: clampEvoStage(entry.evoStage),
   };
 }
 
@@ -7892,6 +8468,8 @@ function applyIncomingCompletedTrade(req) {
       boosts: normalizeBoosts(req.counterOffer.boosts),
       deployedAt: null,
     };
+    const stage = clampEvoStage(req.counterOffer.evoStage);
+    if (stage > 0) newEntry.evoStage = stage;
     caught.push(newEntry);
   }
   rebuildCaughtIndexes();
@@ -7918,6 +8496,8 @@ function applyAcceptedTradeAsRecipient(req) {
       boosts: normalizeBoosts(req.offer.boosts),
       deployedAt: null,
     };
+    const stage = clampEvoStage(req.offer.evoStage);
+    if (stage > 0) newEntry.evoStage = stage;
     caught.push(newEntry);
   }
   rebuildCaughtIndexes();
@@ -8135,14 +8715,14 @@ function tradeMiniCard(offer, opts = {}) {
       <span class="tcard-foil"></span>
       <span class="tcard-glare"></span>
       <header class="tcard-head">
-        <strong>${escapeHtml(card.name)}${dex}</strong>
+        <strong>${escapeHtml(evoDisplayName(card.name, offer.evoStage))}${dex}</strong>
         <span class="tcard-head-meta">
           <span class="tcard-hp" title="Hit Points"><b>${hp}</b><em>HP</em></span>
           <span class="type-pill" style="background:${colors.accent};color:#061226;">${escapeHtml(card.type)}</span>
         </span>
       </header>
-      <canvas class="tcard-art" data-card="${escapeHtml(card.id)}" width="260" height="150" aria-hidden="true"></canvas>
-      ${instanceStatRowsHtml(card, offer.boosts)}
+      <canvas class="tcard-art" data-card="${escapeHtml(card.id)}" data-evo="${clampEvoStage(offer.evoStage)}" width="260" height="150" aria-hidden="true"></canvas>
+      ${instanceStatRowsHtml(card, offer.boosts, offer.evoStage)}
       <footer class="tcard-foot">
         ${trained
           ? `<span class="tcard-ribbon">★ Trained +${trained}</span>`
@@ -8167,14 +8747,14 @@ function tradePickCardHtml(entry) {
       <span class="tcard-foil"></span>
       <span class="tcard-glare"></span>
       <header class="tcard-head">
-        <strong>${escapeHtml(card.name)}${dex}</strong>
+        <strong>${escapeHtml(evoDisplayName(card.name, entry.evoStage))}${dex}</strong>
         <span class="tcard-head-meta">
           <span class="tcard-hp" title="Hit Points"><b>${hp}</b><em>HP</em></span>
           <span class="type-pill" style="background:${colors.accent};color:#061226;">${escapeHtml(card.type)}</span>
         </span>
       </header>
-      <canvas class="tcard-art" data-card="${escapeHtml(card.id)}" width="260" height="140" aria-hidden="true"></canvas>
-      ${instanceStatRowsHtml(card, entry.boosts)}
+      <canvas class="tcard-art" data-card="${escapeHtml(card.id)}" data-evo="${clampEvoStage(entry.evoStage)}" width="260" height="140" aria-hidden="true"></canvas>
+      ${instanceStatRowsHtml(card, entry.boosts, entry.evoStage)}
       <span class="tcard-send"><span class="tcard-power-inline">⚡ ${power}</span>${trained ? ` · ★ +${trained}` : ""} · Tap →</span>
     </button>`;
 }
@@ -8186,7 +8766,7 @@ function hydrateTradeArt(root) {
   requestAnimationFrame(() => {
     root.querySelectorAll("canvas.tcard-art[data-card]").forEach((cv) => {
       const card = cardsById.get(cv.dataset.card);
-      if (card) try { renderPortrait(cv, card); } catch {}
+      if (card) try { renderPortrait(cv, card, Number(cv.dataset.evo) || 0); } catch {}
     });
   });
 }

@@ -3384,3 +3384,177 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
   .ubermax-marker.near .um-medal { animation: none !important; }
   .ubermax-hp-fill { transition: none; }
 }
+
+/* ===========================================================================
+   Evolution + type-food
+   ======================================================================== */
+
+/* Catch-time food reward note */
+.food-gain {
+  display: inline-block;
+  margin-left: .25rem;
+  color: #ffe27a;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+/* Larder: type-food stash atop the collection sheet */
+.food-larder { margin: .2rem 0 .6rem; }
+.larder-title {
+  margin: 0 0 .45rem;
+  font-size: .78rem;
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  color: var(--muted);
+  display: flex;
+  align-items: baseline;
+  gap: .5rem;
+}
+.larder-title small { text-transform: none; letter-spacing: 0; font-size: .7rem; color: #8198c4; font-weight: 500; }
+.larder-empty {
+  margin: 0;
+  padding: .6rem .75rem;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  color: var(--muted);
+  font-size: .82rem;
+}
+.larder-row {
+  display: flex;
+  gap: .5rem;
+  overflow-x: auto;
+  padding-bottom: .25rem;
+  scrollbar-width: thin;
+}
+.food-chip {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: .35rem;
+  padding: .32rem .6rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--food-accent) 55%, transparent);
+  background: color-mix(in srgb, var(--food-accent) 16%, rgba(15, 20, 34, .6));
+  box-shadow: 0 0 12px color-mix(in srgb, var(--food-accent) 22%, transparent);
+  font-size: .82rem;
+}
+.food-chip .food-emoji { font-size: 1rem; line-height: 1; }
+.food-chip .food-amt { font-weight: 800; color: #fff; }
+.food-chip .food-name { color: var(--muted); font-size: .76rem; }
+
+/* Evolved-tier badge on gallery tiles */
+.evo-badge {
+  position: absolute;
+  top: .55rem;
+  right: .55rem;
+  padding: .1rem .45rem;
+  border-radius: 999px;
+  font-size: .62rem;
+  font-weight: 900;
+  letter-spacing: .08em;
+  color: #1a1030;
+  background: linear-gradient(90deg, #ffe27a, #ffb15c);
+  box-shadow: 0 0 10px rgba(255, 196, 92, .5);
+  z-index: 3;
+}
+.evo-badge.tier-2 { background: linear-gradient(90deg, #ff9cf0, #b57cff); color: #160a2c; box-shadow: 0 0 12px rgba(200, 140, 255, .6); }
+/* When a tile carries both a stack badge (top-left) and evo badge (top-right) they don't collide */
+.gallery-card.evolved {
+  border-color: rgba(255, 210, 120, .5);
+  box-shadow: 0 0 0 1px rgba(255, 210, 120, .25), 0 8px 22px rgba(0, 0, 0, .4);
+}
+.gallery-card.evolved.tier-2,
+.gallery-card.evolved:has(.evo-badge.tier-2) {
+  border-color: rgba(200, 140, 255, .5);
+}
+
+/* Inline tier tag used in the card viewer + pickers */
+.evo-tag {
+  display: inline-block;
+  padding: .04rem .4rem;
+  border-radius: 999px;
+  font-size: .62rem;
+  font-weight: 900;
+  letter-spacing: .08em;
+  color: #1a1030;
+  background: linear-gradient(90deg, #ffe27a, #ffb15c);
+  vertical-align: middle;
+}
+.evo-tag.tier-2 { background: linear-gradient(90deg, #ff9cf0, #b57cff); color: #160a2c; }
+.stat-evo { color: #ffd27c; font-weight: 900; }
+
+.cv-card.evolved { box-shadow: 0 0 0 1px rgba(255, 210, 120, .3), 0 24px 70px rgba(0, 0, 0, .5), 0 0 40px rgba(255, 200, 120, .25); }
+.cv-card.evolved.tier-2 { box-shadow: 0 0 0 1px rgba(200, 140, 255, .35), 0 24px 70px rgba(0, 0, 0, .5), 0 0 44px rgba(200, 140, 255, .3); }
+
+/* Evolve affordance on the card back */
+.evolve-box {
+  margin: .5rem 0;
+  padding: .6rem .7rem;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, .04);
+  display: grid;
+  gap: .45rem;
+}
+.evolve-box.ready {
+  border-color: rgba(255, 210, 120, .55);
+  background: linear-gradient(180deg, rgba(255, 210, 120, .12), rgba(255, 255, 255, .03));
+  box-shadow: 0 0 18px rgba(255, 200, 120, .22);
+}
+.evolve-box.maxed { text-align: center; color: var(--muted); font-size: .82rem; }
+.evolve-head { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+.evolve-title { font-size: .82rem; color: var(--text); }
+.evolve-title strong { color: #ffe6b0; }
+.evolve-cost { font-weight: 800; color: #fff; white-space: nowrap; font-size: .82rem; }
+.evolve-gauge {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .08);
+  overflow: hidden;
+}
+.evolve-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #ffe27a, #ff9c70);
+  transition: width .35s ease;
+}
+.cv-evolve { width: 100%; }
+.cv-evolve:disabled { opacity: .55; cursor: not-allowed; background: rgba(255, 255, 255, .08); color: var(--muted); }
+
+/* The full-screen evolution cinematic */
+.evo-cinematic {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: grid;
+  place-items: center;
+  background: radial-gradient(circle at 50% 42%, rgba(10, 16, 30, .82), rgba(3, 5, 12, .96));
+  opacity: 0;
+  transition: opacity .25s ease;
+  backdrop-filter: blur(6px);
+}
+.evo-cinematic.show { opacity: 1; }
+.evo-cinematic.closing { opacity: 0; }
+.evo-stage {
+  position: relative;
+  width: min(560px, 94vw);
+  height: min(560px, 80vh);
+  display: grid;
+  place-items: center;
+}
+.evo-canvas { width: 100%; height: 100%; display: block; }
+.evo-skip {
+  position: absolute;
+  bottom: .6rem;
+  right: .6rem;
+  font-size: .8rem;
+  padding: .45rem .8rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .08);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .evolve-fill { transition: none; }
+  .evo-cinematic { transition: none; }
+}

@@ -8,6 +8,8 @@ function makeStubEl() {
     removeEventListener() {},
     appendChild() {},
     remove() {},
+    setAttribute() {},
+    getAttribute() { return null; },
     querySelector() { return makeStubEl(); },
     querySelectorAll() { return []; },
     style: { setProperty() {}, left: "", top: "" },
