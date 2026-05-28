@@ -62,6 +62,10 @@ import {
   evoCostFor,
   evoDisplayName,
   normalizeFoodBag,
+  CACHE_FOOD_CHANCE,
+  CACHE_FOOD_LADDER,
+  pickCacheFoodSize,
+  rollCacheFood,
   evolutionState,
 } from './app.logic.js';
 
@@ -849,4 +853,59 @@ test('evolutionState reports ready / short / deployed / maxed', () => {
 test('FOOD_PER_CATCH makes the first evolution reachable in a few catches', () => {
   assert.ok(FOOD_PER_CATCH > 0);
   assert.ok(EVO_FOOD_COSTS[0] / FOOD_PER_CATCH <= 8, 'tier-1 should be a handful of catches, not a slog');
+});
+
+test('CACHE_FOOD_LADDER weights are a valid distribution summing to 1', () => {
+  const total = CACHE_FOOD_LADDER.reduce((s, t) => s + t.weight, 0);
+  assert.ok(Math.abs(total - 1) < 1e-9, 'ladder weights must sum to 1');
+  for (const tier of CACHE_FOOD_LADDER) {
+    assert.ok(tier.amount > 0 && tier.weight > 0);
+  }
+  // Larger hauls are rarer: amounts climb while weights never increase.
+  for (let i = 1; i < CACHE_FOOD_LADDER.length; i++) {
+    assert.ok(CACHE_FOOD_LADDER[i].amount > CACHE_FOOD_LADDER[i - 1].amount);
+    assert.ok(CACHE_FOOD_LADDER[i].weight <= CACHE_FOOD_LADDER[i - 1].weight);
+  }
+});
+
+test('pickCacheFoodSize maps rng bands to the right ladder tier', () => {
+  // First tier (10) covers the bottom half of [0,1).
+  assert.equal(pickCacheFoodSize(() => 0), 10);
+  assert.equal(pickCacheFoodSize(() => 0.49), 10);
+  // Second tier (25) sits in [0.5, 0.75).
+  assert.equal(pickCacheFoodSize(() => 0.5), 25);
+  assert.equal(pickCacheFoodSize(() => 0.74), 25);
+  // Third tier (50) in [0.75, 0.875).
+  assert.equal(pickCacheFoodSize(() => 0.8), 50);
+  // Top tier (100) soaks up the rest, including the rng=1 edge.
+  assert.equal(pickCacheFoodSize(() => 0.95), 100);
+  assert.equal(pickCacheFoodSize(() => 1), 100);
+});
+
+test('rollCacheFood gates on the 1-in-4 chance before drawing a size', () => {
+  // Above the chance threshold → no drop, regardless of the size roll.
+  assert.equal(rollCacheFood(() => CACHE_FOOD_CHANCE), 0);
+  assert.equal(rollCacheFood(() => 0.99), 0);
+
+  // First call clears the gate, second call picks the tier.
+  const seq = (values) => {
+    let i = 0;
+    return () => values[Math.min(i++, values.length - 1)];
+  };
+  assert.equal(rollCacheFood(seq([0, 0])), 10);
+  assert.equal(rollCacheFood(seq([0, 0.6])), 25);
+  assert.equal(rollCacheFood(seq([0, 0.99])), 100);
+});
+
+test('rollCacheFood produces only valid hauls and lands near 1-in-4 over many rolls', () => {
+  const valid = new Set([0, ...CACHE_FOOD_LADDER.map((t) => t.amount)]);
+  let drops = 0;
+  const N = 40000;
+  for (let i = 0; i < N; i++) {
+    const v = rollCacheFood();
+    assert.ok(valid.has(v), `unexpected haul ${v}`);
+    if (v > 0) drops++;
+  }
+  const rate = drops / N;
+  assert.ok(Math.abs(rate - CACHE_FOOD_CHANCE) < 0.02, `drop rate ${rate} should sit near ${CACHE_FOOD_CHANCE}`);
 });
