@@ -6,12 +6,19 @@ export const BATTLE_SITE_NEIGHBORHOOD_CELLS = 2;
 // slightly vs. pure-random rolls and spreads them more evenly.
 export const BATTLE_SITE_MACRO_SIZE = 3;
 export const MAX_TRAINING_BOOST_PER_STAT = 28;
+// Cosmetic now — counts a champion's successful holds for bragging rights. A gym
+// is lost by HP attrition or the TTL, no longer by hitting a defense cap.
 export const MAX_CHAMPION_DEFENSES = 5;
 export const CHAMPION_TTL_MS = 24 * 60 * 60 * 1000;
-// Champions resting on guard duty accrue +1 HP boost per interval, capped by
-// MAX_TRAINING_BOOST_PER_STAT. Slower than the training drill so the drill is
-// still the way to push other stats.
-export const GYM_REST_HP_INTERVAL_MS = 30 * 60 * 1000;
+
+// Persistent HP: a Fokemon's wounds carry between battles, so a gym is worn down
+// by repeated challenges and challengers come home hurt. These knobs tune how it
+// recovers. (Tuned via the balance sim — see the build notes.)
+export const HP_REGEN_INTERVAL_MS = 30 * 60 * 1000; // one passive heal tick per 30 min
+export const HP_REGEN_FRACTION = 0.12;              // each tick heals 12% of max HP
+export const HEAL_FRACTION_PER_FOOD = 0.18;         // one on-type food restores 18% of max HP
+export const OFF_TYPE_HEAL_FACTOR = 0.5;            // wrong-type food heals at half rate
+export const LOW_HP_WARN_FRACTION = 0.5;            // warn before sending a Fokemon below this in
 
 // How long a trainer stays on the map / discoverable for trading after their
 // last location signal (catch event OR presence heartbeat). Two windows,
@@ -263,6 +270,11 @@ export function migrateCaughtEntries(entries) {
     // byte-identical to the legacy shape.
     const stage = clampEvoStage(entry.evoStage);
     if (stage > 0) migrated.evoStage = stage;
+    // Persistent HP is only stored once a Fokemon has been wounded — absence
+    // reads as full health (see clampHp), keeping healthy entries byte-clean.
+    // hpAt timestamps the last heal/damage so passive regen can resume.
+    if (Number.isFinite(entry.currentHp)) migrated.currentHp = Math.max(0, Math.round(entry.currentHp));
+    if (Number.isFinite(entry.hpAt)) migrated.hpAt = Number(entry.hpAt);
     return migrated;
   });
 }
@@ -894,43 +906,86 @@ export function totalBoostCapRemaining(boosts) {
 }
 
 export function effectiveStats(card, champion) {
+  // Max stats from base + training boosts + evolution tier. Wear-and-tear is no
+  // longer modelled here as a stat penalty — it lives in persistent currentHp,
+  // so a defender always fights at full stats but with whatever HP it has left.
   if (!card) return { hp: 0, atk: 0, def: 0, spd: 0 };
   const boosts = champion?.boosts || { hp: 0, atk: 0, def: 0, spd: 0 };
-  const defenses = champion?.defenses || 0;
-  const fatigue = Math.min(0.45, defenses * 0.09);
   const mult = evoStatMult(champion?.evoStage);
-  const apply = (base, boost, fatigueMul) =>
-    Math.max(1, Math.round((base + (boost || 0)) * mult * (1 - fatigue * fatigueMul)));
+  const apply = (base, boost) => Math.max(1, Math.round((base + (boost || 0)) * mult));
   return {
-    hp: apply(card.hp ?? 0, boosts.hp, 0.5),
-    atk: apply(card.atk ?? 0, boosts.atk, 1),
-    def: apply(card.def ?? 0, boosts.def, 1),
-    spd: apply(card.spd ?? 0, boosts.spd, 0.8),
+    hp: apply(card.hp ?? 0, boosts.hp),
+    atk: apply(card.atk ?? 0, boosts.atk),
+    def: apply(card.def ?? 0, boosts.def),
+    spd: apply(card.spd ?? 0, boosts.spd),
   };
 }
 
-export function computeGymRestGain({ boosts, restAccruedAt, placedAt, now }, intervalMs = GYM_REST_HP_INTERVAL_MS) {
-  // Pure: how many HP-boost slices a champion has accrued since the last
-  // credit. Time always advances (even when capped), so capped tenure doesn't
-  // bank slices for later. 0 is a valid timestamp, so prefer Number.isFinite
-  // over truthiness when picking the start point.
-  const restValid = Number.isFinite(restAccruedAt) && restAccruedAt > 0;
+// Clamp a stored HP value into [0, maxHp]. A missing/garbage value means "full"
+// — untouched Fokemon don't persist a currentHp, so absence reads as healthy.
+export function clampHp(value, maxHp) {
+  const max = Math.max(0, Math.round(Number(maxHp) || 0));
+  const v = Math.round(Number(value));
+  if (!Number.isFinite(v)) return max;
+  return Math.max(0, Math.min(max, v));
+}
+
+export function computeHpRegen(
+  { currentHp, maxHp, accruedAt, placedAt, now },
+  intervalMs = HP_REGEN_INTERVAL_MS,
+  fraction = HP_REGEN_FRACTION,
+) {
+  // Pure: how much HP a resting Fokemon has recovered since its last credit,
+  // plus the advanced accrual timestamp. Heals current HP toward max instead of
+  // banking a permanent boost. Time always advances (even when full), so a
+  // topped-up Fokemon doesn't stockpile heals for later. 0 is a valid timestamp,
+  // so prefer Number.isFinite over truthiness when picking the start point.
+  const max = Math.max(1, Math.round(Number(maxHp) || 1));
+  const cur = clampHp(currentHp, max);
+  const accruedValid = Number.isFinite(accruedAt) && accruedAt > 0;
   const placedValid = Number.isFinite(placedAt) && placedAt >= 0;
-  const start = restValid ? Number(restAccruedAt) : (placedValid ? Number(placedAt) : (Number(now) || 0));
+  const start = accruedValid ? Number(accruedAt) : (placedValid ? Number(placedAt) : (Number(now) || 0));
   const t = Number(now) || 0;
   const interval = Math.max(1, Number(intervalMs) || 1);
   const elapsed = Math.max(0, t - start);
-  const slicesAvailable = Math.floor(elapsed / interval);
-  const currentHp = Math.max(0, Number(boosts?.hp) || 0);
-  const headroom = Math.max(0, MAX_TRAINING_BOOST_PER_STAT - currentHp);
-  const gain = Math.min(slicesAvailable, headroom);
-  const nextAccruedAt = start + slicesAvailable * interval;
-  return { gain, nextAccruedAt };
+  const slices = Math.floor(elapsed / interval);
+  const perSlice = Math.max(1, Math.round(max * fraction));
+  const headroom = Math.max(0, max - cur);
+  const heal = Math.min(slices * perSlice, headroom);
+  const nextAccruedAt = start + slices * interval;
+  return { heal, nextAccruedAt, currentHp: cur + heal };
+}
+
+// HP restored per unit of food. On-type food is fully effective; any other type
+// heals at OFF_TYPE_HEAL_FACTOR. Scales with max HP so beefy Fokemon cost more
+// food to patch up than fragile ones (per point of HP it's the same rate).
+export function healAmountPerFood(maxHp, sameType) {
+  const max = Math.max(1, Math.round(Number(maxHp) || 1));
+  const base = Math.max(1, Math.round(max * HEAL_FRACTION_PER_FOOD));
+  return sameType ? base : Math.max(1, Math.round(base * OFF_TYPE_HEAL_FACTOR));
+}
+
+// Plan a food heal: given a wound, the food on hand, and how much the player
+// wants to spend, return the food actually consumed and HP restored. Never
+// spends food that would overheal — stops buying once the bar is full.
+export function planFoodHeal({ currentHp, maxHp, cardType, foodType, foodAvailable, foodToSpend }) {
+  const max = Math.max(1, Math.round(Number(maxHp) || 1));
+  const cur = clampHp(currentHp, max);
+  const sameType = !!cardType && cardType === foodType;
+  const perFood = healAmountPerFood(max, sameType);
+  const headroom = Math.max(0, max - cur);
+  const avail = Math.max(0, Math.floor(Number(foodAvailable) || 0));
+  const want = Math.max(0, Math.floor(Number(foodToSpend) || 0));
+  const maxUseful = Math.ceil(headroom / perFood);
+  const spend = Math.min(want, avail, maxUseful);
+  const healed = Math.min(headroom, spend * perFood);
+  return { foodSpent: spend, hpHealed: healed, currentHp: cur + healed, perFood, sameType };
 }
 
 export function isChampionRetired(champion, now = Date.now()) {
+  // Gyms are toppled by HP attrition (a challenger wins) or this TTL backstop —
+  // there's no longer a defense-count cap that auto-retires a healthy champion.
   if (!champion) return true;
-  if ((champion.defenses || 0) >= MAX_CHAMPION_DEFENSES) return true;
   if (champion.placedAt && now - champion.placedAt > CHAMPION_TTL_MS) return true;
   return false;
 }
@@ -974,13 +1029,22 @@ function makeSeededRandom(seed) {
   };
 }
 
+// Per-hit damage is scaled down so an HP pool absorbs ~4 hits instead of ~1.6.
+// Without it, base damage (atk - def/2 ≈ 40) is close to a whole HP bar (≈ 64),
+// so ~46% of evenly-matched fights ended in a one-shot and any stat edge became a
+// guaranteed instakill — outcomes were decided by the speed coin-flip and crit RNG
+// rather than by the matchup. At 0.3 a crit/skill is a big swing, not a kill.
+export const BATTLE_DAMAGE_SCALE = 0.3;
+
 export function simulateBattle({ attacker, defender, seed = 1, maxTurns = 24 }) {
   if (!attacker?.stats || !defender?.stats) {
     return { winner: null, log: [], finalHpAttacker: 0, finalHpDefender: 0 };
   }
   const rand = makeSeededRandom(seed);
-  const a = { side: "attacker", card: attacker.card, stats: attacker.stats, hp: attacker.stats.hp, energy: 0 };
-  const d = { side: "defender", card: defender.card, stats: defender.stats, hp: defender.stats.hp, energy: 0 };
+  // Each side enters at its persistent currentHp (defaults to full when unset).
+  // A side that arrives already fainted (0) loses without throwing a punch.
+  const a = { side: "attacker", card: attacker.card, stats: attacker.stats, hp: clampHp(attacker.hp, attacker.stats.hp), energy: 0 };
+  const d = { side: "defender", card: defender.card, stats: defender.stats, hp: clampHp(defender.hp, defender.stats.hp), energy: 0 };
   const log = [];
 
   let round = 0;
@@ -1022,7 +1086,7 @@ export function simulateBattle({ attacker, defender, seed = 1, maxTurns = 24 }) 
       const critMul = crit ? 1.55 : 1;
       const skillMul = useSkill ? 1.7 : 1;
       const base = Math.max(1, atk.stats.atk - def.stats.def / 2);
-      const dmg = Math.max(1, Math.round(base * variance * mul * critMul * skillMul));
+      const dmg = Math.max(1, Math.round(base * BATTLE_DAMAGE_SCALE * variance * mul * critMul * skillMul));
       def.hp = Math.max(0, def.hp - dmg);
 
       if (useSkill) atk.energy = 0;

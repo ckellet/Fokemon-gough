@@ -3558,3 +3558,104 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
   .evolve-fill { transition: none; }
   .evo-cinematic { transition: none; }
 }
+
+/* ---- Persistent HP: bars, heal controls, wounded badges ---------------- */
+.foke-hp {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  margin: .4rem 0 .2rem;
+}
+.foke-hp-track {
+  flex: 1;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .12);
+  overflow: hidden;
+}
+.foke-hp-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #7cf0c6, #5bd6a8);
+  transition: width .35s ease;
+}
+.foke-hp.hurt .foke-hp-fill { background: linear-gradient(90deg, #ffe27a, #ffc05a); }
+.foke-hp.low .foke-hp-fill { background: linear-gradient(90deg, #ffae5a, #ff5d6e); }
+.foke-hp.fainted .foke-hp-fill { background: rgba(255, 93, 110, .85); }
+.foke-hp-text {
+  font-size: .62rem;
+  font-weight: 800;
+  letter-spacing: .03em;
+  color: rgba(255, 255, 255, .82);
+  white-space: nowrap;
+}
+.foke-hp.low .foke-hp-text,
+.foke-hp.fainted .foke-hp-text { color: #ffb3bd; }
+
+.heal-control {
+  margin: .35rem 0 .5rem;
+  padding: .4rem .5rem;
+  border-radius: .6rem;
+  background: rgba(255, 255, 255, .05);
+  border: 1px solid rgba(255, 255, 255, .08);
+}
+.heal-label {
+  display: block;
+  font-size: .58rem;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: rgba(255, 255, 255, .6);
+  margin-bottom: .35rem;
+}
+.heal-food-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .35rem;
+}
+.heal-food {
+  font-size: .66rem;
+  padding: .25rem .5rem;
+  border-radius: 999px;
+}
+.heal-food.on-type {
+  border-color: rgba(124, 240, 198, .55);
+  color: #d8fff0;
+  background: rgba(124, 240, 198, .12);
+}
+.heal-hint {
+  font-size: .66rem;
+  color: rgba(255, 255, 255, .6);
+  margin: .35rem 0 .5rem;
+}
+
+/* Wounded indicators on collection cards + picker tiles */
+.gallery-card.wounded { outline: 1px solid rgba(255, 192, 90, .45); }
+.gallery-card.fainted { outline: 1px solid rgba(255, 93, 110, .55); }
+.hp-pill {
+  position: absolute;
+  top: .55rem;
+  left: .55rem;
+  font-size: .6rem;
+  font-weight: 800;
+  letter-spacing: .04em;
+  padding: .1rem .45rem;
+  border-radius: 999px;
+  background: rgba(255, 192, 90, .18);
+  border: 1px solid rgba(255, 192, 90, .55);
+  color: #ffe2b0;
+}
+.gallery-card.deployed .hp-pill { left: .55rem; right: auto; top: 2rem; }
+.hp-pill.fainted {
+  background: rgba(255, 93, 110, .18);
+  border-color: rgba(255, 93, 110, .6);
+  color: #ffb3bd;
+}
+.picker-card .picker-hp {
+  font-weight: 800;
+  color: #ffd9a0;
+}
+.picker-card .picker-hp.low,
+.picker-card .picker-hp.fainted { color: #ffb3bd; }
+.picker-card.wounded { outline: 1px solid rgba(255, 192, 90, .4); }
+.picker-card.low,
+.picker-card.fainted { outline: 1px solid rgba(255, 93, 110, .5); }
