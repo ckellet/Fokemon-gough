@@ -20,10 +20,12 @@ import {
   clampBoost,
   totalBoostCapRemaining,
   MAX_TRAINING_BOOST_PER_STAT,
-  MAX_CHAMPION_DEFENSES,
   CHAMPION_TTL_MS,
-  GYM_REST_HP_INTERVAL_MS,
-  computeGymRestGain,
+  computeHpRegen,
+  clampHp,
+  planFoodHeal,
+  healAmountPerFood,
+  LOW_HP_WARN_FRACTION,
   typeMultiplier,
   filterUncaughtSpawns,
   getGridKey,
@@ -857,6 +859,79 @@ function statBars(card) {
   `;
 }
 
+// Persistent-HP display: a health bar + "cur / max HP" label, colour-coded by
+// how hurt the Fokemon is. Returns "" for full health (nothing to show).
+function hpStateFor(cur, max) {
+  const pct = max > 0 ? Math.round((cur / max) * 100) : 100;
+  const state = cur <= 0 ? "fainted" : pct <= 35 ? "low" : pct < 100 ? "hurt" : "full";
+  return { pct, state };
+}
+
+function hpBarHtml(cur, max, { always = false } = {}) {
+  if (cur >= max && !always) return "";
+  const { pct, state } = hpStateFor(cur, max);
+  return `
+    <div class="foke-hp ${state}">
+      <div class="foke-hp-track"><div class="foke-hp-fill" style="width:${Math.max(0, pct)}%"></div></div>
+      <span class="foke-hp-text">${Math.max(0, cur)} / ${max} HP${cur <= 0 ? " • Fainted" : ""}</span>
+    </div>`;
+}
+
+// Food-heal control: one button per food type the player owns, on-type first
+// (full effect), others flagged "½". Empty when the Fokemon is already full.
+function healControlHtml(entry) {
+  const card = cardsById.get(entry?.id);
+  if (!card) return "";
+  const max = maxHpOf(entry);
+  const cur = currentHpOf(entry);
+  if (cur >= max) return "";
+  const ownType = card.type;
+  const owned = Object.keys(TYPE_FOOD).filter((t) => foodCount(t) > 0);
+  owned.sort((a, b) => (a === ownType ? -1 : b === ownType ? 1 : 0));
+  if (!owned.length) {
+    return `<p class="heal-hint">No food to heal. Catch Fokemon or empty caches to stock ${escapeHtml(foodForType(ownType).name)}.</p>`;
+  }
+  const buttons = owned.map((t) => {
+    const same = t === ownType;
+    const f = foodForType(t);
+    const per = healAmountPerFood(max, same);
+    return `<button type="button" class="ghost heal-food${same ? " on-type" : ""}" data-uid="${escapeHtml(entry.uid)}" data-food="${escapeHtml(t)}" title="Restores ~${per} HP per ${escapeHtml(f.name)}${same ? "" : " (½ — off type)"}">${f.emoji} ${escapeHtml(f.name)} ×${foodCount(t)}${same ? "" : " ½"}</button>`;
+  }).join("");
+  return `<div class="heal-control"><span class="heal-label">Feed to heal:</span><div class="heal-food-row">${buttons}</div></div>`;
+}
+
+// Wire heal buttons inside `container`; calls onHealed() after a successful heal
+// so the caller can re-render. Shared by the gym panel and the collection sheet.
+function wireHealButtons(container, onHealed) {
+  if (!container) return;
+  container.querySelectorAll(".heal-food").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      healInstanceWithFood(btn.dataset.uid, btn.dataset.food);
+      // The re-render reflects the new HP bar / drops the control when full.
+      if (typeof onHealed === "function") onHealed();
+    });
+  });
+}
+
+// Guard against sending a hurt/fainted Fokemon into battle without warning.
+// Returns true to proceed. Fainted Fokemon would lose instantly, so the prompt
+// nudges the player to heal first (but still lets them go through).
+function confirmLowHpSend(entry, verb = "send into battle") {
+  const max = maxHpOf(entry);
+  const cur = currentHpOf(entry);
+  if (cur >= max) return true;
+  if (typeof confirm !== "function") return true;
+  const card = cardsById.get(entry.id);
+  const name = card ? evoDisplayName(card.name, entry.evoStage) : "This Fokemon";
+  if (cur <= 0) {
+    return confirm(`${name} has fainted (0/${max} HP) and will lose instantly. Feed it food to heal, or ${verb} anyway?`);
+  }
+  if (cur < max * LOW_HP_WARN_FRACTION) {
+    return confirm(`${name} is hurt (${cur}/${max} HP) and at a disadvantage. ${verb[0].toUpperCase()}${verb.slice(1)} anyway?`);
+  }
+  return true;
+}
+
 function instanceStatRowsHtml(card, boosts, evoStage = 0) {
   const mult = evoStatMult(evoStage);
   const rows = [
@@ -973,9 +1048,13 @@ function renderCollection() {
           const deployed = !!entry.deployedAt;
           const deployedLabel = deployed ? battleSiteName(entry.deployedAt) : "";
           const totalHp = effectiveStats(card, { boosts: entry.boosts, defenses: 0, evoStage: stage }).hp;
+          const curHp = clampHp(entry.currentHp, totalHp);
+          const wounded = curHp < totalHp;
+          const fainted = curHp <= 0;
           const vindex = vindexByUid.get(entry.uid) ?? 0;
           const classes = ["gallery-card"];
           if (deployed) classes.push("deployed");
+          if (wounded) classes.push(fainted ? "fainted" : "wounded");
           if (entry.ubermax) classes.push("ubermax");
           if (stage) classes.push("evolved");
           if (isRep && isMulti) classes.push("stacked");
@@ -988,6 +1067,7 @@ function renderCollection() {
           ${evoLabel ? `<span class="evo-badge tier-${stage}" title="Evolved Fokemon">${evoLabel}</span>` : ""}
           ${entry.ubermax ? `<span class="ubermax-laurel" title="Won from an UberMax raid">UBERMAX</span>` : ""}
           ${deployed ? `<span class="deployed-pill" title="Deployed at ${escapeHtml(deployedLabel)}">At gym</span>` : ""}
+          ${wounded ? `<span class="hp-pill ${fainted ? "fainted" : "wounded"}" title="${fainted ? "Fainted — heal with food" : `${curHp}/${totalHp} HP`}">${fainted ? "Fainted" : `${curHp}/${totalHp} HP`}</span>` : ""}
           <canvas class="gallery-art" width="160" height="120" aria-hidden="true"></canvas>
           <div class="gallery-meta">
             <strong>${escapeHtml(displayName)}</strong>
@@ -1111,6 +1191,8 @@ function cardViewerHtml(view) {
               <p class="rarity ${escapeHtml(rarity)}">${escapeHtml(rarity)} &bull; ${escapeHtml(card.type)}</p>
             </header>
             ${instanceStatRowsHtml(card, entry.boosts, stage)}
+            ${hpBarHtml(currentHpOf(entry), maxHpOf(entry))}
+            ${healControlHtml(entry)}
             ${evolveSectionHtml(card, entry)}
             <p class="instance-status">${deployed
               ? `Deployed at <strong>${escapeHtml(deployedLabel)}</strong>.`
@@ -1171,6 +1253,11 @@ function renderCardViewer() {
   if (el.cvCounter) el.cvCounter.textContent = `${viewerIndex + 1} / ${viewerOrder.length}`;
   if (el.cvPrev) el.cvPrev.disabled = viewerIndex === 0;
   if (el.cvNext) el.cvNext.disabled = viewerIndex === viewerOrder.length - 1;
+
+  wireHealButtons(el.cvStage, () => {
+    renderCollection();
+    renderCardViewer();
+  });
 
   const releaseBtn = el.cvStage.querySelector(".cv-release");
   if (releaseBtn) {
@@ -2037,6 +2124,100 @@ function markInstanceDeployed(uid, siteId) {
   if (!entry) return;
   entry.deployedAt = siteId || null;
   saveLocal();
+}
+
+// Max HP for an instance (base + boosts + evo). Used everywhere we need to know
+// a Fokemon's full health to clamp/heal its persistent currentHp.
+function maxHpOf(entry) {
+  const card = entry && cardsById.get(entry.id);
+  if (!card) return 0;
+  return effectiveStats(card, { boosts: entry.boosts, evoStage: entry.evoStage }).hp;
+}
+
+function currentHpOf(entry) {
+  return clampHp(entry?.currentHp, maxHpOf(entry));
+}
+
+// Persist an instance's current HP. At full health we drop the field so healthy
+// Fokemon stay byte-clean (and skip the regen sweep); below full we stamp hpAt
+// so passive regen knows when the clock last reset.
+function setInstanceHp(uid, hp, ts = Date.now()) {
+  const entry = getInstance(uid);
+  if (!entry) return;
+  const max = maxHpOf(entry);
+  const v = clampHp(hp, max);
+  if (v >= max) {
+    delete entry.currentHp;
+    delete entry.hpAt;
+  } else {
+    entry.currentHp = v;
+    entry.hpAt = ts;
+  }
+  saveLocal();
+}
+
+// Lazily heal benched wounded Fokemon over time. Deployed champions regen via
+// creditGymRestForOwnedChampions instead, so they're skipped here.
+function regenBenchedInstances(now = Date.now()) {
+  let changed = false;
+  for (const entry of caught) {
+    if (!entry || entry.deployedAt) continue;
+    if (!Number.isFinite(entry.currentHp)) continue; // healthy → nothing to heal
+    const max = maxHpOf(entry);
+    const { currentHp, heal, nextAccruedAt } = computeHpRegen({
+      currentHp: entry.currentHp,
+      maxHp: max,
+      accruedAt: entry.hpAt,
+      placedAt: entry.hpAt,
+      now,
+    });
+    if (heal <= 0) continue;
+    if (currentHp >= max) {
+      delete entry.currentHp;
+      delete entry.hpAt;
+    } else {
+      entry.currentHp = currentHp;
+      entry.hpAt = nextAccruedAt;
+    }
+    changed = true;
+  }
+  if (changed) saveLocal();
+  return changed;
+}
+
+// Spend food to heal an instance. On-type food is fully effective; other types
+// heal at OFF_TYPE_HEAL_FACTOR. Works on benched or deployed Fokemon (remote),
+// mirroring HP onto the champion record when the target is holding a gym.
+function healInstanceWithFood(uid, foodType) {
+  const entry = getInstance(uid);
+  if (!entry) return null;
+  const card = cardsById.get(entry.id);
+  if (!card) return null;
+  const max = maxHpOf(entry);
+  const cur = currentHpOf(entry);
+  if (cur >= max) return { foodSpent: 0, hpHealed: 0, currentHp: cur, full: true };
+  const plan = planFoodHeal({
+    currentHp: cur,
+    maxHp: max,
+    cardType: card.type,
+    foodType,
+    foodAvailable: foodCount(foodType),
+    foodToSpend: Infinity, // top up as far as the food on hand allows
+  });
+  if (plan.foodSpent <= 0) return { foodSpent: 0, hpHealed: 0, currentHp: cur, full: false };
+  if (!spendFood(foodType, plan.foodSpent)) return null;
+  const now = Date.now();
+  setInstanceHp(uid, plan.currentHp, now);
+  // If this Fokemon is holding a gym, push the heal onto the synced champion.
+  if (entry.deployedAt) {
+    const champ = championsBySite.get(entry.deployedAt);
+    if (champ && champ.instanceUid === uid && champ.trainer === profile?.name) {
+      const updated = { ...champ, currentHp: plan.currentHp, restAccruedAt: now };
+      championsBySite.set(entry.deployedAt, updated);
+      publishChampion(entry.deployedAt, updated);
+    }
+  }
+  return { ...plan, full: plan.currentHp >= max };
 }
 
 function restoreInstanceHome(uid, mergedBoosts) {
@@ -4655,11 +4836,16 @@ function championPickerHtml(actionLabel) {
         const total = instancePower(entry);
         const trained = (entry.boosts?.hp || 0) + (entry.boosts?.atk || 0) + (entry.boosts?.def || 0) + (entry.boosts?.spd || 0);
         const { idx, total: of } = speciesIndexForInstance(entry.uid);
+        const max = maxHpOf(entry);
+        const cur = currentHpOf(entry);
+        const { state } = hpStateFor(cur, max);
+        const hurt = cur < max;
         return `
-          <button class="picker-card" data-uid="${escapeHtml(entry.uid)}" style="--type-light:${colors.light};--type-dark:${colors.dark};--type-accent:${colors.accent};">
+          <button class="picker-card${hurt ? ` ${state}` : ""}" data-uid="${escapeHtml(entry.uid)}" style="--type-light:${colors.light};--type-dark:${colors.dark};--type-accent:${colors.accent};">
             <span class="picker-power">⚡${total}</span>
             <strong>${escapeHtml(card.name)}${of > 1 ? ` <small>#${idx}</small>` : ""}</strong>
             <small>${escapeHtml(card.type)}${trained ? ` • +${trained} trained` : ""}</small>
+            ${hurt ? `<small class="picker-hp ${state}">${cur <= 0 ? "Fainted" : `${cur}/${max} HP`}</small>` : ""}
           </button>
         `;
       }).join("")}
@@ -4727,6 +4913,7 @@ function openBattleSite(site) {
             if (!entry || entry.deployedAt) return;
             const card = cardsById.get(entry.id);
             if (!card) return;
+            if (!confirmLowHpSend(entry, "deploy as champion")) return;
             const champ = {
               trainer: profile.name,
               team: profile.team || "mint",
@@ -4738,6 +4925,7 @@ function openBattleSite(site) {
               placedAt: Date.now(),
               lastBattleAt: 0,
               restAccruedAt: Date.now(),
+              currentHp: currentHpOf(entry), // deploy at whatever HP it has now
             };
             markInstanceDeployed(entry.uid, site.id);
             championsBySite.set(site.id, champ);
@@ -4764,26 +4952,23 @@ function openBattleSite(site) {
     const hours = Math.floor(ttlLeft / 3_600_000);
     const minutes = Math.floor((ttlLeft % 3_600_000) / 60_000);
     const boostCap = totalBoostCapRemaining(champion.boosts);
+    const champMaxHp = stats.hp;
+    const champHp = clampHp(champion.currentHp, champMaxHp);
 
     bodyEl.innerHTML = `
       <div class="site-state ${mine ? "yours" : "rival"}">
         <div class="champion-pane" style="--type-light:${colors.light};--type-dark:${colors.dark};--type-accent:${colors.accent};">
           <div class="champion-portrait">
             <canvas class="champ-art" width="180" height="160" aria-hidden="true"></canvas>
-            <span class="defense-pips" aria-label="Defenses">
-              ${Array.from({ length: MAX_CHAMPION_DEFENSES }, (_, i) =>
-                `<span class="pip ${i < champion.defenses ? "lit" : ""}"></span>`
-              ).join("")}
-            </span>
           </div>
           <div class="champion-meta">
             <h4>${escapeHtml(evoDisplayName(card.name, champion.evoStage))} <span class="type-pill" style="background:${colors.accent};color:#061226;">${escapeHtml(card.type)}</span></h4>
             <p class="champion-owner">Champion of <strong>${escapeHtml(champion.trainer)}</strong>${mine ? " (you)" : ""}</p>
+            ${hpBarHtml(champHp, champMaxHp, { always: true })}
             ${instanceStatRowsHtml(card, champion.boosts, champion.evoStage)}
             <p class="champion-meta-line">
-              <span class="badge">Defenses ${champion.defenses}/${MAX_CHAMPION_DEFENSES}</span>
+              <span class="badge">${champion.defenses} ${champion.defenses === 1 ? "defense" : "defenses"}</span>
               <span class="badge">Time left ${hours}h ${minutes}m</span>
-              ${champion.defenses > 0 ? `<span class="badge fatigue">Fatigue ${Math.min(45, champion.defenses * 9)}%</span>` : ""}
             </p>
           </div>
         </div>
@@ -4799,10 +4984,14 @@ function openBattleSite(site) {
 
     const actions = bodyEl.querySelector(".site-actions");
     if (mine) {
+      const champEntry = champion.instanceUid ? getInstance(champion.instanceUid) : null;
+      const healHtml = champEntry && champHp < champMaxHp ? healControlHtml(champEntry) : "";
       actions.innerHTML = `
+        ${healHtml}
         <button class="primary action-train">${boostCap > 0 ? "Train in the gym" : "Boost capped — recall to retrain"}</button>
         <button class="ghost action-recall">Recall champion</button>
       `;
+      wireHealButtons(actions, render);
       if (boostCap > 0) {
         actions.querySelector(".action-train").addEventListener("click", () => {
           close();
@@ -4835,6 +5024,7 @@ function openBattleSite(site) {
           if (!entry || entry.deployedAt) return;
           const card = cardsById.get(entry.id);
           if (!card) return;
+          if (!confirmLowHpSend(entry, "send into battle")) return;
           close();
           launchBattle(site, card, champion, entry);
         });
@@ -6559,6 +6749,10 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
   const challengerEvo = clampEvoStage(challengerInstance?.evoStage);
   const attackerStats = effectiveStats(challengerCard, { boosts: challengerBoosts || { hp: 0, atk: 0, def: 0, spd: 0 }, defenses: 0, evoStage: challengerEvo });
   const defenderStats = effectiveStats(champCard, championBefore);
+  // Both sides enter at their persistent currentHp (wounds carry between fights);
+  // a missing value means full health.
+  const attackerStartHp = clampHp(challengerInstance?.currentHp, attackerStats.hp);
+  const defenderStartHp = clampHp(championBefore.currentHp, defenderStats.hp);
   const seed = seedFromStrings(
     site.id,
     profile?.name || "anon",
@@ -6570,10 +6764,12 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
     String(Date.now())
   );
   const result = simulateBattle({
-    attacker: { card: challengerCard, stats: attackerStats },
-    defender: { card: champCard, stats: defenderStats },
+    attacker: { card: challengerCard, stats: attackerStats, hp: attackerStartHp },
+    defender: { card: champCard, stats: defenderStats, hp: defenderStartHp },
     seed,
   });
+  const challengerStartPct = Math.max(0, (attackerStartHp / attackerStats.hp) * 100);
+  const defenderStartPct = Math.max(0, (defenderStartHp / defenderStats.hp) * 100);
 
   const challenge = document.createElement("div");
   challenge.className = "catch-challenge battle-challenge";
@@ -6583,18 +6779,18 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
         <div class="roster-side challenger">
           <div class="roster-top">
             <span class="roster-name">${escapeHtml(challengerCard.name)} <span class="type-pill" style="background:${colorsFor(challengerCard).accent};color:#061226;">${escapeHtml(challengerCard.type)}</span></span>
-            <small class="hp-text challenger-hp-text">${attackerStats.hp} / ${attackerStats.hp}</small>
+            <small class="hp-text challenger-hp-text">${attackerStartHp} / ${attackerStats.hp}</small>
           </div>
-          <div class="hp-bar"><div class="hp-fill challenger-hp" style="width:100%"></div></div>
+          <div class="hp-bar"><div class="hp-fill challenger-hp" style="width:${challengerStartPct}%"></div></div>
           <p class="roster-label">${escapeHtml(profile?.name || "You")}</p>
         </div>
         <span class="vs-pill">VS</span>
         <div class="roster-side defender">
           <div class="roster-top">
             <span class="roster-name">${escapeHtml(champCard.name)} <span class="type-pill" style="background:${colorsFor(champCard).accent};color:#061226;">${escapeHtml(champCard.type)}</span></span>
-            <small class="hp-text defender-hp-text">${defenderStats.hp} / ${defenderStats.hp}</small>
+            <small class="hp-text defender-hp-text">${defenderStartHp} / ${defenderStats.hp}</small>
           </div>
-          <div class="hp-bar"><div class="hp-fill defender-hp" style="width:100%"></div></div>
+          <div class="hp-bar"><div class="hp-fill defender-hp" style="width:${defenderStartPct}%"></div></div>
           <p class="roster-label">${escapeHtml(championBefore.trainer)}</p>
         </div>
       </div>
@@ -6642,7 +6838,7 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
     pos: { ...CHALLENGER_HOME },
     card: challengerCard,
     hpMax: attackerStats.hp,
-    hp: attackerStats.hp,
+    hp: attackerStartHp,
     facing: 1,
     flashTime: 0,
     shakeTime: 0,
@@ -6654,7 +6850,7 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
     pos: { ...DEFENDER_HOME },
     card: champCard,
     hpMax: defenderStats.hp,
-    hp: defenderStats.hp,
+    hp: defenderStartHp,
     facing: -1,
     flashTime: 0,
     shakeTime: 0,
@@ -7522,13 +7718,18 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
     const challengerWon = result.winner === "attacker";
     let summary;
     let winnerName;
+    // Wounds carry: the challenger keeps whatever HP it ended on, win or lose.
+    const challengerEndHp = clampHp(result.finalHpAttacker, attackerStats.hp);
+    const defenderEndHp = clampHp(result.finalHpDefender, defenderStats.hp);
+    const challengerUid = challengerInstance?.uid || null;
     if (challengerWon) {
       winnerName = profile?.name || "Challenger";
       const placedAt = Date.now();
-      // The challenger now occupies the gym — mark their inventory instance.
-      const challengerUid = challengerInstance?.uid || null;
+      // The challenger now occupies the gym — mark their inventory instance and
+      // carry its battle-worn HP onto both the instance and the new champion.
       if (challengerUid && getInstance(challengerUid)) {
         markInstanceDeployed(challengerUid, site.id);
+        setInstanceHp(challengerUid, challengerEndHp, placedAt);
       }
       const newChampion = {
         trainer: profile.name,
@@ -7540,6 +7741,7 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
         placedAt,
         lastBattleAt: placedAt,
         restAccruedAt: placedAt,
+        currentHp: challengerEndHp,
       };
       championsBySite.set(site.id, newChampion);
       publishChampion(site.id, newChampion);
@@ -7547,15 +7749,26 @@ function launchBattle(site, challengerCard, championBefore, challengerInstance =
       renderCollection();
     } else {
       winnerName = championBefore.trainer;
+      // The losing challenger limps home wounded (possibly fainted).
+      if (challengerUid && getInstance(challengerUid)) {
+        setInstanceHp(challengerUid, challengerEndHp, Date.now());
+      }
+      const now = Date.now();
       const updated = {
         ...championBefore,
         defenses: (championBefore.defenses || 0) + 1,
-        lastBattleAt: Date.now(),
+        lastBattleAt: now,
+        currentHp: defenderEndHp, // chip damage persists — repeated assaults wear it down
+        restAccruedAt: now,       // reset the regen clock from this fight
       };
-      // If defending pushes them past the cap, the next champion poll will retire them.
       championsBySite.set(site.id, updated);
       publishChampion(site.id, updated);
-      summary = `${escapeHtml(champCard.name)} held their ground. ${escapeHtml(championBefore.trainer)} keeps ${escapeHtml(battleSiteName(site.id))} (defenses: ${updated.defenses}/${MAX_CHAMPION_DEFENSES}).`;
+      // Mirror the wound onto the defender's instance if it's one of ours.
+      if (updated.instanceUid && updated.trainer === profile?.name && getInstance(updated.instanceUid)) {
+        setInstanceHp(updated.instanceUid, defenderEndHp, now);
+      }
+      summary = `${escapeHtml(champCard.name)} held their ground at ${escapeHtml(String(defenderEndHp))}/${escapeHtml(String(defenderStats.hp))} HP. ${escapeHtml(championBefore.trainer)} keeps ${escapeHtml(battleSiteName(site.id))} (${updated.defenses} ${updated.defenses === 1 ? "defense" : "defenses"}).`;
+      renderCollection();
     }
     publishBattleEvent({
       ts: Date.now(),
@@ -8044,10 +8257,13 @@ function normalizeChampion(raw) {
       spd: clampBoost(raw?.boosts?.spd ?? 0),
     },
     evoStage: clampEvoStage(raw.evoStage),
-    defenses: Math.max(0, Math.min(MAX_CHAMPION_DEFENSES, Number(raw.defenses) || 0)),
+    // No upper cap now — defenses is a cosmetic "successful holds" tally.
+    defenses: Math.max(0, Number(raw.defenses) || 0),
     placedAt: Number(raw.placedAt) || Date.now(),
     lastBattleAt: Number(raw.lastBattleAt) || 0,
     restAccruedAt: Number(raw.restAccruedAt) || 0,
+    // Persistent HP; absent/garbage reads as full once clamped against max HP.
+    currentHp: Number.isFinite(raw.currentHp) ? Math.max(0, Math.round(raw.currentHp)) : null,
   };
   if (!cardsById.has(champ.cardId)) return null;
   return champ;
@@ -8059,10 +8275,14 @@ function reclaimLostInstanceAtSite(siteId, lastChampionWeKnew) {
   // redeployed elsewhere. Keeps boosts already mirrored from training.
   const deployed = deployedInstanceAtSite(caught, siteId);
   if (!deployed) return false;
-  const carryBoosts = lastChampionWeKnew?.trainer === profile?.name
-    ? lastChampionWeKnew.boosts
-    : deployed.boosts;
+  const wasMine = lastChampionWeKnew?.trainer === profile?.name;
+  const carryBoosts = wasMine ? lastChampionWeKnew.boosts : deployed.boosts;
   restoreInstanceHome(deployed.uid, carryBoosts);
+  // Carry the gym wound home: a dethroned Fokemon comes back as hurt as it was
+  // when it lost the gym (often fainted), so it needs healing before redeploy.
+  if (wasMine && Number.isFinite(lastChampionWeKnew?.currentHp)) {
+    setInstanceHp(deployed.uid, lastChampionWeKnew.currentHp, Date.now());
+  }
   return true;
 }
 
@@ -8111,8 +8331,15 @@ function subscribeChampionUpdates() {
       const local = deployedInstanceAtSite(caught, site.id);
       if (local) {
         const stillMine = champ.trainer === profile?.name && champ.instanceUid === local.uid;
-        if (!stillMine) {
-          if (reclaimLostInstanceAtSite(site.id, existing)) renderCollection();
+        if (stillMine) {
+          // A rival just battled our champion: mirror its new HP home so the
+          // wound is accurate if we recall or heal it.
+          if (Number.isFinite(champ.currentHp)) {
+            setInstanceHp(local.uid, champ.currentHp, champ.restAccruedAt || Date.now());
+            renderCollection();
+          }
+        } else if (reclaimLostInstanceAtSite(site.id, existing)) {
+          renderCollection();
         }
       }
       renderMap();
@@ -8327,33 +8554,30 @@ function showRaidVictoryToast(card) {
 }
 
 function creditGymRestForOwnedChampions() {
-  // Award passive HP boosts for champions I own that have been resting on
-  // guard duty. Pure calc in app.logic.js; we just persist + publish here.
-  if (!profile?.name || !championsBySite.size) return false;
+  // Heal wounded champions I own that have been resting on guard duty, plus my
+  // benched Fokemon. Pure calc in app.logic.js; we just persist + publish here.
   const now = Date.now();
-  let anyChange = false;
+  let anyChange = regenBenchedInstances(now);
+  if (!profile?.name || !championsBySite.size) return anyChange;
   for (const [siteId, champion] of championsBySite) {
     if (!champion || champion.trainer !== profile.name) continue;
     if (isChampionRetired(champion, now)) continue;
-    const { gain, nextAccruedAt } = computeGymRestGain({
-      boosts: champion.boosts,
-      restAccruedAt: champion.restAccruedAt,
+    const card = cardsById.get(champion.cardId);
+    if (!card) continue;
+    const maxHp = effectiveStats(card, champion).hp;
+    const { heal, nextAccruedAt, currentHp } = computeHpRegen({
+      currentHp: champion.currentHp,
+      maxHp,
+      accruedAt: champion.restAccruedAt,
       placedAt: champion.placedAt,
       now,
     });
-    if (nextAccruedAt === (champion.restAccruedAt || champion.placedAt || 0) && gain === 0) continue;
-    const updated = {
-      ...champion,
-      boosts: {
-        ...champion.boosts,
-        hp: clampBoost((champion.boosts?.hp || 0) + gain),
-      },
-      restAccruedAt: nextAccruedAt,
-    };
+    if (heal <= 0) continue;
+    const updated = { ...champion, currentHp, restAccruedAt: nextAccruedAt };
     championsBySite.set(siteId, updated);
     publishChampion(siteId, updated);
-    if (gain > 0 && updated.instanceUid && getInstance(updated.instanceUid)) {
-      applyInstanceBoosts(updated.instanceUid, updated.boosts);
+    if (updated.instanceUid && getInstance(updated.instanceUid)) {
+      setInstanceHp(updated.instanceUid, currentHp, now);
     }
     anyChange = true;
   }
@@ -8373,6 +8597,7 @@ function publishChampion(siteId, champion) {
     placedAt: champion.placedAt,
     lastBattleAt: champion.lastBattleAt || 0,
     restAccruedAt: champion.restAccruedAt || 0,
+    currentHp: Number.isFinite(champion.currentHp) ? champion.currentHp : null,
   });
 }
 

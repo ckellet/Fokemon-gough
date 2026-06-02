@@ -35,8 +35,14 @@ import {
   deployedInstanceAtSite,
   mergeBoosts,
   normalizeBoosts,
-  computeGymRestGain,
-  GYM_REST_HP_INTERVAL_MS,
+  computeHpRegen,
+  HP_REGEN_INTERVAL_MS,
+  HP_REGEN_FRACTION,
+  clampHp,
+  healAmountPerFood,
+  planFoodHeal,
+  HEAL_FRACTION_PER_FOOD,
+  OFF_TYPE_HEAL_FACTOR,
   serializeTradeOffer,
   parseTradeOffer,
   mergeTrainerLocation,
@@ -378,15 +384,16 @@ test('battleSiteName has high diversity across adjacent grid cells', () => {
   assert.ok(names.size >= 2000, `expected high name diversity; got ${names.size} unique of 3600`);
 });
 
-test('effectiveStats adds boosts and applies fatigue from defenses', () => {
+test('effectiveStats adds boosts and is independent of defenses (no fatigue)', () => {
   const card = { hp: 80, atk: 60, def: 50, spd: 40, type: 'Leaf' };
   const fresh = effectiveStats(card, { boosts: { hp: 0, atk: 10, def: 0, spd: 0 }, defenses: 0 });
   assert.equal(fresh.atk, 70);
   assert.equal(fresh.hp, 80);
 
-  const worn = effectiveStats(card, { boosts: { hp: 0, atk: 10, def: 0, spd: 0 }, defenses: 4 });
-  assert.ok(worn.atk < fresh.atk, 'fatigue should drop ATK after defenses');
-  assert.ok(worn.hp <= fresh.hp);
+  // Wear-and-tear now lives in persistent currentHp, not a stat penalty, so a
+  // champion that has defended several times still fights at full stats.
+  const veteran = effectiveStats(card, { boosts: { hp: 0, atk: 10, def: 0, spd: 0 }, defenses: 4 });
+  assert.deepEqual(veteran, fresh);
 });
 
 test('clampBoost caps at MAX_TRAINING_BOOST_PER_STAT and floors at 0', () => {
@@ -400,11 +407,12 @@ test('totalBoostCapRemaining tracks remaining headroom', () => {
   assert.equal(remaining, MAX_TRAINING_BOOST_PER_STAT * 4 - 20);
 });
 
-test('isChampionRetired retires after defense cap or TTL', () => {
+test('isChampionRetired retires on TTL only, not defense count', () => {
   const now = 1_700_000_000_000;
   assert.equal(isChampionRetired(null, now), true);
   assert.equal(isChampionRetired({ defenses: 0, placedAt: now }, now), false);
-  assert.equal(isChampionRetired({ defenses: MAX_CHAMPION_DEFENSES, placedAt: now }, now), true);
+  // A healthy champion with many holds is NOT auto-retired — only HP loss or TTL.
+  assert.equal(isChampionRetired({ defenses: MAX_CHAMPION_DEFENSES + 3, placedAt: now }, now), false);
   assert.equal(isChampionRetired({ defenses: 0, placedAt: now - CHAMPION_TTL_MS - 1 }, now), true);
 });
 
@@ -499,6 +507,22 @@ test('simulateBattle: stronger fokemon usually wins when types neutral', () => {
   assert.ok(strongWins >= 26, `expected dominant winner most of the time, got ${strongWins}/30`);
 });
 
+test('simulateBattle: evenly-matched fights take several hits, never a one-shot', () => {
+  const stats = { hp: 64, atk: 69, def: 59, spd: 67 }; // roster-average Fokemon
+  const a = { card: { type: 'Metal', name: 'A' }, stats: { ...stats } };
+  const d = { card: { type: 'Rock', name: 'D' }, stats: { ...stats } }; // neutral matchup both ways
+  let totalHitsOnLoser = 0;
+  const runs = 40;
+  for (let i = 0; i < runs; i++) {
+    const res = simulateBattle({ attacker: a, defender: d, seed: seedFromStrings(`pace|${i}`) });
+    const loser = res.winner === 'attacker' ? 'defender' : 'attacker';
+    const hits = res.log.filter((e) => e.defender === loser && !e.dodged).length;
+    assert.ok(hits >= 2, `equal Fokemon should not be one-shot, took ${hits} hit(s) in run ${i}`);
+    totalHitsOnLoser += hits;
+  }
+  assert.ok(totalHitsOnLoser / runs >= 3, `expected ~4 hits to KO on average, got ${(totalHitsOnLoser / runs).toFixed(2)}`);
+});
+
 // --- collection sorting + grouping -----------------------------------------
 
 const COLL_CARDS = {
@@ -574,38 +598,86 @@ test('groupCollection handles empty input', () => {
   assert.deepEqual(flattenCollectionGroups([]), []);
 });
 
-test('computeGymRestGain awards one HP per interval', () => {
-  const placedAt = 0;
-  const now = placedAt + GYM_REST_HP_INTERVAL_MS * 3 + 500;
-  const out = computeGymRestGain({ boosts: { hp: 0 }, placedAt, restAccruedAt: 0, now });
-  assert.equal(out.gain, 3);
-  assert.equal(out.nextAccruedAt, placedAt + GYM_REST_HP_INTERVAL_MS * 3);
+test('clampHp floors at 0, caps at maxHp, treats missing as full', () => {
+  assert.equal(clampHp(-5, 100), 0);
+  assert.equal(clampHp(150, 100), 100);
+  assert.equal(clampHp(42, 100), 42);
+  assert.equal(clampHp(undefined, 100), 100, 'missing currentHp reads as full health');
+  assert.equal(clampHp('nonsense', 100), 100);
 });
 
-test('computeGymRestGain returns zero before the first interval elapses', () => {
+test('computeHpRegen heals one slice (fraction of maxHp) per interval', () => {
   const placedAt = 0;
-  const now = GYM_REST_HP_INTERVAL_MS - 1;
-  const out = computeGymRestGain({ boosts: { hp: 0 }, placedAt, restAccruedAt: 0, now });
-  assert.equal(out.gain, 0);
-  assert.equal(out.nextAccruedAt, placedAt);
+  const now = placedAt + HP_REGEN_INTERVAL_MS * 3 + 500;
+  const perSlice = Math.round(100 * HP_REGEN_FRACTION);
+  const out = computeHpRegen({ currentHp: 0, maxHp: 100, accruedAt: 0, placedAt, now });
+  assert.equal(out.heal, perSlice * 3);
+  assert.equal(out.currentHp, perSlice * 3);
+  assert.equal(out.nextAccruedAt, placedAt + HP_REGEN_INTERVAL_MS * 3);
 });
 
-test('computeGymRestGain caps gain at the boost ceiling', () => {
-  const placedAt = 0;
-  const now = GYM_REST_HP_INTERVAL_MS * 100;
-  const out = computeGymRestGain({ boosts: { hp: MAX_TRAINING_BOOST_PER_STAT - 2 }, placedAt, restAccruedAt: 0, now });
-  assert.equal(out.gain, 2);
-  // Time still advances even when capped, so capped tenure doesn't bank slices.
-  assert.equal(out.nextAccruedAt, GYM_REST_HP_INTERVAL_MS * 100);
+test('computeHpRegen heals nothing before the first interval elapses', () => {
+  const out = computeHpRegen({ currentHp: 10, maxHp: 100, accruedAt: 0, placedAt: 0, now: HP_REGEN_INTERVAL_MS - 1 });
+  assert.equal(out.heal, 0);
+  assert.equal(out.currentHp, 10);
+  assert.equal(out.nextAccruedAt, 0);
 });
 
-test('computeGymRestGain resumes from prior restAccruedAt', () => {
-  const placedAt = 0;
-  const restAccruedAt = GYM_REST_HP_INTERVAL_MS * 2;
-  const now = restAccruedAt + GYM_REST_HP_INTERVAL_MS + 5;
-  const out = computeGymRestGain({ boosts: { hp: 5 }, placedAt, restAccruedAt, now });
-  assert.equal(out.gain, 1);
-  assert.equal(out.nextAccruedAt, restAccruedAt + GYM_REST_HP_INTERVAL_MS);
+test('computeHpRegen caps at max HP and advances the clock even when full', () => {
+  const now = HP_REGEN_INTERVAL_MS * 100;
+  const out = computeHpRegen({ currentHp: 96, maxHp: 100, accruedAt: 0, placedAt: 0, now });
+  assert.equal(out.heal, 4, 'only heals up to the missing 4 HP');
+  assert.equal(out.currentHp, 100);
+  assert.equal(out.nextAccruedAt, now, 'time advances when capped so heals are not banked');
+});
+
+test('healAmountPerFood: on-type full, off-type reduced', () => {
+  const onType = healAmountPerFood(100, true);
+  const offType = healAmountPerFood(100, false);
+  assert.equal(onType, Math.round(100 * HEAL_FRACTION_PER_FOOD));
+  assert.equal(offType, Math.round(onType * OFF_TYPE_HEAL_FACTOR));
+  assert.ok(offType < onType, 'wrong-type food should heal less');
+});
+
+test('planFoodHeal: spends only useful food and never overheals', () => {
+  // On-type, plenty of food: tops up to full without spending past the cap.
+  const full = planFoodHeal({ currentHp: 50, maxHp: 100, cardType: 'Fire', foodType: 'Fire', foodAvailable: 99, foodToSpend: 99 });
+  assert.equal(full.currentHp, 100);
+  assert.ok(full.foodSpent < 99, 'should not spend food that would overheal');
+  assert.equal(full.hpHealed, 50);
+
+  // Off-type heals at half rate, so the same wound costs more food.
+  const off = planFoodHeal({ currentHp: 50, maxHp: 100, cardType: 'Fire', foodType: 'Water', foodAvailable: 99, foodToSpend: 99 });
+  assert.ok(off.foodSpent > full.foodSpent, 'off-type should need more food for the same heal');
+
+  // Limited food: heal is bounded by what is on hand.
+  const scarce = planFoodHeal({ currentHp: 50, maxHp: 100, cardType: 'Fire', foodType: 'Fire', foodAvailable: 1, foodToSpend: 99 });
+  assert.equal(scarce.foodSpent, 1);
+  assert.equal(scarce.hpHealed, scarce.perFood);
+});
+
+test('simulateBattle: a side entering wounded loses ground; fainted loses outright', () => {
+  const stats = { hp: 80, atk: 60, def: 50, spd: 50 };
+  const a = { card: { type: 'Metal', name: 'A' }, stats: { ...stats } };
+  const d = { card: { type: 'Rock', name: 'D' }, stats: { ...stats } };
+  // A defender that walks in at 1 HP is finished almost immediately.
+  const wounded = simulateBattle({ attacker: a, defender: { ...d, hp: 1 }, seed: seedFromStrings('wound') });
+  assert.equal(wounded.winner, 'attacker');
+  // A fainted attacker can't fight at all.
+  const fainted = simulateBattle({ attacker: { ...a, hp: 0 }, defender: d, seed: seedFromStrings('faint') });
+  assert.equal(fainted.winner, 'defender');
+  assert.equal(fainted.log.length, 0);
+});
+
+test('migrateCaughtEntries preserves persistent HP fields and omits them when absent', () => {
+  const out = migrateCaughtEntries([
+    { id: 'sparkit', ts: 1, currentHp: 12, hpAt: 5000 },
+    { id: 'mossaur', ts: 2 },
+  ]);
+  assert.equal(out[0].currentHp, 12);
+  assert.equal(out[0].hpAt, 5000);
+  assert.ok(!('currentHp' in out[1]), 'healthy entries stay byte-clean (no currentHp)');
+  assert.ok(!('hpAt' in out[1]));
 });
 
 // --- UberMax raid bosses ----------------------------------------------------
