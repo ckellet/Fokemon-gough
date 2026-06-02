@@ -807,7 +807,12 @@ function makePoiIcon(info) {
     className: "",
     html: `<div class="poi-marker ${state} ${near}"><span class="poi-ball" aria-hidden="true"></span><small>${escapeHtml(info.label)}</small></div>`,
     iconSize: [54, 64],
-    iconAnchor: [27, 64],
+    // Anchor on the *centre of the ball* (≈22px down), not the bottom of the
+    // pin. The ball is what the player reads as "the POI", so aligning it with
+    // the true geo-point keeps it consistent with the catch ring — otherwise
+    // the ball renders ~42px north of its location and POIs near the top of
+    // the ring look out-of-range while in, and vice-versa at the bottom.
+    iconAnchor: [27, 22],
   });
 }
 
@@ -1677,7 +1682,9 @@ function makeSpawnIcon(p) {
       ${meters === null ? "" : `<small class="spawn-dist">${meters}m</small>`}
     </div>`,
     iconSize: [78, 92],
-    iconAnchor: [39, 46],
+    // Anchor on the *centre of the face* (≈30px down), not the icon centre, so
+    // the creature sits on its true geo-point and agrees with the catch ring.
+    iconAnchor: [39, 30],
   });
 }
 
