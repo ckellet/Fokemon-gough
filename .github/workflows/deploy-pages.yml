@@ -49,10 +49,36 @@ jobs:
           echo "Stamped version ${VERSION}"
           grep -n "app-version\|styles.css?v=\|app.js?v=" index.html
 
+      # Stage only the web app into _site. The repo now also carries the
+      # Capacitor native project (ios/), the build script, and mobile-only
+      # files — none of which belong on GitHub Pages. www/ and node_modules/
+      # are gitignored so they won't exist in a fresh CI checkout, but ios/ is
+      # committed, so we explicitly exclude the native/build surface here.
+      - name: Stage web site
+        run: |
+          set -euo pipefail
+          mkdir -p _site
+          rsync -a \
+            --exclude '.git' \
+            --exclude '.github' \
+            --exclude '_site' \
+            --exclude 'ios' \
+            --exclude 'www' \
+            --exclude 'node_modules' \
+            --exclude 'scripts' \
+            --exclude 'capacitor.config.json' \
+            --exclude 'package.json' \
+            --exclude 'package-lock.json' \
+            --exclude 'native-geolocation.js' \
+            --exclude '.gitignore' \
+            --exclude 'MOBILE.md' \
+            ./ _site/
+          echo "Staged web site:"; ls _site
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: '.'
+          path: '_site'
 
       - name: Deploy to GitHub Pages
         id: deployment

@@ -7,6 +7,13 @@
       "runtimeArgs": ["-c", "python3 -m http.server $PORT"],
       "port": 8123,
       "autoPort": true
+    },
+    {
+      "name": "fokego-www",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "python3 -m http.server $PORT --directory www"],
+      "port": 8124,
+      "autoPort": true
     }
   ]
 }

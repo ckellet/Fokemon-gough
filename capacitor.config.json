@@ -1,0 +1,21 @@
+{
+  "appId": "uk.co.kedos.fokego",
+  "appName": "FokéGo",
+  "webDir": "www",
+  "ios": {
+    "contentInset": "never",
+    "backgroundColor": "#13131c"
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 600,
+      "backgroundColor": "#13131c",
+      "showSpinner": false
+    },
+    "Geolocation": {
+      "permissions": {
+        "ios": ["location"]
+      }
+    }
+  }
+}
