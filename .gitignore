@@ -1,0 +1,16 @@
+# Node / Capacitor
+node_modules/
+
+# Generated mobile web bundle (rebuilt by `npm run build:mobile`)
+www/
+
+# iOS native build artifacts (the ios/ project itself IS committed)
+ios/App/Pods/
+ios/App/App/public/
+ios/App/build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# macOS
+.DS_Store
