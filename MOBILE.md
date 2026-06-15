@@ -9,13 +9,13 @@ the native build is an additive layer.
 ```
 index.html, app.js, styles.css, vendor/, audio/   ← the web game (untouched)
         │
-        │  npm run build:mobile   (scripts/build-mobile.mjs)
+        │  pnpm run build:mobile   (scripts/build-mobile.mjs)
         ▼
 www/                                                ← self-contained bundle
         │  • Leaflet + Outfit font served locally (no CDNs)
         │  • native-geolocation.js injected before app.js
         │
-        │  npx cap sync ios
+        │  pnpm exec cap sync ios
         ▼
 ios/  (Xcode project) ──► Archive ──► App Store Connect
 ```
@@ -33,10 +33,12 @@ ios/  (Xcode project) ──► Archive ──► App Store Connect
 
 1. **Apple Developer Program** membership ($99/yr) — https://developer.apple.com/programs/
 2. Xcode (16+; built and tested against Xcode 26.5) and its command-line tools.
-3. `npm install` in the repo root (installs Capacitor + plugins).
+3. `pnpm install` in the repo root (installs Capacitor + plugins). This repo uses
+   **pnpm** with `nodeLinker: hoisted` (`pnpm-workspace.yaml`) — keep that, it's required
+   for Xcode to resolve the Swift packages. See [`CLAUDE.md`](CLAUDE.md).
 4. Decide the **bundle identifier**. It's currently `uk.co.kedos.fokego` in
    [`capacitor.config.json`](capacitor.config.json) — change it if you want a different
-   one, then re-run `npx cap sync ios`. It must match the App ID you register in your
+   one, then re-run `pnpm exec cap sync ios`. It must match the App ID you register in your
    Apple Developer account.
 5. **Enable the Sign in with Apple capability** (required by the auth flow):
    - In the [Apple Developer portal](https://developer.apple.com/account/resources/identifiers/list),
@@ -63,7 +65,7 @@ per-author-signed — that's the planned Phase 2 that fully closes the open data
 
 ## Build & run locally
 
-> **⚠️ Always run `npm run cap:sync` (or `npm run cap:ios`) after every clone, checkout,
+> **⚠️ Always run `pnpm run cap:sync` (or `pnpm run cap:ios`) after every clone, checkout,
 > or `git pull` — before opening or building in Xcode.**
 >
 > Capacitor's own `ios/.gitignore` deliberately excludes two generated files —
@@ -71,27 +73,27 @@ per-author-signed — that's the planned Phase 2 that fully closes the open data
 > in the repo. The Xcode project lists them as required bundle resources, so a fresh
 > checkout opened directly in Xcode fails with *"capacitor.config.json is missing, and
 > config.xml couldn't be found."* `cap sync` regenerates them; that error means sync
-> hasn't been run yet. Using `npm run cap:ios` avoids this entirely — it syncs before
+> hasn't been run yet. Using `pnpm run cap:ios` avoids this entirely — it syncs before
 > opening Xcode.
 
 ```bash
-npm install            # once
-npm run cap:ios        # build:mobile → cap sync ios → open Xcode
+pnpm install            # once
+pnpm run cap:ios        # build:mobile → cap sync ios → open Xcode
 ```
 
 Or step by step:
 
 ```bash
-npm run build:mobile   # assemble www/
-npx cap sync ios       # copy www/ into the iOS project + wire plugins
-npx cap open ios       # open in Xcode
+pnpm run build:mobile   # assemble www/
+pnpm exec cap sync ios       # copy www/ into the iOS project + wire plugins
+pnpm exec cap open ios       # open in Xcode
 ```
 
 In Xcode: pick a Simulator or a connected device and press ▶︎ Run.
 For real GPS + card tilt, test on a **physical device** — the Simulator can only
 fake a static location (Features ▸ Location) and has no motion sensor.
 
-**Re-run `npm run cap:sync` after any change to the web game** so the native bundle
+**Re-run `pnpm run cap:sync` after any change to the web game** so the native bundle
 picks it up.
 
 ## Ship to the App Store
@@ -121,13 +123,13 @@ picks it up.
   discourages heavy app traffic. Fine for launch; move to a proper tile provider
   (e.g. MapTiler, Stadia, Thunderforest) if usage grows.
 - **Updates.** Bundled content means web changes reach users only via an App Store
-  resubmission (`npm run cap:sync` → Archive → upload). If you later want
+  resubmission (`pnpm run cap:sync` → Archive → upload). If you later want
   push-without-resubmission, add a Capacitor live-update solution
   (e.g. `@capgo/capacitor-updater`) — Apple permits JS/asset OTA updates that don't
   change the app's purpose.
 
 ## Android (later)
 
-The same `www/` bundle works for Android: `npm i @capacitor/android`,
-`npx cap add android`, mirror the geolocation permission, and the geolocation shim +
+The same `www/` bundle works for Android: `pnpm add @capacitor/android`,
+`pnpm exec cap add android`, mirror the geolocation permission, and the geolocation shim +
 local assets already work unchanged.

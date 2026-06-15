@@ -65,7 +65,7 @@ checked-in files have no `?v=` — that is added at deploy time by design.
 
 ## iOS / App Store build
 The web game can be shipped to the App Store as a native app via Capacitor — see
-[`MOBILE.md`](MOBILE.md). In short: `npm install` then `npm run cap:ios`. The web
+[`MOBILE.md`](MOBILE.md). In short: `pnpm install` then `pnpm run cap:ios`. The web
 deploy above is unaffected; the native shell is an additive layer that bundles the
 game (Leaflet + fonts served locally) and bridges geolocation to CoreLocation.
 
