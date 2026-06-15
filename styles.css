@@ -24,7 +24,30 @@ body {
 .bg-orb { position: fixed; border-radius: 50%; filter: blur(60px); opacity: .35; z-index: -1; }
 .orb-1 { width: 260px; height: 260px; background: #60f7d4; top: 6%; left: 8%; }
 .orb-2 { width: 300px; height: 300px; background: #b57cff; bottom: 8%; right: 10%; }
-.app-shell { padding: 2rem; max-width: 1100px; margin: 0 auto; }
+.app-shell {
+  --shell-pad: 2rem;
+  max-width: 1100px;
+  margin: 0 auto;
+  min-height: 100dvh;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  /* Keep in-flow content (the auth card) clear of the notch / Dynamic Island
+     and the home indicator in the native app. max() composes the responsive
+     --shell-pad with the safe-area insets, so the media-query overrides below
+     (which only change --shell-pad) never drop below the inset. On the web the
+     insets are 0, so this is just --shell-pad. */
+  padding:
+    max(var(--shell-pad), env(safe-area-inset-top))
+    max(var(--shell-pad), env(safe-area-inset-right))
+    max(var(--shell-pad), env(safe-area-inset-bottom))
+    max(var(--shell-pad), env(safe-area-inset-left));
+}
+/* The auth card is the only in-flow shell child — centre it. Auto margins
+   collapse to 0 when it's taller than the viewport, so the top never clips
+   (the page scrolls instead of hiding the heading above the screen edge). */
+.app-shell > .card { width: min(440px, 100%); margin: auto; }
 .card { backdrop-filter: blur(16px); border: 1px solid var(--line); border-radius: 24px; background: var(--card); padding: 2rem; box-shadow: 0 20px 70px rgba(0,0,0,.35); }
 .hidden { display: none; }
 .eyebrow { text-transform: uppercase; letter-spacing: .12em; color: var(--muted); font-size: .72rem; margin-bottom: .3rem; }
@@ -1030,17 +1053,27 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
 .status .success { color: #8afdd8; font-weight: 700; text-transform: uppercase; }
 .status .fail { color: #ff8ca6; font-weight: 700; text-transform: uppercase; }
 .modal {
+  --modal-pad: 1.5rem;
   position: fixed;
   inset: 0;
   background: rgba(4, 9, 20, 0.78);
   backdrop-filter: blur(10px);
-  display: grid;
-  place-items: center;
+  /* Flex + auto-margin centring (not grid place-items) so a tall card scrolls
+     instead of clipping its top, and respect the safe-area insets in the
+     native app. */
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
   z-index: 20;
-  padding: 1.5rem;
+  padding:
+    max(var(--modal-pad), env(safe-area-inset-top))
+    max(var(--modal-pad), env(safe-area-inset-right))
+    max(var(--modal-pad), env(safe-area-inset-bottom))
+    max(var(--modal-pad), env(safe-area-inset-left));
 }
 .modal.hidden { display: none; }
 .modal-card {
+  margin: auto;
   width: min(440px, 100%);
   border: 1px solid var(--line);
   border-radius: 20px;
@@ -1521,12 +1554,12 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
 }
 
 @media (max-width: 1024px) {
-  .app-shell { padding: 1.25rem; }
+  .app-shell { --shell-pad: 1.25rem; }
   .card { padding: 1.5rem; }
 }
 
 @media (max-width: 850px) {
-  .app-shell { padding: 1rem; }
+  .app-shell { --shell-pad: 1rem; }
   .card { padding: 1.1rem; border-radius: 20px; }
 }
 
@@ -1539,7 +1572,7 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
 
 @media (max-width: 640px) {
   .bg-orb { display: none; }
-  .app-shell { padding: .55rem; }
+  .app-shell { --shell-pad: .55rem; }
   .card {
     padding: .85rem;
     border-radius: 18px;
@@ -1557,12 +1590,12 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
     grid-template-columns: repeat(auto-fill, minmax(135px, 1fr));
     gap: .65rem;
   }
-  .modal { padding: 1rem; }
+  .modal { --modal-pad: 1rem; }
   .modal-card { padding: 1.25rem; }
 }
 
 @media (max-width: 380px) {
-  .app-shell { padding: .4rem; }
+  .app-shell { --shell-pad: .4rem; }
   .card { padding: .7rem; border-radius: 16px; }
   .collection,
   .cards { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
@@ -2706,7 +2739,11 @@ button.ghost { background: transparent; border: 1px solid var(--line); color: va
   align-items: center;
   justify-content: center;
   gap: 2rem;
-  padding: 2rem;
+  padding:
+    max(2rem, env(safe-area-inset-top))
+    max(2rem, env(safe-area-inset-right))
+    max(2rem, env(safe-area-inset-bottom))
+    max(2rem, env(safe-area-inset-left));
   background:
     radial-gradient(circle at 18% 22%, rgba(124, 240, 198, .25), transparent 55%),
     radial-gradient(circle at 82% 78%, rgba(181, 124, 255, .28), transparent 60%),
