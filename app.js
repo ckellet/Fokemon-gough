@@ -463,6 +463,7 @@ const el = {
   form: $("signupForm"),
   name: $("trainerName"),
   team: $("teamColor"),
+  appleSignin: $("appleSignin"),
   welcome: $("welcome"),
   cardsList: $("cardsList"),
   nearbyMap: $("nearbyMap"),
@@ -9453,6 +9454,7 @@ function initGun() {
   if (typeof window === "undefined" || typeof window.Gun !== "function") return;
   try {
     const gun = window.Gun({ peers: GUN_PEERS, localStorage: true });
+    gunDb = gun;
     const root = gun.get(FOKEMON_NS);
     eventsNode = root.get("events");
     gridCaughtNode = root.get("caughtByGrid");
@@ -9467,9 +9469,86 @@ function initGun() {
     subscribeRaidUpdates();
     subscribeTrades();
     subscribePresence();
+    tryAuthGun();
   } catch {
     eventsNode = FALLBACK_EVENTS_NODE;
   }
+}
+
+// ---------- Player identity (Sign in with Apple → SEA pair) ---------------
+// Identity is owned by identity.js (window.FokeIdentity): a GUN/SEA key pair
+// whose `pub` is the authoritative, unspoofable player id. Here we authenticate
+// the GUN user with that pair so the player's own records are signed, and gate
+// the auth screen on native behind Sign in with Apple.
+let gunDb = null;
+let authedPub = null;
+
+function tryAuthGun() {
+  const pair = window.FokeIdentity && window.FokeIdentity.pair;
+  if (!gunDb || !pair || authedPub === pair.pub) return;
+  try {
+    gunDb.user().auth(pair, (ack) => {
+      if (ack && ack.err) return;
+      authedPub = pair.pub;
+      publishProfile();
+    });
+  } catch {}
+}
+
+// The player's own authoritative profile, signed under their GUN user-space
+// (readable by all via the pub, forgeable by none).
+function publishProfile() {
+  if (!gunDb || !authedPub || !profile?.name) return;
+  try {
+    gunDb.user().get("profile").put({
+      name: profile.name,
+      team: profile.team || "mint",
+      pub: authedPub,
+      ts: Date.now(),
+    });
+  } catch {}
+}
+
+// Restore identity on boot. Web: load-or-create a local SEA pair (always
+// resolves to an identity). Native: resolves to the stored pair for a returning
+// player, or null on first run (the Sign in with Apple gate handles that).
+const identityReady = (async () => {
+  if (!window.FokeIdentity) return null;
+  let id = null;
+  try { id = await window.FokeIdentity.restore(); } catch {}
+  if (id) {
+    profile = { ...(profile || {}), pub: id.pub };
+    if (profile.name) saveLocal();
+    tryAuthGun();
+  }
+  return id;
+})();
+
+function showSignupForm() {
+  if (el.appleSignin) el.appleSignin.classList.add("hidden");
+  if (el.form) el.form.classList.remove("hidden");
+  if (el.name && profile?.name) el.name.value = profile.name;
+}
+
+function showAppleGate() {
+  if (el.form) el.form.classList.add("hidden");
+  if (el.appleSignin) el.appleSignin.classList.remove("hidden");
+}
+
+// Decide what the auth card shows once the splash is gone. We settle the auth
+// state BEFORE revealing the card so there's no form→gate flash on native.
+async function revealAuthOrEnter() {
+  await identityReady;
+  const id = window.FokeIdentity ? window.FokeIdentity.current : null;
+  if (window.FokeIdentity?.isNative && !id) {
+    showAppleGate();              // first run on this device → require Apple
+  } else if (profile?.name) {
+    enterGame();                  // returning player → straight in
+    return;
+  } else {
+    showSignupForm();             // web first-time, or native right after sign-in
+  }
+  if (el.auth) el.auth.classList.remove("hidden");
 }
 
 // ---- App-shell navigation ----------------------------------------------
@@ -9657,9 +9736,31 @@ if (el.form) {
     e.preventDefault();
     const name = el.name.value.trim();
     if (!name) return;
-    profile = { name, team: el.team.value };
+    // Preserve the SEA `pub` set during identity restore — the name/team are
+    // just the display label, not the identity.
+    profile = { ...(profile || {}), name, team: el.team.value };
     saveLocal();
+    publishProfile();
     enterGame();
+  });
+}
+
+// Native-only: Sign in with Apple establishes the identity, then we collect a
+// display name/team via the existing form.
+if (el.appleSignin) {
+  el.appleSignin.addEventListener("click", async () => {
+    el.appleSignin.disabled = true;
+    try {
+      const id = await window.FokeIdentity.signInWithApple();
+      profile = { ...(profile || {}), pub: id.pub };
+      tryAuthGun();
+      showSignupForm();
+    } catch (err) {
+      // Cancelled or failed — stay on the gate so the player can retry.
+      console.warn("[identity] Sign in with Apple failed/cancelled", err);
+    } finally {
+      el.appleSignin.disabled = false;
+    }
   });
 }
 
@@ -9673,11 +9774,12 @@ function confirmSwitchTrainer() {
     <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="logoutConfirmTitle">
       <p class="eyebrow">Switch trainer</p>
       <h2 id="logoutConfirmTitle">Log out of ${who}?</h2>
-      <p>This signs out on this device and returns to the trainer setup screen. Your caught Fokemon and gym champions stay safe on the network — you can sign back in with the same name to pick up where you left off.</p>
+      <p>This returns to the trainer setup screen. Your trainer identity stays on this device, so you keep your caught Fokemon and gym champions — just sign back in to pick up where you left off.</p>
       <div class="debug-actions">
         <button type="button" class="ghost lo-cancel">Stay logged in</button>
         <button type="button" class="lo-confirm">Log out</button>
       </div>
+      <button type="button" class="ghost lo-forget" style="margin-top:.6rem;font-size:.82rem;opacity:.8">Forget identity on this device</button>
     </div>
   `;
   document.body.appendChild(overlay);
@@ -9689,7 +9791,19 @@ function confirmSwitchTrainer() {
   document.addEventListener("keydown", onKey);
   overlay.addEventListener("click", (ev) => { if (ev.target === overlay) close(); });
   overlay.querySelector(".lo-cancel").addEventListener("click", close);
-  overlay.querySelector(".lo-confirm").addEventListener("click", () => {
+  // Log out: drop the local profile but KEEP the SEA identity (Keychain /
+  // localStorage pair), so signing back in returns to the same `pub`.
+  overlay.querySelector(".lo-confirm").addEventListener("click", async () => {
+    try { gunDb?.user()?.leave?.(); } catch {}
+    try { await window.FokeIdentity?.signOut?.({ forget: false }); } catch {}
+    try { localStorage.removeItem("fokemon_profile"); } catch {}
+    location.reload();
+  });
+  // Forget identity: also wipe the device-local pair, so the next sign-in mints
+  // a brand-new identity (and on native re-prompts Sign in with Apple).
+  overlay.querySelector(".lo-forget").addEventListener("click", async () => {
+    try { gunDb?.user()?.leave?.(); } catch {}
+    try { await window.FokeIdentity?.signOut?.({ forget: true }); } catch {}
     try { localStorage.removeItem("fokemon_profile"); } catch {}
     location.reload();
   });
@@ -9830,8 +9944,7 @@ function dismissSplash() {
   splash.classList.add("is-leaving");
   setTimeout(() => {
     splash.remove();
-    if (el.auth) el.auth.classList.remove("hidden");
-    if (profile?.name) enterGame();
+    revealAuthOrEnter();
   }, 560);
 }
 if (el.splashStart) el.splashStart.addEventListener("click", dismissSplash);
@@ -9854,8 +9967,7 @@ initAppShell();
 // If no splash element exists (e.g. older cached markup), fall back to the
 // original auto-enter behaviour so trainers aren't stuck on a blank screen.
 if (!el.splash) {
-  if (el.auth) el.auth.classList.remove("hidden");
-  if (profile?.name) enterGame();
+  revealAuthOrEnter();
 }
 
 if (typeof setInterval === "function") {
