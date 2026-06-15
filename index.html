@@ -73,6 +73,13 @@
           <p>Create a quick trainer profile and instantly sync with everyone online.</p>
         </div>
 
+        <!-- Native-only: Sign in with Apple establishes the player's identity.
+             Hidden by default; app.js reveals it on the native app's first run. -->
+        <button type="button" id="appleSignin" class="apple-signin-btn hidden">
+          <span class="apple-logo" aria-hidden="true"></span>
+          Sign in with Apple
+        </button>
+
         <form id="signupForm" class="auth-form">
           <label>
             Trainer name
@@ -255,6 +262,7 @@
       </div>
     </div>
 
+    <script src="identity.js"></script>
     <script type="module" src="app.js"></script>
     <script type="module" src="version-check.js"></script>
   </body>

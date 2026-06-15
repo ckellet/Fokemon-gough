@@ -38,6 +38,28 @@ ios/  (Xcode project) ──► Archive ──► App Store Connect
    [`capacitor.config.json`](capacitor.config.json) — change it if you want a different
    one, then re-run `npx cap sync ios`. It must match the App ID you register in your
    Apple Developer account.
+5. **Enable the Sign in with Apple capability** (required by the auth flow):
+   - In the [Apple Developer portal](https://developer.apple.com/account/resources/identifiers/list),
+     edit your App ID and tick **Sign In with Apple**.
+   - In Xcode → the `App` target → **Signing & Capabilities** → **+ Capability** →
+     **Sign In with Apple**.
+   The native sign-in sheet only runs on a real device / signed build (not the bare
+   Simulator without an Apple ID signed in).
+
+## Authentication & identity
+
+Each player's identity is a **GUN/SEA key pair**; its `pub` key is the authoritative,
+unspoofable id (the trainer name is just a display label). See [`identity.js`](identity.js).
+
+- **Native:** entry is gated by **Sign in with Apple**; the SEA pair is stored in the
+  **iOS Keychain** (`capacitor-secure-storage-plugin`) and restored silently on relaunch.
+  "Switch trainer" keeps the identity; "Forget identity on this device" wipes the pair.
+- **Web:** keeps the trainer-name form, with an anonymous SEA pair in `localStorage` so
+  the data model matches native (web stays un-gated by design).
+
+**Phase 1 limits:** identity is device-local (no cross-device restore yet — that needs
+iCloud Keychain or a backend). World writes (catches, feed, gyms) are not yet
+per-author-signed — that's the planned Phase 2 that fully closes the open data model.
 
 ## Build & run locally
 

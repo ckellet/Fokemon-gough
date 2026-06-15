@@ -27,7 +27,7 @@ rmSync(www, { recursive: true, force: true });
 mkdirSync(www, { recursive: true });
 
 // 2. Copy runtime files + asset dirs verbatim.
-const files = ["app.js", "app.logic.js", "styles.css", "version.json", "native-geolocation.js"];
+const files = ["app.js", "app.logic.js", "styles.css", "version.json", "native-geolocation.js", "identity.js"];
 const dirs = ["vendor", "audio"];
 
 for (const f of files) {
