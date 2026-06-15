@@ -41,6 +41,17 @@ ios/  (Xcode project) ──► Archive ──► App Store Connect
 
 ## Build & run locally
 
+> **⚠️ Always run `npm run cap:sync` (or `npm run cap:ios`) after every clone, checkout,
+> or `git pull` — before opening or building in Xcode.**
+>
+> Capacitor's own `ios/.gitignore` deliberately excludes two generated files —
+> `ios/App/App/capacitor.config.json` and `ios/App/App/config.xml` — so they are **not**
+> in the repo. The Xcode project lists them as required bundle resources, so a fresh
+> checkout opened directly in Xcode fails with *"capacitor.config.json is missing, and
+> config.xml couldn't be found."* `cap sync` regenerates them; that error means sync
+> hasn't been run yet. Using `npm run cap:ios` avoids this entirely — it syncs before
+> opening Xcode.
+
 ```bash
 npm install            # once
 npm run cap:ios        # build:mobile → cap sync ios → open Xcode
