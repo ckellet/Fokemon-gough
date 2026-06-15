@@ -1,0 +1,5 @@
+# Flat node_modules (real folders, like npm) instead of pnpm's default .pnpm
+# symlink store. REQUIRED for the Capacitor iOS build: cap sync bakes
+# node_modules paths into ios/App/CapApp-SPM/Package.swift, and Xcode's Swift
+# Package Manager can't resolve pnpm's symlinked .pnpm paths. See CLAUDE.md.
+nodeLinker: hoisted

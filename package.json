@@ -5,17 +5,17 @@
   "scripts": {
     "test": "node --test",
     "build:mobile": "node scripts/build-mobile.mjs",
-    "cap:sync": "npm run build:mobile && cap sync ios",
-    "cap:ios": "npm run build:mobile && cap sync ios && cap open ios"
+    "cap:sync": "node scripts/build-mobile.mjs && cap sync ios",
+    "cap:ios": "node scripts/build-mobile.mjs && cap sync ios && cap open ios"
   },
   "dependencies": {
-    "@capacitor-community/apple-sign-in": "^7.1.0",
     "@capacitor/app": "^8.1.0",
     "@capacitor/core": "^8.4.0",
     "@capacitor/geolocation": "^8.2.0",
     "@capacitor/ios": "^8.4.0",
     "@capacitor/splash-screen": "^8.0.1",
     "@capacitor/status-bar": "^8.0.2",
+    "@capgo/capacitor-social-login": "^8.3.22",
     "capacitor-secure-storage-plugin": "^0.13.0"
   },
   "devDependencies": {

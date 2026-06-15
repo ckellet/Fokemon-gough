@@ -127,13 +127,20 @@
   }
 
   // Native entry: run the Sign in with Apple flow, then load-or-create the pair.
+  // Uses @capgo/capacitor-social-login (Capacitor 8 compatible). Its plugin is
+  // registered as `SocialLogin`; Apple sign-in goes through initialize() + login().
+  let socialInited = false;
   async function signInWithApple() {
-    const siwa = plugin("SignInWithApple");
-    if (!siwa) throw new Error("[identity] Sign in with Apple is unavailable on this platform");
-    const result = await siwa.authorize({
-      requestedScopes: [], // identity only; we don't need name/email for gameplay
-    });
-    const appleUser = result && result.response && result.response.user;
+    const sl = plugin("SocialLogin");
+    if (!sl) throw new Error("[identity] Sign in with Apple is unavailable on this platform");
+    if (!socialInited) {
+      // On iOS the native Sign in with Apple capability supplies the client id,
+      // so an empty apple config is enough.
+      await sl.initialize({ apple: {} });
+      socialInited = true;
+    }
+    const res = await sl.login({ provider: "apple", options: { scopes: [] } }); // identity only
+    const appleUser = res && res.result && res.result.profile && res.result.profile.user;
     if (!appleUser) throw new Error("[identity] Sign in with Apple returned no user id");
     await storeSet(APPLE_KEY, appleUser);
     const pair = (await loadStoredPair()) || (await createAndStorePair());
